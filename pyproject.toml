@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "githost-mcp"
+version = "0.1.0"
+description = "Unified local + multi-provider git MCP server with per-agent audit trail"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=3.2.0",
+    "gitpython>=3.1",
+    "pygithub>=2.0",
+    "python-gitlab>=4.0",
+    "httpx>=0.27",
+    "structlog>=24.0",
+]
+
+[project.optional-dependencies]
+otel = [
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
+]
+loki = [
+    "httpx>=0.27",
+]
+prometheus = [
+    "prometheus-client>=0.20",
+]
+nats = [
+    "nats-py>=2.7",
+]
+observability = [
+    "githost-mcp[otel,loki,prometheus,nats]",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "twine>=5.0",
+]
+
+[project.scripts]
+githost-mcp = "githost_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,7 @@
+title = "githost-mcp gitleaks config"
+
+[allowlist]
+description = "Test fixtures use fake tokens that match credential patterns"
+paths = [
+    "tests/",
+]
