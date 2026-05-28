@@ -10,6 +10,7 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
+from ..security import validate_write_path
 
 log = structlog.get_logger(__name__)
 
@@ -36,6 +37,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("pypi_publish", "registry", repo_path, {"repo_path": repo_path, "target": target})
         try:
+            validate_write_path(repo_path)
             config = get_config()
             if target == "pypi":
                 token = config.pypi_token
@@ -115,6 +117,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("npm_publish", "registry", repo_path, {"repo_path": repo_path, "registry": registry})
         try:
+            validate_write_path(repo_path)
             config = get_config()
             if not config.npm_token:
                 raise ValueError("NPM_TOKEN is not set")

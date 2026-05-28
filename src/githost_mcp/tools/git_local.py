@@ -292,6 +292,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_pull", "local", repo_path, {"repo_path": repo_path, "remote": remote})
         try:
+            validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             pull_info = repo.remotes[remote].pull()
             ac.finish("ok")

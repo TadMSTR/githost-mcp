@@ -106,14 +106,13 @@ def register(mcp) -> None:
         # Step 2: GitHub release
         if "github" in effective_targets and github_repo:
             try:
-                from ..tools.github import _create_release_direct
                 url = await _create_release_sync(github_repo, tag, notes)
                 urls["github"] = url
                 created.append("github")
                 emit_release_target("github", "ok")
             except Exception as e:
                 emit_release_target("github", "error")
-                _rollback(repo, tag, created, urls)
+                _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
                 ac.finish("error:github")
                 return {"error": f"GitHub release failed: {e}", "rolled_back": True}
 
@@ -131,7 +130,7 @@ def register(mcp) -> None:
                 emit_release_target("gitea", "ok")
             except Exception as e:
                 emit_release_target("gitea", "error")
-                _rollback(repo, tag, created, urls)
+                _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
                 ac.finish("error:gitea")
                 return {"error": f"Gitea release failed: {e}", "rolled_back": True}
 
@@ -150,7 +149,7 @@ def register(mcp) -> None:
                 emit_release_target("gitlab", "ok")
             except Exception as e:
                 emit_release_target("gitlab", "error")
-                _rollback(repo, tag, created, urls)
+                _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
                 ac.finish("error:gitlab")
                 return {"error": f"GitLab release failed: {e}", "rolled_back": True}
 
@@ -204,16 +203,54 @@ def register(mcp) -> None:
         }
 
 
-def _rollback(repo, tag: str, created: list, urls: dict) -> None:
-    log.warning("release_rollback", tag=tag, created=created)
-    try:
-        repo.delete_tag(tag)
-    except Exception:
-        pass
-    try:
-        repo.remotes["origin"].push(f":refs/tags/{tag}")
-    except Exception:
-        pass
+def _rollback(
+    repo,
+    tag: str,
+    created: list,
+    urls: dict,
+    github_repo: str | None = None,
+    gitea_repo: str | None = None,
+    gitlab_project: str | None = None,
+) -> None:
+    log.warning("release_rollback", tag=tag, created=created, orphan_urls=urls)
+
+    # Attempt to delete provider releases in reverse creation order
+    if "github" in created and github_repo:
+        try:
+            from .._providers.github_client import get_github, github_call
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, github_repo)
+            rel = github_call(gh_repo.get_release, tag)
+            github_call(rel.delete_release)
+            log.info("rollback_deleted_github_release", tag=tag)
+        except Exception as exc:
+            log.warning("rollback_github_release_failed", tag=tag, url=urls.get("github"), error=str(exc))
+
+    if "gitlab" in created and gitlab_project:
+        try:
+            from .._providers.gitlab_client import get_gitlab, gitlab_call
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, gitlab_project)
+            gitlab_call(proj.releases.delete, tag)
+            log.info("rollback_deleted_gitlab_release", tag=tag)
+        except Exception as exc:
+            log.warning("rollback_gitlab_release_failed", tag=tag, url=urls.get("gitlab"), error=str(exc))
+
+    if "gitea" in created:
+        # No delete client implemented — log orphan for manual cleanup
+        log.warning("rollback_gitea_orphan", tag=tag, url=urls.get("gitea"),
+                    note="Gitea release delete not implemented; manual cleanup required")
+
+    # Delete local and remote git tag
+    if "git_tag" in created:
+        try:
+            repo.delete_tag(tag)
+        except Exception:
+            pass
+        try:
+            repo.remotes["origin"].push(f":refs/tags/{tag}")
+        except Exception:
+            pass
 
 
 async def _create_release_sync(github_repo: str, tag: str, notes: str | None) -> str:
