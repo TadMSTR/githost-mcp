@@ -11,6 +11,8 @@ build/
 *.jsonl
 .env
 .env.local
+*.env
+core.*
 .pytest_cache/
 .coverage
 htmlcov/
