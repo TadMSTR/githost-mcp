@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "githost-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Unified local + multi-provider git MCP server with per-agent audit trail"
 readme = "README.md"
 requires-python = ">=3.11"
