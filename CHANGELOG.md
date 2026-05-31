@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.0] — 2026-05-31
+
+### Added
+- `woodpecker_list_pipelines` — list recent pipeline runs with optional status filter; limit capped at 100
+- `woodpecker_get_logs` — fetch step output by name or first step; truncated at 500 lines; log content excluded from audit trail
+- `woodpecker_pipeline_cancel` — cancel a running pipeline; HITL gated in scoped-mcp manifests
+- `gitea_pr_create` — open a pull request from a feature branch
+- `gitea_pr_get` — get PR details including mergeable status and labels
+- `gitea_pr_comment` — post a comment on a PR (via Gitea issues endpoint)
+- `gitea_pr_merge` — merge a PR with style (merge/squash/rebase); HITL gated; validates merge_style enum
+- `gitea_post_void` internal helper for 204 No Content responses (Gitea merge endpoint)
+- `.woodpecker.yml` CI pipeline: test + pip-audit steps
+
+### Security
+- `repo` arg now validated against `^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$` in all 9 Woodpecker/Gitea tools (IV-01)
+- `limit` param capped at 100 in all list tools to prevent unbounded memory allocation (I-03)
+- `step_id` cast to `int()` before URL construction in `woodpecker_get_logs` (I-04)
+- `gitea_pr_merge` and `woodpecker_pipeline_cancel` HITL gated in sysadmin and developer scoped-mcp manifests
+- Research agent manifest denylists both destructive tools
+
 ## [0.1.0] — 2026-05-27
 
 ### Added
