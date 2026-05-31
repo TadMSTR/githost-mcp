@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 import structlog
+
+_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 
 from .._providers.gitea_client import gitea_get, gitea_post, gitea_post_void
 from ..audit import AuditCtx
@@ -168,8 +171,8 @@ def register(mcp) -> None:
             body: PR description (optional).
             draft: Create as draft PR (default False).
         """
-        if "/" not in repo:
-            return {"error": "repo must be in 'owner/repo' format"}
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -196,8 +199,8 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             pr_number: Pull request number.
         """
-        if "/" not in repo:
-            return {"error": "repo must be in 'owner/repo' format"}
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -230,8 +233,8 @@ def register(mcp) -> None:
             pr_number: Pull request number.
             body: Comment text (markdown supported).
         """
-        if "/" not in repo:
-            return {"error": "repo must be in 'owner/repo' format"}
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -270,8 +273,8 @@ def register(mcp) -> None:
             merge_style: One of 'merge', 'squash', or 'rebase' (default: merge).
             message: Optional merge commit message title.
         """
-        if "/" not in repo:
-            return {"error": "repo must be in 'owner/repo' format"}
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         valid_styles = {"merge", "squash", "rebase"}
         if merge_style not in valid_styles:
             return {"error": f"merge_style must be one of: {', '.join(sorted(valid_styles))}"}

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 import httpx
 import structlog
+
+_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 
 from ..audit import AuditCtx
 from ..config import get_config
@@ -81,8 +84,8 @@ def register(mcp) -> None:
             limit: Max pipelines to return (default 10).
             status: Optional filter by status (e.g. pending/running/success/failure/error).
         """
-        if "/" not in repo:
-            return {"error": "repo must be in 'owner/repo' format"}
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         ac = AuditCtx(
             "woodpecker_list_pipelines", "woodpecker", repo,
             {"repo": repo, "limit": limit, "status": status},
@@ -134,8 +137,8 @@ def register(mcp) -> None:
             pipeline_id: Pipeline ID to fetch logs from.
             step_name: Step name to fetch (default: first step).
         """
-        if "/" not in repo:
-            return {"error": "repo must be in 'owner/repo' format"}
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         # NOTE: Only metadata is logged here — step output may contain secrets from
         # pipeline environment variables and must not appear in the audit trail.
         ac = AuditCtx(
@@ -205,8 +208,8 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             pipeline_id: Pipeline ID to cancel.
         """
-        if "/" not in repo:
-            return {"error": "repo must be in 'owner/repo' format"}
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         ac = AuditCtx(
             "woodpecker_pipeline_cancel", "woodpecker", repo,
             {"repo": repo, "pipeline_id": pipeline_id},
