@@ -1,0 +1,16 @@
+when:
+  - event: [push, pull_request]
+
+steps:
+  - name: test
+    image: python:3.13-slim
+    commands:
+      - pip install -e ".[dev]" -q
+      - pytest tests/ -v
+
+  - name: pip-audit
+    image: python:3.13-slim
+    commands:
+      - pip install pip-audit -q
+      - pip install -e "." -q
+      - pip-audit
