@@ -48,6 +48,8 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             branch: Branch to trigger (default: repo default branch).
         """
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         ac = AuditCtx("woodpecker_trigger", "woodpecker", repo, {"repo": repo, "branch": branch})
         try:
             params = {}
@@ -81,11 +83,12 @@ def register(mcp) -> None:
 
         Args:
             repo: Repository in 'owner/repo' format.
-            limit: Max pipelines to return (default 10).
+            limit: Max pipelines to return (default 10, max 100).
             status: Optional filter by status (e.g. pending/running/success/failure/error).
         """
         if not _REPO_RE.match(repo):
             return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+        limit = min(limit, 100)
         ac = AuditCtx(
             "woodpecker_list_pipelines", "woodpecker", repo,
             {"repo": repo, "limit": limit, "status": status},
@@ -165,7 +168,7 @@ def register(mcp) -> None:
                 else:
                     step = steps[0]
 
-                step_id = step.get("id")
+                step_id = int(step.get("id"))
                 step_label = step.get("name", str(step_id))
 
                 log_resp = await client.get(
@@ -238,6 +241,8 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             pipeline_id: Pipeline ID or number from woodpecker_trigger.
         """
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         ac = AuditCtx("woodpecker_status", "woodpecker", repo, {"repo": repo, "pipeline_id": pipeline_id})
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:

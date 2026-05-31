@@ -55,7 +55,12 @@ async def gitea_post(path: str, data: dict) -> Any:
 
 
 async def gitea_post_void(path: str, data: dict) -> None:
-    """POST to Gitea API and discard response body (for 204 No Content endpoints)."""
+    """POST to Gitea API and discard response body (for 204 No Content endpoints).
+
+    Accepts any 2xx status code as success — not strictly 204. If the Gitea API
+    returns 200/202 (e.g. async merge queued), the response body is silently discarded.
+    Callers cannot distinguish 200 vs 204. Revisit if Gitea merge semantics change.
+    """
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(

@@ -36,6 +36,8 @@ def register(mcp) -> None:
             draft: Create as draft (default False).
             prerelease: Mark as pre-release (default False).
         """
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -63,6 +65,8 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             tag: Tag name.
         """
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -92,8 +96,11 @@ def register(mcp) -> None:
 
         Args:
             repo: Repository in 'owner/repo' format.
-            limit: Max releases to return (default 10).
+            limit: Max releases to return (default 10, max 100).
         """
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+        limit = min(limit, 100)
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -125,8 +132,11 @@ def register(mcp) -> None:
         Args:
             repo: Repository in 'owner/repo' format.
             state: 'open', 'closed', or 'all' (default: open).
-            limit: Max PRs to return (default 20).
+            limit: Max PRs to return (default 20, max 100).
         """
+        if not _REPO_RE.match(repo):
+            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+        limit = min(limit, 100)
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
