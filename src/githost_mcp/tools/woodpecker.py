@@ -39,6 +39,24 @@ def _check_response(resp: httpx.Response) -> None:
         raise ValueError(f"Woodpecker API error {resp.status_code}")
 
 
+async def _woodpecker_repo_id(
+    client: httpx.AsyncClient,
+    base: str,
+    headers: dict[str, str],
+    owner: str,
+    name: str,
+) -> int:
+    """Resolve owner/name to a numeric repo ID via the Woodpecker 3.x lookup endpoint."""
+    resp = await client.get(
+        f"{base}/repos/lookup/{owner}/{name}",
+        headers=headers,
+    )
+    if resp.status_code == 404:
+        raise ValueError(f"Repository '{owner}/{name}' not found in Woodpecker (not registered?)")
+    _check_response(resp)
+    return int(resp.json()["id"])
+
+
 def register(mcp) -> None:
     @mcp.tool
     async def woodpecker_trigger(repo: str, branch: Optional[str] = None) -> dict:
@@ -52,13 +70,17 @@ def register(mcp) -> None:
             return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         ac = AuditCtx("woodpecker_trigger", "woodpecker", repo, {"repo": repo, "branch": branch})
         try:
+            owner, name = repo.split("/", 1)
             params = {}
             if branch:
                 params["branch"] = branch
+            base = _woodpecker_base()
+            headers = _woodpecker_headers()
             async with httpx.AsyncClient(timeout=15.0) as client:
+                repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 resp = await client.post(
-                    f"{_woodpecker_base()}/repos/{repo}/pipelines",
-                    headers=_woodpecker_headers(),
+                    f"{base}/repos/{repo_id}/pipelines",
+                    headers=headers,
                     params=params,
                 )
                 _check_response(resp)
@@ -94,10 +116,14 @@ def register(mcp) -> None:
             {"repo": repo, "limit": limit, "status": status},
         )
         try:
+            owner, name = repo.split("/", 1)
+            base = _woodpecker_base()
+            headers = _woodpecker_headers()
             async with httpx.AsyncClient(timeout=15.0) as client:
+                repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 resp = await client.get(
-                    f"{_woodpecker_base()}/repos/{repo}/pipelines",
-                    headers=_woodpecker_headers(),
+                    f"{base}/repos/{repo_id}/pipelines",
+                    headers=headers,
                     params={"page": 1, "limit": limit},
                 )
                 _check_response(resp)
@@ -149,10 +175,14 @@ def register(mcp) -> None:
             {"repo": repo, "pipeline_id": pipeline_id, "step_name": step_name},
         )
         try:
+            owner, name = repo.split("/", 1)
+            base = _woodpecker_base()
+            headers = _woodpecker_headers()
             async with httpx.AsyncClient(timeout=30.0) as client:
+                repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 steps_resp = await client.get(
-                    f"{_woodpecker_base()}/repos/{repo}/pipelines/{pipeline_id}/steps",
-                    headers=_woodpecker_headers(),
+                    f"{base}/repos/{repo_id}/pipelines/{pipeline_id}/steps",
+                    headers=headers,
                 )
                 _check_response(steps_resp)
                 steps = steps_resp.json()
@@ -172,8 +202,8 @@ def register(mcp) -> None:
                 step_label = step.get("name", str(step_id))
 
                 log_resp = await client.get(
-                    f"{_woodpecker_base()}/repos/{repo}/pipelines/{pipeline_id}/{step_id}/logs",
-                    headers=_woodpecker_headers(),
+                    f"{base}/repos/{repo_id}/pipelines/{pipeline_id}/{step_id}/logs",
+                    headers=headers,
                 )
                 _check_response(log_resp)
                 log_data = log_resp.json()
@@ -218,10 +248,14 @@ def register(mcp) -> None:
             {"repo": repo, "pipeline_id": pipeline_id},
         )
         try:
+            owner, name = repo.split("/", 1)
+            base = _woodpecker_base()
+            headers = _woodpecker_headers()
             async with httpx.AsyncClient(timeout=15.0) as client:
+                repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 resp = await client.delete(
-                    f"{_woodpecker_base()}/repos/{repo}/pipelines/{pipeline_id}",
-                    headers=_woodpecker_headers(),
+                    f"{base}/repos/{repo_id}/pipelines/{pipeline_id}",
+                    headers=headers,
                 )
                 if resp.status_code == 409:
                     ac.finish("error:already_finished")
@@ -245,10 +279,14 @@ def register(mcp) -> None:
             return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
         ac = AuditCtx("woodpecker_status", "woodpecker", repo, {"repo": repo, "pipeline_id": pipeline_id})
         try:
+            owner, name = repo.split("/", 1)
+            base = _woodpecker_base()
+            headers = _woodpecker_headers()
             async with httpx.AsyncClient(timeout=15.0) as client:
+                repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 resp = await client.get(
-                    f"{_woodpecker_base()}/repos/{repo}/pipelines/{pipeline_id}",
-                    headers=_woodpecker_headers(),
+                    f"{base}/repos/{repo_id}/pipelines/{pipeline_id}",
+                    headers=headers,
                 )
                 _check_response(resp)
                 data = resp.json()

@@ -1,4 +1,4 @@
-"""Tests for new Woodpecker tools with respx HTTP mocks."""
+"""Tests for Woodpecker tools with respx HTTP mocks (Woodpecker 3.x API)."""
 
 import pytest
 import respx
@@ -6,6 +6,10 @@ import httpx
 
 from githost_mcp.audit import init_logging
 from githost_mcp.config import reset_config
+
+LOOKUP_URL = "https://ci.example.com/api/repos/lookup/owner/repo"
+REPO_ID = 42
+REPO_URL = f"https://ci.example.com/api/repos/{REPO_ID}"
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +37,13 @@ def tools():
     return registered
 
 
+def _lookup_mock():
+    """Standard lookup route returning numeric repo ID."""
+    return respx.get(LOOKUP_URL).mock(
+        return_value=httpx.Response(200, json={"id": REPO_ID, "full_name": "owner/repo"})
+    )
+
+
 @pytest.mark.asyncio
 async def test_woodpecker_list_pipelines_success(tools):
     mock_data = [
@@ -42,7 +53,8 @@ async def test_woodpecker_list_pipelines_success(tools):
          "created": 2000, "started": 2001, "finished": 2010},
     ]
     with respx.mock:
-        respx.get("https://ci.example.com/api/repos/owner/repo/pipelines").mock(
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines").mock(
             return_value=httpx.Response(200, json=mock_data)
         )
         result = await tools["woodpecker_list_pipelines"]("owner/repo")
@@ -61,7 +73,8 @@ async def test_woodpecker_list_pipelines_status_filter(tools):
          "created": 2000, "started": 2001, "finished": 2010},
     ]
     with respx.mock:
-        respx.get("https://ci.example.com/api/repos/owner/repo/pipelines").mock(
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines").mock(
             return_value=httpx.Response(200, json=mock_data)
         )
         result = await tools["woodpecker_list_pipelines"]("owner/repo", status="success")
@@ -80,13 +93,14 @@ async def test_woodpecker_get_logs_by_step_name(tools):
         {"out": "step output line 2", "pos": 1, "time": 1001},
     ]
     with respx.mock:
-        respx.get("https://ci.example.com/api/repos/owner/repo/pipelines/42/steps").mock(
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/1/steps").mock(
             return_value=httpx.Response(200, json=mock_steps)
         )
-        respx.get("https://ci.example.com/api/repos/owner/repo/pipelines/42/11/logs").mock(
+        respx.get(f"{REPO_URL}/pipelines/1/11/logs").mock(
             return_value=httpx.Response(200, json=mock_logs)
         )
-        result = await tools["woodpecker_get_logs"]("owner/repo", 42, step_name="build")
+        result = await tools["woodpecker_get_logs"]("owner/repo", 1, step_name="build")
     assert result["step"] == "build"
     assert len(result["lines"]) == 2
     assert result["lines"][0] == "step output line 1"
@@ -96,13 +110,13 @@ async def test_woodpecker_get_logs_by_step_name(tools):
 @pytest.mark.asyncio
 async def test_woodpecker_get_logs_truncation(tools):
     mock_steps = [{"id": 10, "name": "build"}]
-    # Generate 600 log lines
     mock_logs = [{"out": f"line {i}", "pos": i, "time": i} for i in range(600)]
     with respx.mock:
-        respx.get("https://ci.example.com/api/repos/owner/repo/pipelines/1/steps").mock(
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/1/steps").mock(
             return_value=httpx.Response(200, json=mock_steps)
         )
-        respx.get("https://ci.example.com/api/repos/owner/repo/pipelines/1/10/logs").mock(
+        respx.get(f"{REPO_URL}/pipelines/1/10/logs").mock(
             return_value=httpx.Response(200, json=mock_logs)
         )
         result = await tools["woodpecker_get_logs"]("owner/repo", 1)
@@ -114,7 +128,8 @@ async def test_woodpecker_get_logs_truncation(tools):
 @pytest.mark.asyncio
 async def test_woodpecker_pipeline_cancel_success(tools):
     with respx.mock:
-        respx.delete("https://ci.example.com/api/repos/owner/repo/pipelines/7").mock(
+        _lookup_mock()
+        respx.delete(f"{REPO_URL}/pipelines/7").mock(
             return_value=httpx.Response(204)
         )
         result = await tools["woodpecker_pipeline_cancel"]("owner/repo", 7)
@@ -125,9 +140,20 @@ async def test_woodpecker_pipeline_cancel_success(tools):
 @pytest.mark.asyncio
 async def test_woodpecker_pipeline_cancel_already_finished(tools):
     with respx.mock:
-        respx.delete("https://ci.example.com/api/repos/owner/repo/pipelines/5").mock(
+        _lookup_mock()
+        respx.delete(f"{REPO_URL}/pipelines/5").mock(
             return_value=httpx.Response(409, text="pipeline is finished")
         )
         result = await tools["woodpecker_pipeline_cancel"]("owner/repo", 5)
     assert "error" in result
     assert "already finished" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_repo_not_found(tools):
+    """Lookup 404 returns a clear error, not a crash."""
+    with respx.mock:
+        respx.get(LOOKUP_URL).mock(return_value=httpx.Response(404))
+        result = await tools["woodpecker_list_pipelines"]("owner/repo")
+    assert "error" in result
+    assert "not found" in result["error"].lower()

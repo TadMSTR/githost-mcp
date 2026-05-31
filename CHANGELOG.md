@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.1] — 2026-05-31
+
+### Fixed
+- All 5 Woodpecker tools now resolve `owner/name` to a numeric repo ID via
+  `GET /api/repos/lookup/{owner}/{name}` before constructing any pipeline URL.
+  Woodpecker 3.x removed name-based repo routing; all pipeline endpoints now
+  require a numeric ID. Previously, name-based paths returned the SPA frontend
+  (HTTP 200, HTML body), causing a JSON parse error in every Woodpecker tool.
+- 404 from the lookup endpoint returns a clear "not found in Woodpecker" error
+  rather than an uncaught exception.
+
 ## [0.2.0] — 2026-05-31
 
 ### Added
