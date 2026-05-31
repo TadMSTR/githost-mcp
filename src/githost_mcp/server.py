@@ -1,7 +1,7 @@
 """
 githost-mcp FastMCP server — tool registration and startup.
 
-32 tools across 8 categories: local git, GitHub, Gitea, GitLab, release,
+39 tools across 8 categories: local git, GitHub, Gitea, GitLab, release,
 registry (PyPI/npm), Woodpecker CI, and audit query.
 """
 

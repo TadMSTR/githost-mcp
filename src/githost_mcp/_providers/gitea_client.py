@@ -54,6 +54,22 @@ async def gitea_post(path: str, data: dict) -> Any:
         raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
 
 
+async def gitea_post_void(path: str, data: dict) -> None:
+    """POST to Gitea API and discard response body (for 204 No Content endpoints)."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{_gitea_base()}{path}",
+                headers=_get_gitea_headers(),
+                json=data,
+            )
+            _check_gitea_response(resp)
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
+
+
 def _check_gitea_response(resp: httpx.Response) -> None:
     if resp.status_code == 401:
         raise ValueError("Gitea authentication failed (check GITEA_TOKEN)")

@@ -74,3 +74,88 @@ async def test_gitea_401_clean_error(tools, monkeypatch):
         result = await fns["gitea_list_releases"]("testowner/repo")
     assert "error" in result
     assert token not in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_create_success(tools):
+    fns = tools
+    mock_response = {
+        "number": 5,
+        "title": "My feature",
+        "html_url": "https://gitea.example.com/testowner/repo/pulls/5",
+        "state": "open",
+    }
+    with respx.mock:
+        respx.post("https://gitea.example.com/api/v1/repos/testowner/repo/pulls").mock(
+            return_value=httpx.Response(201, json=mock_response)
+        )
+        result = await fns["gitea_pr_create"](
+            "testowner/repo", title="My feature", head="feature-branch", base="main"
+        )
+    assert result["number"] == 5
+    assert result["url"] == "https://gitea.example.com/testowner/repo/pulls/5"
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_get_success(tools):
+    fns = tools
+    mock_response = {
+        "number": 3,
+        "title": "Fix bug",
+        "state": "open",
+        "mergeable": True,
+        "head": {"label": "feature"},
+        "base": {"label": "main"},
+        "html_url": "https://gitea.example.com/testowner/repo/pulls/3",
+        "created_at": "2026-05-01T00:00:00Z",
+        "updated_at": "2026-05-02T00:00:00Z",
+        "labels": [{"name": "bug"}],
+    }
+    with respx.mock:
+        respx.get("https://gitea.example.com/api/v1/repos/testowner/repo/pulls/3").mock(
+            return_value=httpx.Response(200, json=mock_response)
+        )
+        result = await fns["gitea_pr_get"]("testowner/repo", 3)
+    assert result["number"] == 3
+    assert result["mergeable"] is True
+    assert "bug" in result["labels"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_comment_success(tools):
+    fns = tools
+    mock_response = {
+        "id": 42,
+        "html_url": "https://gitea.example.com/testowner/repo/issues/3#issuecomment-42",
+        "created_at": "2026-05-01T00:00:00Z",
+    }
+    with respx.mock:
+        respx.post(
+            "https://gitea.example.com/api/v1/repos/testowner/repo/issues/3/comments"
+        ).mock(return_value=httpx.Response(201, json=mock_response))
+        result = await fns["gitea_pr_comment"]("testowner/repo", 3, "LGTM")
+    assert result["id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_merge_success(tools):
+    fns = tools
+    with respx.mock:
+        respx.post(
+            "https://gitea.example.com/api/v1/repos/testowner/repo/pulls/3/merge"
+        ).mock(return_value=httpx.Response(204))
+        result = await fns["gitea_pr_merge"]("testowner/repo", 3)
+    assert result["merged"] is True
+    assert result["pr_number"] == 3
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_merge_conflict(tools):
+    fns = tools
+    with respx.mock:
+        respx.post(
+            "https://gitea.example.com/api/v1/repos/testowner/repo/pulls/3/merge"
+        ).mock(return_value=httpx.Response(409, text="merge conflict"))
+        result = await fns["gitea_pr_merge"]("testowner/repo", 3)
+    assert "error" in result
+    assert "merged" not in result
