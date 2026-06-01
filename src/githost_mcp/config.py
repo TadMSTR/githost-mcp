@@ -18,6 +18,8 @@ class Config:
     audit_signing_key: str = ""
     allowed_repo_roots: list[str] = field(default_factory=list)
     git_signing_key: str = ""
+    git_agent_name: str = ""
+    git_agent_email: str = ""
     # OTEL
     otel_endpoint: str = ""
     otel_protocol: str = "grpc"
@@ -55,8 +57,15 @@ def _parse_allowed_roots(raw: str) -> list[str]:
 
 def load_config() -> Config:
     metrics_raw = os.getenv("METRICS_PORT", "")
+    _agent_id = os.getenv("AGENT_ID", "unknown")
+    _git_agent_name = os.getenv("GIT_AGENT_NAME") or (
+        f"{_agent_id}-agent" if _agent_id != "unknown" else ""
+    )
+    _git_agent_email = os.getenv("GIT_AGENT_EMAIL") or (
+        f"{_agent_id}@forge" if _agent_id != "unknown" else ""
+    )
     return Config(
-        agent_id=os.getenv("AGENT_ID", "unknown"),
+        agent_id=_agent_id,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         log_file=os.getenv("LOG_FILE", "/opt/appdata/githost-mcp/logs/githost-mcp.log"),
         audit_log_file=os.getenv("AUDIT_LOG_FILE", "/opt/appdata/githost-mcp/audit/githost.jsonl"),
@@ -65,6 +74,8 @@ def load_config() -> Config:
         audit_signing_key=os.getenv("AUDIT_SIGNING_KEY", ""),
         allowed_repo_roots=_parse_allowed_roots(os.getenv("ALLOWED_REPO_ROOTS", "")),
         git_signing_key=os.getenv("GIT_SIGNING_KEY", ""),
+        git_agent_name=_git_agent_name,
+        git_agent_email=_git_agent_email,
         otel_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         otel_protocol=os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
         otel_service_name=os.getenv("OTEL_SERVICE_NAME", "githost-mcp"),

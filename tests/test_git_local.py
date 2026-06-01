@@ -124,3 +124,57 @@ def test_write_blocked_outside_allowed_roots(tools, tmp_path, monkeypatch):
     reset_config()
     result = fns["git_add"](str(path), ["file.txt"])
     assert "error" in result
+
+
+def test_read_blocked_outside_allowed_roots(tools, tmp_path, monkeypatch):
+    fns, path = tools
+    monkeypatch.setenv("ALLOWED_REPO_ROOTS", "/nonexistent/root")
+    reset_config()
+    for fn_name in ("git_status", "git_log", "git_diff", "git_show"):
+        kwargs = {"repo_path": str(path)}
+        if fn_name == "git_show":
+            kwargs["ref"] = "HEAD"
+        result = fns[fn_name](**kwargs)
+        assert "error" in result, f"{fn_name} should be blocked outside allowed roots"
+    result = fns["git_branch"](str(path), action="list")
+    assert "error" in result, "git_branch list should be blocked outside allowed roots"
+
+
+def test_git_log_limit_capped(tools):
+    fns, path = tools
+    result = fns["git_log"](str(path), limit=9999)
+    # Repo has 1 commit; verify the call didn't error (cap applied internally)
+    assert "commits" in result
+    assert len(result["commits"]) <= 200
+
+
+def test_git_commit_agent_identity(tools, tmp_path, monkeypatch):
+    fns, path = tools
+    monkeypatch.setenv("GIT_AGENT_NAME", "sysadmin-agent")
+    monkeypatch.setenv("GIT_AGENT_EMAIL", "sysadmin@forge")
+    reset_config()
+    (path / "id_test.txt").write_text("identity")
+    fns["git_add"](str(path), ["id_test.txt"])
+    fns["git_commit"](str(path), "Identity test commit")
+    repo = git.Repo(str(path))
+    commit = repo.head.commit
+    assert commit.author.name == "sysadmin-agent"
+    assert commit.author.email == "sysadmin@forge"
+    assert commit.committer.name == "sysadmin-agent"
+    assert commit.committer.email == "sysadmin@forge"
+
+
+def test_git_commit_agent_id_default_identity(tools, tmp_path, monkeypatch):
+    """When GIT_AGENT_NAME/EMAIL not set, AGENT_ID derives defaults."""
+    fns, path = tools
+    monkeypatch.delenv("GIT_AGENT_NAME", raising=False)
+    monkeypatch.delenv("GIT_AGENT_EMAIL", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    reset_config()
+    (path / "default_id.txt").write_text("default")
+    fns["git_add"](str(path), ["default_id.txt"])
+    fns["git_commit"](str(path), "Default identity commit")
+    repo = git.Repo(str(path))
+    commit = repo.head.commit
+    assert commit.author.name == "developer-agent"
+    assert commit.author.email == "developer@forge"

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0] — 2026-06-01
+
+### Added
+- Per-agent git committer identity: `GIT_AGENT_NAME` and `GIT_AGENT_EMAIL` env vars set the
+  git author and committer fields on every `git_commit` call. When unset, defaults are derived
+  from `AGENT_ID` (`{id}-agent` / `{id}@forge`). Enables `git log --author` filtering by agent.
+- `validate_read_path` in `security.py`: read tools (`git_status`, `git_diff`, `git_log`,
+  `git_show`, `git_branch list`) now enforce the same `ALLOWED_REPO_ROOTS` allowlist as write
+  tools, preventing unrestricted filesystem reads.
+- `git_log` limit capped at 200 (consistent with existing list tool caps).
+
+### Security
+- Read tools previously bypassed `ALLOWED_REPO_ROOTS` entirely; an agent could call them on
+  any path on the filesystem. All five read tools now call `validate_read_path` (same allowlist
+  logic as write path, distinct error message).
+
 ## [0.2.1] — 2026-05-31
 
 ### Fixed

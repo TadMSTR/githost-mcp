@@ -11,7 +11,7 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
-from ..security import validate_write_path
+from ..security import validate_read_path, validate_write_path
 
 log = structlog.get_logger(__name__)
 
@@ -35,6 +35,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_status", "local", repo_path, {"repo_path": repo_path})
         try:
+            validate_read_path(repo_path)
             repo = _open_repo(repo_path)
             staged = [item.a_path for item in repo.index.diff("HEAD")] if repo.head.is_valid() else []
             unstaged = [item.a_path for item in repo.index.diff(None)]
@@ -64,6 +65,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_diff", "local", repo_path, {"repo_path": repo_path, "staged": staged, "file_path": file_path})
         try:
+            validate_read_path(repo_path)
             repo = _open_repo(repo_path)
             kwargs = {}
             if file_path:
@@ -101,6 +103,8 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_log", "local", repo_path, {"repo_path": repo_path, "limit": limit})
         try:
+            validate_read_path(repo_path)
+            limit = min(limit, 200)
             repo = _open_repo(repo_path)
             ref = branch or repo.active_branch.name
             commits = []
@@ -127,6 +131,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_show", "local", repo_path, {"repo_path": repo_path, "ref": ref})
         try:
+            validate_read_path(repo_path)
             repo = _open_repo(repo_path)
             commit = repo.commit(ref)
             ac.finish("ok")
@@ -161,7 +166,9 @@ def register(mcp) -> None:
         params = {"repo_path": repo_path, "action": action, "branch_name": branch_name}
         ac = AuditCtx("git_branch", "local", repo_path, params)
         try:
-            if action in ("create", "delete"):
+            if action == "list":
+                validate_read_path(repo_path)
+            else:
                 validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             if action == "list":
@@ -241,13 +248,19 @@ def register(mcp) -> None:
             agent_tag = f"\n\nagent-id: {config.agent_id}" if config.agent_id != "unknown" else ""
             full_message = message + agent_tag
 
+            actor = git.Actor(config.git_agent_name, config.git_agent_email) if config.git_agent_name else None
             signing_key = config.git_signing_key
             if signing_key:
                 # gitpython uses -S with GPG key ID (not the key value)
-                repo.git.commit("-S", f"--gpg-sign={signing_key}", "-m", full_message)
+                cmd = []
+                if actor:
+                    cmd += ["-c", f"user.name={actor.name}", "-c", f"user.email={actor.email}"]
+                cmd += ["-S", f"--gpg-sign={signing_key}", "-m", full_message]
+                repo.git.commit(*cmd)
                 commit = repo.head.commit
             else:
-                commit = repo.index.commit(full_message)
+                kwargs = {"author": actor, "committer": actor} if actor else {}
+                commit = repo.index.commit(full_message, **kwargs)
 
             ac.finish("ok")
             return {"sha": commit.hexsha[:12], "message": message}
