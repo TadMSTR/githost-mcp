@@ -58,12 +58,12 @@ def _parse_allowed_roots(raw: str) -> list[str]:
 def load_config() -> Config:
     metrics_raw = os.getenv("METRICS_PORT", "")
     _agent_id = os.getenv("AGENT_ID", "unknown")
-    _git_agent_name = os.getenv("GIT_AGENT_NAME") or (
+    _git_agent_name = (os.getenv("GIT_AGENT_NAME") or (
         f"{_agent_id}-agent" if _agent_id != "unknown" else ""
-    )
-    _git_agent_email = os.getenv("GIT_AGENT_EMAIL") or (
+    )).replace("\n", "").replace("\r", "").replace("\0", "")
+    _git_agent_email = (os.getenv("GIT_AGENT_EMAIL") or (
         f"{_agent_id}@forge" if _agent_id != "unknown" else ""
-    )
+    )).replace("\n", "").replace("\r", "").replace("\0", "")
     return Config(
         agent_id=_agent_id,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
