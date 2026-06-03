@@ -71,7 +71,15 @@ audit_log_query(agent_id="sysadmin", tool="git_push", since="2026-05-20")
 
 ### Repo path allowlist
 
-Write tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`, `git_branch create/delete`, `release`) reject any path not under `ALLOWED_REPO_ROOTS`. Read tools accept any readable path. **When `ALLOWED_REPO_ROOTS` is not set, write operations are disabled by default** — fail closed, not open.
+All tools — both read and write — reject any path not under `ALLOWED_REPO_ROOTS`. Read tools (`git_status`, `git_diff`, `git_log`, `git_show`) and write tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`, `git_branch create/delete`, `release`) are validated against the allowlist. **When `ALLOWED_REPO_ROOTS` is not set, all operations are disabled** — fail closed, not open.
+
+### Per-agent committer identity
+
+`GIT_AGENT_NAME` and `GIT_AGENT_EMAIL` set the git author/committer on commits. Defaults to `{AGENT_ID}-agent` / `{AGENT_ID}@forge` when not explicitly set. Values are sanitized (newlines and null bytes stripped) to prevent git header injection. Each commit also appends `agent-id: {AGENT_ID}` as a trailer.
+
+### Query limits
+
+`git_log` caps the `limit` parameter at 200 entries regardless of the requested value, preventing excessive history traversal.
 
 ### No subprocess git
 
@@ -98,7 +106,14 @@ Each provider has its own env vars — a compromised GitHub token does not expos
 ```env
 AGENT_ID=dev                     # agent attribution — set per launcher
 AUDIT_SIGNING_KEY=<32-byte-hex>  # generate: python3 -c "import secrets; print(secrets.token_hex(32))"
-ALLOWED_REPO_ROOTS=/home/user/repos/personal,/home/user/repos/work
+ALLOWED_REPO_ROOTS=/home/user/repos/personal,/home/user/repos/work  # enforced on ALL tools (read + write)
+```
+
+### Agent Identity (optional)
+
+```env
+GIT_AGENT_NAME=dev-agent         # git author/committer name (default: {AGENT_ID}-agent)
+GIT_AGENT_EMAIL=dev@forge        # git author/committer email (default: {AGENT_ID}@forge)
 ```
 
 ### GitHub
