@@ -224,7 +224,9 @@ def register(mcp) -> None:
         try:
             validate_write_path(repo_path)
             repo = _open_repo(repo_path)
-            repo.index.add(paths)
+            # Use git binary to stage files; repo.index.add(["."])  would recurse
+            # into .git/ internals. The git binary skips .git/ by design. (GHOST-1)
+            repo.git.add("--", *paths)
             staged = [item.a_path for item in repo.index.diff("HEAD")] if repo.head.is_valid() else paths
             ac.finish("ok")
             return {"staged": staged}
