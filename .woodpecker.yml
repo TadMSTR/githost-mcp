@@ -6,7 +6,7 @@ steps:
     image: python:3.13-slim
     commands:
       - pip install -e ".[dev]" -q
-      - pytest tests/ -v
+      - pytest tests/ -v --cov=githost_mcp --cov-report=term-missing --cov-fail-under=60
 
   - name: pip-audit
     image: python:3.13-slim

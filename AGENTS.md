@@ -57,13 +57,14 @@ pyproject.toml
 | `GITLAB_URL`               | GitLab base URL                                             |
 | `WOODPECKER_URL`           | Woodpecker CI base URL                                      |
 | `WOODPECKER_TOKEN`         | Woodpecker API token                                        |
-| `ALLOWED_REPO_ROOTS`       | Colon-separated paths; required for write operations        |
+| `ALLOWED_REPO_ROOTS`       | Comma-separated paths; required for write operations         |
 | `AGENT_ID`                 | Injected into audit log records                             |
+| `AGENT_MANIFEST_PATH`      | Path to this agent's manifest YAML; used as an allowlist fallback when `ALLOWED_REPO_ROOTS` is unset (default: `~/.claude/manifests/{AGENT_ID}-agent.yml`) |
 | `LOG_LEVEL`                | Logging verbosity                                           |
 
 ## Architecture decisions
 
-- **`ALLOWED_REPO_ROOTS` is a security control** — write operations (commit, push, merge, publish) check the repo path against this allowlist before executing. Do not bypass this check or widen the matching logic.
+- **`ALLOWED_REPO_ROOTS` is a security control** — write operations (commit, push, merge, publish) check the repo path against this allowlist before executing. Do not bypass this check or widen the matching logic. If unset (or empty), `config.py` falls back to reading `git_backed: true` entries from the agent's manifest at `AGENT_MANIFEST_PATH` — the explicit env var always wins when set.
 - **Every tool call is audit-logged** — `audit.py` writes a JSONL record with agent_id, tool name, args, and outcome for every invocation. `audit_query` lets agents review their own call history.
 - **`woodpecker_get_logs` content is excluded from audit** — log output can be large and may contain sensitive values. Only the call metadata (pipeline_id, step_name) is recorded; the log text itself is not.
 - **Registry publishing uses subprocess** — `npm_publish` and `pypi_publish` shell out rather than using library APIs. This keeps credentials out of the server process and delegates to the standard toolchains.
