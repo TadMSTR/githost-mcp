@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import structlog
 
 from .._providers.gitlab_client import get_gitlab, gitlab_call
@@ -10,9 +12,27 @@ from ..security import mask_credentials
 
 log = structlog.get_logger(__name__)
 
+# GitLab projects can be nested ('group/subgroup/project', one or more slashes) or a bare
+# numeric project ID — a single-slash 'owner/repo' regex would reject both valid forms.
+_PROJECT_RE = re.compile(r"^([a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+$|^\d+$")
+_PROJECT_FMT_ERR = (
+    "project must be 'namespace/project' (nested groups allowed) or a numeric project ID"
+)
+
 
 def _err(e: Exception) -> dict:
     return {"error": mask_credentials(str(e))}
+
+
+def _bad_project(project: str) -> dict | None:
+    """Return an error dict if `project` is not a valid GitLab project identifier, else None.
+
+    Defense-in-depth: `project` reaches python-gitlab's projects.get() and is used to build
+    API paths. python-gitlab URL-encodes segments so traversal isn't observed, but validating
+    here rejects malformed input before it reaches the client library. Accepts nested group
+    paths and numeric project IDs (both valid GitLab forms).
+    """
+    return None if _PROJECT_RE.match(project) else {"error": _PROJECT_FMT_ERR}
 
 
 def register(mcp) -> None:
@@ -31,6 +51,8 @@ def register(mcp) -> None:
             name: Release name (defaults to tag name).
             description: Release notes markdown.
         """
+        if err := _bad_project(project):
+            return err
         ac = AuditCtx("gitlab_create_release", "gitlab", project, {"project": project, "tag": tag})
         try:
             gl = get_gitlab()
@@ -61,6 +83,8 @@ def register(mcp) -> None:
             project: Project in 'namespace/project' format.
             tag: Tag name.
         """
+        if err := _bad_project(project):
+            return err
         ac = AuditCtx("gitlab_get_release", "gitlab", project, {"project": project, "tag": tag})
         try:
             gl = get_gitlab()
@@ -85,6 +109,8 @@ def register(mcp) -> None:
             project: Project in 'namespace/project' format.
             limit: Max releases to return (default 10).
         """
+        if err := _bad_project(project):
+            return err
         ac = AuditCtx(
             "gitlab_list_releases", "gitlab", project, {"project": project, "limit": limit}
         )
@@ -115,6 +141,8 @@ def register(mcp) -> None:
             state: 'opened', 'closed', 'locked', or 'merged' (default: opened).
             limit: Max MRs to return (default 20).
         """
+        if err := _bad_project(project):
+            return err
         ac = AuditCtx("gitlab_mr_list", "gitlab", project, {"project": project, "state": state})
         try:
             gl = get_gitlab()
@@ -156,6 +184,8 @@ def register(mcp) -> None:
             target_branch: Target branch name.
             description: MR description (optional).
         """
+        if err := _bad_project(project):
+            return err
         ac = AuditCtx(
             "gitlab_mr_create",
             "gitlab",
@@ -195,6 +225,8 @@ def register(mcp) -> None:
             project: Project in 'namespace/project' format.
             mr_iid: Merge request internal ID (iid), not the global id.
         """
+        if err := _bad_project(project):
+            return err
         ac = AuditCtx("gitlab_mr_get", "gitlab", project, {"project": project, "mr_iid": mr_iid})
         try:
             gl = get_gitlab()
@@ -237,6 +269,8 @@ def register(mcp) -> None:
             merge_commit_message: Optional custom merge commit message.
             squash: Squash commits into a single commit on merge (default False).
         """
+        if err := _bad_project(project):
+            return err
         ac = AuditCtx(
             "gitlab_mr_merge",
             "gitlab",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import structlog
 
 from .._providers.github_client import get_github, github_call
@@ -10,9 +12,24 @@ from ..security import mask_credentials
 
 log = structlog.get_logger(__name__)
 
+# GitHub full names are always exactly 'owner/repo' (one slash, no numeric-ID form).
+_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+_REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
+
 
 def _err(e: Exception) -> dict:
     return {"error": mask_credentials(str(e))}
+
+
+def _bad_repo(repo: str) -> dict | None:
+    """Return an error dict if `repo` is not a valid 'owner/repo' string, else None.
+
+    Defense-in-depth: `repo` reaches PyGithub's get_repo() and is used to build API
+    paths. PyGithub URL-encodes segments so traversal isn't observed, but validating
+    here matches the guard gitea.py/woodpecker.py already apply and rejects malformed
+    input before it reaches the client library.
+    """
+    return None if _REPO_RE.match(repo) else {"error": _REPO_FMT_ERR}
 
 
 def register(mcp) -> None:
@@ -37,6 +54,8 @@ def register(mcp) -> None:
             prerelease: Mark as pre-release (default False).
             generate_release_notes: Auto-generate release notes from commits (default False).
         """
+        if err := _bad_repo(repo):
+            return err
         ac = AuditCtx("github_create_release", "github", repo, {"repo": repo, "tag": tag})
         try:
             gh = get_github()
@@ -64,6 +83,8 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             tag: Tag name.
         """
+        if err := _bad_repo(repo):
+            return err
         ac = AuditCtx("github_get_release", "github", repo, {"repo": repo, "tag": tag})
         try:
             gh = get_github()
@@ -91,6 +112,8 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             limit: Max releases to return (default 10).
         """
+        if err := _bad_repo(repo):
+            return err
         ac = AuditCtx("github_list_releases", "github", repo, {"repo": repo, "limit": limit})
         try:
             gh = get_github()
@@ -122,6 +145,8 @@ def register(mcp) -> None:
             ref: Branch, tag, or SHA to filter by (optional).
             limit: Max runs to return (default 10).
         """
+        if err := _bad_repo(repo):
+            return err
         ac = AuditCtx("github_workflow_list", "github", repo, {"repo": repo, "ref": ref})
         try:
             gh = get_github()
@@ -156,6 +181,8 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             run_id: Workflow run ID from github_workflow_list.
         """
+        if err := _bad_repo(repo):
+            return err
         ac = AuditCtx("github_workflow_status", "github", repo, {"repo": repo, "run_id": run_id})
         try:
             gh = get_github()
@@ -184,6 +211,8 @@ def register(mcp) -> None:
             state: 'open', 'closed', or 'all' (default: open).
             limit: Max PRs to return (default 20).
         """
+        if err := _bad_repo(repo):
+            return err
         ac = AuditCtx("github_pr_list", "github", repo, {"repo": repo, "state": state})
         try:
             gh = get_github()
@@ -216,6 +245,8 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             pr_number: PR number.
         """
+        if err := _bad_repo(repo):
+            return err
         ac = AuditCtx("github_pr_comments", "github", repo, {"repo": repo, "pr_number": pr_number})
         try:
             gh = get_github()
@@ -257,6 +288,8 @@ def register(mcp) -> None:
             body: PR description (optional).
             draft: Create as draft PR (default False).
         """
+        if err := _bad_repo(repo):
+            return err
         ac = AuditCtx(
             "github_pr_create", "github", repo, {"repo": repo, "head": head, "base": base}
         )
@@ -291,6 +324,8 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             pr_number: Pull request number.
         """
+        if err := _bad_repo(repo):
+            return err
         ac = AuditCtx("github_pr_get", "github", repo, {"repo": repo, "pr_number": pr_number})
         try:
             gh = get_github()
@@ -334,6 +369,8 @@ def register(mcp) -> None:
             merge_method: One of 'merge', 'squash', or 'rebase' (default: merge).
             commit_title: Optional merge commit title.
         """
+        if err := _bad_repo(repo):
+            return err
         valid_methods = {"merge", "squash", "rebase"}
         if merge_method not in valid_methods:
             return {"error": f"merge_method must be one of: {', '.join(sorted(valid_methods))}"}

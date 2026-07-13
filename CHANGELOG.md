@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] — 2026-07-13
 
 ### Added
 - `LICENSE` (MIT) and the repo-standards Baseline README badges (Built with Claude Code, License: MIT).
@@ -40,6 +40,19 @@
 
 ### Removed
 - `.woodpecker.yml` — non-functional CI config, superseded by GitHub Actions.
+
+### Security
+- Audited 2026-07-13 (`githost-mcp-baseline-and-ci-2026-07`): 1 high, 1 low, 3 info. Repo-level
+  checks (credential masking, audit logging, baseline/CI compliance) all passed; the new
+  GitHub/GitLab tools mask credentials on every error path and each records an audit entry.
+- IV-01 (low, fixed): `repo` (GitHub) and `project` (GitLab) arguments are now validated before
+  reaching the client library, across all 17 tools in `tools/github.py` and `tools/gitlab.py` —
+  matching the guard `tools/gitea.py`/`tools/woodpecker.py` already apply. GitHub uses the
+  strict `owner/repo` grammar; GitLab accepts nested group paths and bare numeric project IDs.
+- The high finding is a scoped-mcp manifest gap, out of this repo's scope: the new destructive
+  merge tools (`github_pr_merge`, `gitlab_mr_merge`) were live and ungated in all six agent
+  manifests (denylist-based access model), not "inert until granted." Remediated via manifest
+  change, tracked in Plane (SMCP) and an urgent sysadmin task — no githost-mcp code change.
 
 ## [0.4.0] — 2026-07-13
 
