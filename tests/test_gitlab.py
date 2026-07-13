@@ -159,3 +159,86 @@ def test_gitlab_tool_error_paths(tools, tool_name, args):
     with patch("githost_mcp.tools.gitlab.get_gitlab", side_effect=ValueError("boom")):
         result = tools[tool_name](*args)
     assert "error" in result
+
+
+def test_gitlab_mr_create(tools):
+    mr = MagicMock()
+    mr.iid = 5
+    mr.title = "Add feature"
+    mr.state = "opened"
+    mr.source_branch = "feature"
+    mr.target_branch = "main"
+    mr.web_url = "https://gitlab.com/owner/project/-/merge_requests/5"
+    mock_proj = MagicMock()
+    mock_proj.mergerequests.create.return_value = mr
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_create"]("owner/project", "Add feature", "feature", "main")
+    assert result["iid"] == 5
+    payload = mock_proj.mergerequests.create.call_args.args[0]
+    assert payload["source_branch"] == "feature"
+    assert payload["target_branch"] == "main"
+
+
+def test_gitlab_mr_get(tools):
+    mr = MagicMock()
+    mr.iid = 5
+    mr.title = "Add feature"
+    mr.state = "opened"
+    mr.merge_status = "can_be_merged"
+    mr.source_branch = "feature"
+    mr.target_branch = "main"
+    mr.author = {"username": "dev"}
+    mr.web_url = "https://gitlab.com/owner/project/-/merge_requests/5"
+    mr.created_at = "2026-05-01T00:00:00Z"
+    mr.updated_at = "2026-05-02T00:00:00Z"
+    mr.labels = ["feature"]
+    mock_proj = MagicMock()
+    mock_proj.mergerequests.get.return_value = mr
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_get"]("owner/project", 5)
+    assert result["iid"] == 5
+    assert result["author"] == "dev"
+    assert result["merge_status"] == "can_be_merged"
+
+
+def test_gitlab_mr_merge(tools):
+    mr = MagicMock()
+    mr.iid = 5
+    mr.state = "merged"
+    mr.web_url = "https://gitlab.com/owner/project/-/merge_requests/5"
+    mock_proj = MagicMock()
+    mock_proj.mergerequests.get.return_value = mr
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_merge"](
+            "owner/project", 5, merge_commit_message="Merge it", squash=True
+        )
+    assert result["merged"] is True
+    assert result["iid"] == 5
+    assert mr.merge.call_args.kwargs["squash"] is True
+    assert mr.merge.call_args.kwargs["merge_commit_message"] == "Merge it"
+
+
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("gitlab_mr_create", ("owner/project", "t", "feature", "main")),
+        ("gitlab_mr_get", ("owner/project", 1)),
+        ("gitlab_mr_merge", ("owner/project", 1)),
+    ],
+)
+def test_gitlab_mr_tool_error_paths(tools, tool_name, args):
+    with patch("githost_mcp.tools.gitlab.get_gitlab", side_effect=ValueError("boom")):
+        result = tools[tool_name](*args)
+    assert "error" in result

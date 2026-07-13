@@ -12,6 +12,14 @@
   `ruff` and `pip-audit` added to the `dev` extra.
 - Two Mermaid architecture diagrams in the README (provider-dispatch → audit-log flow, and the
   `ALLOWED_REPO_ROOTS` env-vs-manifest resolution flow).
+- GitHub and GitLab PR/MR write tooling, for provider parity with Gitea (39 → 45 tools):
+  `github_pr_create`, `github_pr_get`, `github_pr_merge`, `gitlab_mr_create`, `gitlab_mr_get`,
+  `gitlab_mr_merge`. Each mirrors the existing `gitea_pr_*` shape, records an `AuditCtx` entry,
+  and routes errors through the `mask_credentials` wrapper. This closes the asymmetry that
+  forced the prior build to route around githost-mcp when opening its own GitHub PR.
+  `github_pr_merge` and `gitlab_mr_merge` are DESTRUCTIVE and need HITL gating in scoped-mcp
+  manifests (same treatment as `gitea_pr_merge`) — a companion manifest change tracked
+  separately, not automatic on tool registration.
 
 ### Fixed
 - `pypi_publish` / `npm_publish`: a failing `twine check` was captured but its result never

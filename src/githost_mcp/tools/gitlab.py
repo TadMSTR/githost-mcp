@@ -1,4 +1,4 @@
-"""GitLab tools via python-gitlab (4 tools)."""
+"""GitLab tools via python-gitlab (7 tools)."""
 
 from __future__ import annotations
 
@@ -135,6 +135,124 @@ def register(mcp) -> None:
                 )
             ac.finish("ok")
             return {"project": project, "mrs": mrs}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def gitlab_mr_create(
+        project: str,
+        title: str,
+        source_branch: str,
+        target_branch: str,
+        description: str | None = None,
+    ) -> dict:
+        """Open a merge request on a GitLab project.
+
+        Args:
+            project: Project in 'namespace/project' format.
+            title: MR title.
+            source_branch: Source branch name.
+            target_branch: Target branch name.
+            description: MR description (optional).
+        """
+        ac = AuditCtx(
+            "gitlab_mr_create",
+            "gitlab",
+            project,
+            {"project": project, "source_branch": source_branch, "target_branch": target_branch},
+        )
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+            mr = gitlab_call(
+                proj.mergerequests.create,
+                {
+                    "source_branch": source_branch,
+                    "target_branch": target_branch,
+                    "title": title,
+                    "description": description or "",
+                },
+            )
+            ac.finish("ok")
+            return {
+                "iid": mr.iid,
+                "title": mr.title,
+                "state": mr.state,
+                "source_branch": mr.source_branch,
+                "target_branch": mr.target_branch,
+                "web_url": mr.web_url,
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def gitlab_mr_get(project: str, mr_iid: int) -> dict:
+        """Get details of a GitLab merge request.
+
+        Args:
+            project: Project in 'namespace/project' format.
+            mr_iid: Merge request internal ID (iid), not the global id.
+        """
+        ac = AuditCtx("gitlab_mr_get", "gitlab", project, {"project": project, "mr_iid": mr_iid})
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+            mr = gitlab_call(proj.mergerequests.get, mr_iid)
+            ac.finish("ok")
+            return {
+                "iid": mr.iid,
+                "title": mr.title,
+                "state": mr.state,
+                "merge_status": mr.merge_status,
+                "source_branch": mr.source_branch,
+                "target_branch": mr.target_branch,
+                "author": mr.author.get("username") if mr.author else None,
+                "web_url": mr.web_url,
+                "created_at": mr.created_at,
+                "updated_at": mr.updated_at,
+                "labels": mr.labels,
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def gitlab_mr_merge(
+        project: str,
+        mr_iid: int,
+        merge_commit_message: str | None = None,
+        squash: bool = False,
+    ) -> dict:
+        """Merge a GitLab merge request.
+
+        DESTRUCTIVE: Permanently merges the MR source branch into the target branch. This
+        tool should be HITL gated in scoped-mcp manifests for all agents (same treatment as
+        gitea_pr_merge) — that gating is a scoped-mcp manifest change outside this repo.
+
+        Args:
+            project: Project in 'namespace/project' format.
+            mr_iid: Merge request internal ID (iid) to merge.
+            merge_commit_message: Optional custom merge commit message.
+            squash: Squash commits into a single commit on merge (default False).
+        """
+        ac = AuditCtx(
+            "gitlab_mr_merge",
+            "gitlab",
+            project,
+            {"project": project, "mr_iid": mr_iid, "squash": squash},
+        )
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+            mr = gitlab_call(proj.mergerequests.get, mr_iid)
+            kwargs: dict = {"squash": squash}
+            if merge_commit_message:
+                kwargs["merge_commit_message"] = merge_commit_message
+            gitlab_call(mr.merge, **kwargs)
+            ac.finish("ok")
+            return {"iid": mr.iid, "state": mr.state, "merged": True, "web_url": mr.web_url}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)

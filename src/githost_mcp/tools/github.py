@@ -1,4 +1,4 @@
-"""GitHub tools via PyGithub (7 tools)."""
+"""GitHub tools via PyGithub (10 tools)."""
 
 from __future__ import annotations
 
@@ -234,6 +234,125 @@ def register(mcp) -> None:
                 )
             ac.finish("ok")
             return {"repo": repo, "pr": pr_number, "comments": comments}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def github_pr_create(
+        repo: str,
+        title: str,
+        head: str,
+        base: str,
+        body: str | None = None,
+        draft: bool = False,
+    ) -> dict:
+        """Open a pull request on a GitHub repository.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            title: PR title.
+            head: Source branch name.
+            base: Target branch name.
+            body: PR description (optional).
+            draft: Create as draft PR (default False).
+        """
+        ac = AuditCtx(
+            "github_pr_create", "github", repo, {"repo": repo, "head": head, "base": base}
+        )
+        try:
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+            pr = github_call(
+                gh_repo.create_pull,
+                base=base,
+                head=head,
+                title=title,
+                body=body or "",
+                draft=draft,
+            )
+            ac.finish("ok")
+            return {
+                "number": pr.number,
+                "title": pr.title,
+                "state": pr.state,
+                "draft": pr.draft,
+                "url": pr.html_url,
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def github_pr_get(repo: str, pr_number: int) -> dict:
+        """Get details of a GitHub pull request.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            pr_number: Pull request number.
+        """
+        ac = AuditCtx("github_pr_get", "github", repo, {"repo": repo, "pr_number": pr_number})
+        try:
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+            pr = github_call(gh_repo.get_pull, pr_number)
+            ac.finish("ok")
+            return {
+                "number": pr.number,
+                "title": pr.title,
+                "state": pr.state,
+                "mergeable": pr.mergeable,
+                "merged": pr.merged,
+                "draft": pr.draft,
+                "head": pr.head.ref,
+                "base": pr.base.ref,
+                "url": pr.html_url,
+                "created_at": pr.created_at.isoformat() if pr.created_at else None,
+                "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
+                "labels": [lb.name for lb in pr.labels],
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def github_pr_merge(
+        repo: str,
+        pr_number: int,
+        merge_method: str = "merge",
+        commit_title: str | None = None,
+    ) -> dict:
+        """Merge a GitHub pull request.
+
+        DESTRUCTIVE: Permanently merges the PR branch into the base branch. This tool
+        should be HITL gated in scoped-mcp manifests for all agents (same treatment as
+        gitea_pr_merge) — that gating is a scoped-mcp manifest change outside this repo.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            pr_number: Pull request number to merge.
+            merge_method: One of 'merge', 'squash', or 'rebase' (default: merge).
+            commit_title: Optional merge commit title.
+        """
+        valid_methods = {"merge", "squash", "rebase"}
+        if merge_method not in valid_methods:
+            return {"error": f"merge_method must be one of: {', '.join(sorted(valid_methods))}"}
+        ac = AuditCtx(
+            "github_pr_merge",
+            "github",
+            repo,
+            {"repo": repo, "pr_number": pr_number, "merge_method": merge_method},
+        )
+        try:
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+            pr = github_call(gh_repo.get_pull, pr_number)
+            kwargs: dict = {"merge_method": merge_method}
+            if commit_title:
+                kwargs["commit_title"] = commit_title
+            status = github_call(pr.merge, **kwargs)
+            ac.finish("ok")
+            return {"merged": status.merged, "sha": status.sha, "message": status.message}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
