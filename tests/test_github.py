@@ -261,3 +261,96 @@ def test_github_tool_error_paths(tools, tool_name, args):
     with patch("githost_mcp.tools.github.get_github", side_effect=ValueError("boom")):
         result = tools[tool_name](*args)
     assert "error" in result
+
+
+def test_github_pr_create(tools):
+    pr = MagicMock()
+    pr.number = 12
+    pr.title = "Add feature"
+    pr.state = "open"
+    pr.draft = False
+    pr.html_url = "https://github.com/owner/repo/pull/12"
+    mock_repo = MagicMock()
+    mock_repo.create_pull.return_value = pr
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_create"]("owner/repo", "Add feature", "feature", "main")
+    assert result["number"] == 12
+    assert result["url"].endswith("/12")
+    # create_pull is called with keyword base/head per the PyGithub 2.x signature
+    assert mock_repo.create_pull.call_args.kwargs["base"] == "main"
+    assert mock_repo.create_pull.call_args.kwargs["head"] == "feature"
+
+
+def test_github_pr_get(tools):
+    label = MagicMock()
+    label.name = "enhancement"
+    pr = MagicMock()
+    pr.number = 12
+    pr.title = "Add feature"
+    pr.state = "open"
+    pr.mergeable = True
+    pr.merged = False
+    pr.draft = False
+    pr.head.ref = "feature"
+    pr.base.ref = "main"
+    pr.html_url = "https://github.com/owner/repo/pull/12"
+    pr.created_at.isoformat.return_value = "2026-05-01T00:00:00"
+    pr.updated_at.isoformat.return_value = "2026-05-02T00:00:00"
+    pr.labels = [label]
+    mock_repo = MagicMock()
+    mock_repo.get_pull.return_value = pr
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_get"]("owner/repo", 12)
+    assert result["number"] == 12
+    assert result["labels"] == ["enhancement"]
+    assert result["base"] == "main"
+
+
+def test_github_pr_merge(tools):
+    status = MagicMock()
+    status.merged = True
+    status.sha = "abc123"
+    status.message = "Pull Request successfully merged"
+    pr = MagicMock()
+    pr.merge.return_value = status
+    mock_repo = MagicMock()
+    mock_repo.get_pull.return_value = pr
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_merge"]("owner/repo", 12, merge_method="squash", commit_title="t")
+    assert result["merged"] is True
+    assert result["sha"] == "abc123"
+    assert pr.merge.call_args.kwargs["merge_method"] == "squash"
+    assert pr.merge.call_args.kwargs["commit_title"] == "t"
+
+
+def test_github_pr_merge_rejects_bad_method(tools):
+    """Invalid merge_method is rejected before any API call."""
+    result = tools["github_pr_merge"]("owner/repo", 12, merge_method="fast-forward")
+    assert "error" in result
+    assert "merge_method must be one of" in result["error"]
+
+
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("github_pr_create", ("owner/repo", "t", "feature", "main")),
+        ("github_pr_get", ("owner/repo", 1)),
+        ("github_pr_merge", ("owner/repo", 1)),
+    ],
+)
+def test_github_pr_tool_error_paths(tools, tool_name, args):
+    with patch("githost_mcp.tools.github.get_github", side_effect=ValueError("boom")):
+        result = tools[tool_name](*args)
+    assert "error" in result

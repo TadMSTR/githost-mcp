@@ -55,19 +55,19 @@ flowchart TD
 
 **githost-mcp fills the gap:** local git + multi-provider remote via native APIs + per-agent structured audit trail.
 
-## Tools (39 total)
+## Tools (45 total)
 
 ### Local Git (11)
 `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`
 
-### GitHub (7)
-`github_create_release`, `github_get_release`, `github_list_releases`, `github_workflow_list`, `github_workflow_status`, `github_pr_list`, `github_pr_comments`
+### GitHub (10)
+`github_create_release`, `github_get_release`, `github_list_releases`, `github_workflow_list`, `github_workflow_status`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_merge`
 
 ### Gitea (8)
 `gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`
 
-### GitLab (4)
-`gitlab_create_release`, `gitlab_get_release`, `gitlab_list_releases`, `gitlab_mr_list`
+### GitLab (7)
+`gitlab_create_release`, `gitlab_get_release`, `gitlab_list_releases`, `gitlab_mr_list`, `gitlab_mr_create`, `gitlab_mr_get`, `gitlab_mr_merge`
 
 ### Release Orchestration (1)
 `release` — coordinated multi-target release: git tag → GitHub/Gitea/GitLab release → PyPI → npm, with rollback on failure
