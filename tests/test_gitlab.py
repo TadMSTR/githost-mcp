@@ -77,3 +77,85 @@ def test_gitlab_401_clean_error(tools, monkeypatch):
         result = fns["gitlab_list_releases"]("owner/project")
     assert "error" in result
     assert token not in result["error"]
+
+
+def _passthrough(fn, *a, **kw):
+    return fn(*a, **kw)
+
+
+def _patch_gl(mock_gl):
+    return (
+        patch("githost_mcp.tools.gitlab.get_gitlab", return_value=mock_gl),
+        patch("githost_mcp.tools.gitlab.gitlab_call", side_effect=_passthrough),
+    )
+
+
+def test_gitlab_create_release(tools):
+    rel = MagicMock()
+    rel.name = "Release 1.0.0"
+    rel._links = {"self": "https://gitlab.com/owner/project/-/releases/v1.0.0"}
+    mock_proj = MagicMock()
+    mock_proj.releases.create.return_value = rel
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_create_release"]("owner/project", "v1.0.0")
+    assert result["tag"] == "v1.0.0"
+    assert result["url"].endswith("v1.0.0")
+
+
+def test_gitlab_get_release(tools):
+    rel = MagicMock()
+    rel.tag_name = "v1.0.0"
+    rel.name = "Release 1.0.0"
+    rel.description = "notes"
+    rel.released_at = "2026-05-01T00:00:00Z"
+    mock_proj = MagicMock()
+    mock_proj.releases.get.return_value = rel
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_get_release"]("owner/project", "v1.0.0")
+    assert result["tag"] == "v1.0.0"
+    assert result["description"] == "notes"
+
+
+def test_gitlab_mr_list(tools):
+    mr = MagicMock()
+    mr.iid = 5
+    mr.title = "Add feature"
+    mr.state = "opened"
+    mr.author = {"username": "dev"}
+    mr.source_branch = "feature"
+    mr.target_branch = "main"
+    mr.created_at = "2026-05-01T00:00:00Z"
+    mr.web_url = "https://gitlab.com/owner/project/-/merge_requests/5"
+    mock_proj = MagicMock()
+    mock_proj.mergerequests.list.return_value = [mr]
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_list"]("owner/project", state="opened")
+    assert result["mrs"][0]["iid"] == 5
+    assert result["mrs"][0]["author"] == "dev"
+
+
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("gitlab_create_release", ("owner/project", "v1")),
+        ("gitlab_get_release", ("owner/project", "v1")),
+        ("gitlab_list_releases", ("owner/project",)),
+        ("gitlab_mr_list", ("owner/project",)),
+    ],
+)
+def test_gitlab_tool_error_paths(tools, tool_name, args):
+    with patch("githost_mcp.tools.gitlab.get_gitlab", side_effect=ValueError("boom")):
+        result = tools[tool_name](*args)
+    assert "error" in result

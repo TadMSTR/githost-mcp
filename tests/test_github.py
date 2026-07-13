@@ -113,3 +113,151 @@ def test_github_pr_list(tools):
         result = fns["github_pr_list"]("owner/repo")
     assert len(result["prs"]) == 1
     assert result["prs"][0]["number"] == 42
+
+
+def _passthrough(fn, *a, **kw):
+    return fn(*a, **kw)
+
+
+def _patch_gh(mock_gh):
+    return (
+        patch("githost_mcp.tools.github.get_github", return_value=mock_gh),
+        patch("githost_mcp.tools.github.github_call", side_effect=_passthrough),
+    )
+
+
+def test_github_get_release_with_published_at(tools):
+    rel = _mock_release()
+    published = MagicMock()
+    published.isoformat.return_value = "2026-05-01T00:00:00"
+    rel.published_at = published
+    mock_repo = MagicMock()
+    mock_repo.get_release.return_value = rel
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_get_release"]("owner/repo", "v1.0.0")
+    assert result["tag"] == "v1.0.0"
+    assert result["published_at"] == "2026-05-01T00:00:00"
+
+
+def test_github_get_release_no_published_at(tools):
+    """published_at None branch returns None rather than raising."""
+    mock_repo = MagicMock()
+    mock_repo.get_release.return_value = _mock_release()
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_get_release"]("owner/repo", "v1.0.0")
+    assert result["published_at"] is None
+
+
+def test_github_list_releases(tools):
+    mock_repo = MagicMock()
+    mock_repo.get_releases.return_value.get_page.return_value = [_mock_release("v1.0.0")]
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_list_releases"]("owner/repo", limit=5)
+    assert len(result["releases"]) == 1
+    assert result["releases"][0]["tag"] == "v1.0.0"
+
+
+def _mock_run(run_id=99):
+    run = MagicMock()
+    run.id = run_id
+    run.name = "CI"
+    run.status = "completed"
+    run.conclusion = "success"
+    run.workflow_id = 312
+    run.created_at.isoformat.return_value = "2026-05-01T00:00:00"
+    run.updated_at.isoformat.return_value = "2026-05-01T00:05:00"
+    run.html_url = f"https://github.com/owner/repo/actions/runs/{run_id}"
+    return run
+
+
+def test_github_workflow_list_with_ref(tools):
+    """ref filter passes branch kwarg through to get_workflow_runs."""
+    mock_repo = MagicMock()
+    mock_repo.get_workflow_runs.return_value = [_mock_run()]
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_workflow_list"]("owner/repo", ref="main", limit=3)
+    assert result["runs"][0]["id"] == 99
+    assert mock_repo.get_workflow_runs.call_args.kwargs == {"branch": "main"}
+
+
+def test_github_workflow_list_no_ref(tools):
+    mock_repo = MagicMock()
+    mock_repo.get_workflow_runs.return_value = [_mock_run()]
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_workflow_list"]("owner/repo")
+    assert result["runs"][0]["conclusion"] == "success"
+    assert mock_repo.get_workflow_runs.call_args.kwargs == {}
+
+
+def test_github_workflow_status(tools):
+    mock_repo = MagicMock()
+    mock_repo.get_workflow_run.return_value = _mock_run(run_id=1234)
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_workflow_status"]("owner/repo", 1234)
+    assert result["id"] == 1234
+    assert result["updated_at"] == "2026-05-01T00:05:00"
+
+
+def test_github_pr_comments(tools):
+    comment = MagicMock()
+    comment.id = 7
+    comment.user.login = "reviewer"
+    comment.body = "LGTM"
+    comment.created_at.isoformat.return_value = "2026-05-01T00:00:00"
+    comment.updated_at.isoformat.return_value = "2026-05-01T00:01:00"
+
+    mock_pr = MagicMock()
+    mock_pr.get_issue_comments.return_value = [comment]
+    mock_repo = MagicMock()
+    mock_repo.get_pull.return_value = mock_pr
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_comments"]("owner/repo", 42)
+    assert result["pr"] == 42
+    assert result["comments"][0]["author"] == "reviewer"
+
+
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("github_create_release", ("owner/repo", "v1")),
+        ("github_get_release", ("owner/repo", "v1")),
+        ("github_list_releases", ("owner/repo",)),
+        ("github_workflow_list", ("owner/repo",)),
+        ("github_workflow_status", ("owner/repo", 123)),
+        ("github_pr_list", ("owner/repo",)),
+        ("github_pr_comments", ("owner/repo", 1)),
+    ],
+)
+def test_github_tool_error_paths(tools, tool_name, args):
+    """Every tool routes exceptions through _err rather than propagating."""
+    with patch("githost_mcp.tools.github.get_github", side_effect=ValueError("boom")):
+        result = tools[tool_name](*args)
+    assert "error" in result

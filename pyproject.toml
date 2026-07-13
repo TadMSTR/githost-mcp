@@ -67,7 +67,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 source = ["githost_mcp"]
 
 [tool.coverage.report]
-# fail_under tracks actually-achieved coverage; raised toward the 80% floor as
-# test coverage lands (see build githost-mcp-baseline-and-ci-2026-07, Phase 3).
-fail_under = 64
+# Repo-standards Baseline 80% floor, reached in build
+# githost-mcp-baseline-and-ci-2026-07 (Phase 3). Measured coverage sits above this.
+fail_under = 80
 show_missing = true
