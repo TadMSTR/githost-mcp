@@ -242,3 +242,48 @@ def test_gitlab_mr_tool_error_paths(tools, tool_name, args):
     with patch("githost_mcp.tools.gitlab.get_gitlab", side_effect=ValueError("boom")):
         result = tools[tool_name](*args)
     assert "error" in result
+
+
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("gitlab_create_release", ("bad-no-slash", "v1")),
+        ("gitlab_get_release", ("bad-no-slash", "v1")),
+        ("gitlab_list_releases", ("bad-no-slash",)),
+        ("gitlab_mr_list", ("bad-no-slash",)),
+        ("gitlab_mr_create", ("bad-no-slash", "t", "src", "tgt")),
+        ("gitlab_mr_get", ("bad-no-slash", 1)),
+        ("gitlab_mr_merge", ("bad-no-slash", 1)),
+    ],
+)
+def test_gitlab_rejects_bad_project_format(tools, tool_name, args):
+    """Every tool rejects a malformed project before it reaches the client library (IV-01)."""
+    result = tools[tool_name](*args)
+    assert "error" in result
+    assert "project must" in result["error"]
+
+
+@pytest.mark.parametrize("project", ["group/subgroup/project", "12345"])
+def test_gitlab_accepts_nested_and_numeric_project(tools, project):
+    """Nested group paths and numeric project IDs are valid GitLab identifiers — must pass."""
+    mr = MagicMock()
+    mr.iid = 5
+    mr.title = "t"
+    mr.state = "opened"
+    mr.merge_status = "can_be_merged"
+    mr.source_branch = "a"
+    mr.target_branch = "b"
+    mr.author = {"username": "u"}
+    mr.web_url = "w"
+    mr.created_at = "c"
+    mr.updated_at = "d"
+    mr.labels = []
+    mock_proj = MagicMock()
+    mock_proj.mergerequests.get.return_value = mr
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_get"](project, 5)
+    assert result["iid"] == 5  # passed validation and reached the client

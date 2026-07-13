@@ -354,3 +354,25 @@ def test_github_pr_tool_error_paths(tools, tool_name, args):
     with patch("githost_mcp.tools.github.get_github", side_effect=ValueError("boom")):
         result = tools[tool_name](*args)
     assert "error" in result
+
+
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("github_create_release", ("bad-no-slash", "v1")),
+        ("github_get_release", ("bad-no-slash", "v1")),
+        ("github_list_releases", ("bad-no-slash",)),
+        ("github_workflow_list", ("bad-no-slash",)),
+        ("github_workflow_status", ("bad-no-slash", 1)),
+        ("github_pr_list", ("bad-no-slash",)),
+        ("github_pr_comments", ("bad-no-slash", 1)),
+        ("github_pr_create", ("bad-no-slash", "t", "h", "b")),
+        ("github_pr_get", ("bad-no-slash", 1)),
+        ("github_pr_merge", ("bad-no-slash", 1)),
+    ],
+)
+def test_github_rejects_bad_repo_format(tools, tool_name, args):
+    """Every tool rejects a malformed repo before it reaches the client library (IV-01)."""
+    result = tools[tool_name](*args)
+    assert "error" in result
+    assert "owner/repo" in result["error"]
