@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.0] — 2026-07-13
+
+### Added
+- Manifest-aware fallback for `ALLOWED_REPO_ROOTS`: when the env var is unset or empty,
+  the allowlist now resolves from the requesting agent's manifest
+  (`AGENT_MANIFEST_PATH`, default `~/.claude/manifests/{AGENT_ID}-agent.yml`), using
+  `git_backed: true` entries from `workspace_access`. Explicit `ALLOWED_REPO_ROOTS`
+  always wins when set — no behavior change for any existing deployment. Root-cause fix
+  for GHOST-7, GHOST-5, GHOST-2 (allowlist drift).
+- `pytest-cov` wired into CI (`.woodpecker.yml`) with a `--cov-fail-under=60` gate.
+
+### Fixed
+- `audit_log_query(since=...)` raised an uncaught `TypeError` (naive vs. aware datetime
+  comparison) whenever `since` was passed without a timezone suffix — exactly the format
+  shown in its own docstring example (`'2026-05-20'`).
+
+### Changed
+- Test coverage: `tools/registry.py` 0% → 96%, `tools/audit_query.py` 0% → 97%,
+  `tools/release.py` 22% → 69%. Overall coverage 49% → 64%.
+
+### Docs
+- `AGENTS.md`: fixed `ALLOWED_REPO_ROOTS` colon/comma mismatch; documented the new
+  `AGENT_MANIFEST_PATH` fallback.
+
+### Security
+- Audited 2026-07-13 (`githost-mcp-allowlist-and-coverage-2026-07`): 0 critical/high, 2
+  medium, 1 low, 2 info. M-2 (manifest fallback doesn't honor `access: readonly`, dormant
+  until manifest reconciliation) accepted as known risk — see
+  `host-forge/security/accepted-risks.md`. M-1 (credential-masking asymmetry, pre-existing)
+  and L-1 (transitive dependency CVEs) filed as follow-up tickets (GHOST-8, GHOST-9).
+
 ## [0.3.0] — 2026-06-01
 
 ### Added

@@ -18,8 +18,15 @@ def tmp_repo(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def reset_config():
-    """Reset config singleton between tests."""
+def reset_config(monkeypatch):
+    """Reset config singleton between tests.
+
+    Also strips AGENT_ID/AGENT_MANIFEST_PATH so a real manifest on the host
+    machine can't leak into tests that don't opt into the manifest-fallback
+    path explicitly.
+    """
+    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("AGENT_MANIFEST_PATH", raising=False)
     from githost_mcp.config import reset_config
     reset_config()
     yield

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import structlog
@@ -13,6 +13,19 @@ from ..audit import verify_entry_hmac
 from ..config import get_config
 
 log = structlog.get_logger(__name__)
+
+
+def _parse_iso_utc(value: str) -> datetime:
+    """Parse an ISO date/datetime string, assuming UTC when no offset is given.
+
+    Naive datetimes (e.g. '2026-05-20', with no 'Z' or offset) can't be compared
+    to timezone-aware ones — this normalizes both sides of the 'since' filter to
+    always be timezone-aware so the comparison never raises.
+    """
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def register(mcp) -> None:
@@ -44,7 +57,7 @@ def register(mcp) -> None:
         since_dt: Optional[datetime] = None
         if since:
             try:
-                since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+                since_dt = _parse_iso_utc(since)
             except ValueError:
                 return {"error": f"Invalid 'since' date format: '{since}'. Use ISO format like '2026-05-20'."}
 
@@ -72,7 +85,7 @@ def register(mcp) -> None:
                 continue
             if since_dt:
                 try:
-                    entry_dt = datetime.fromisoformat(entry["ts"].replace("Z", "+00:00"))
+                    entry_dt = _parse_iso_utc(entry["ts"])
                     if entry_dt < since_dt:
                         continue
                 except (KeyError, ValueError):

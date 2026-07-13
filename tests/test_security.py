@@ -86,3 +86,38 @@ def test_read_unset_allowed_roots_blocks_all(monkeypatch):
     reset_config()
     with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
         validate_read_path("/tmp/any/path")
+
+
+@pytest.fixture()
+def manifest_allowed_env(tmp_path, monkeypatch):
+    """Populate allowed_repo_roots via the manifest-fallback path instead of env."""
+    import yaml
+    allowed = str(tmp_path / "repos")
+    os.makedirs(allowed, exist_ok=True)
+    manifest_path = tmp_path / "developer-agent.yml"
+    with open(manifest_path, "w") as f:
+        yaml.safe_dump({"workspace_access": [{"path": allowed, "git_backed": True}]}, f)
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", str(manifest_path))
+    from githost_mcp.config import reset_config
+    reset_config()
+    yield allowed, tmp_path
+
+
+def test_manifest_sourced_path_under_allowed_root_passes(manifest_allowed_env):
+    """validate_write_path doesn't care whether roots came from env or manifest."""
+    allowed, tmp = manifest_allowed_env
+    repo_path = os.path.join(allowed, "myrepo")
+    os.makedirs(repo_path, exist_ok=True)
+    validate_write_path(repo_path)  # should not raise
+    validate_read_path(repo_path)  # should not raise
+
+
+def test_manifest_sourced_path_outside_allowed_root_blocked(manifest_allowed_env):
+    allowed, tmp = manifest_allowed_env
+    outside = str(tmp / "other" / "repo")
+    os.makedirs(outside, exist_ok=True)
+    with pytest.raises(ValueError, match="not under any allowed root"):
+        validate_write_path(outside)
