@@ -1,8 +1,48 @@
+[![Built with Claude Code](https://img.shields.io/badge/Built_with-Claude_Code-6B57FF?logo=claude&logoColor=white)](https://claude.ai/code)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 # githost-mcp
 
 Unified local + multi-provider git MCP server with a per-agent audit trail as a first-class feature.
 
 Every tool call is tagged with the caller agent (`AGENT_ID`), written to a structured JSONL audit log, and write operations emit agent-bus events. Local git operations run entirely through gitpython — no subprocess, no injection risk.
+
+## Architecture
+
+Every tool call dispatches to one provider and writes a signed audit entry before returning; write operations additionally emit an agent-bus event.
+
+```mermaid
+flowchart LR
+    client[MCP client / agent] -->|tool call + AGENT_ID| tool[githost-mcp tool]
+    tool --> dispatch{provider}
+    dispatch -->|local| localgit[gitpython]
+    dispatch -->|GitHub| gh[PyGithub]
+    dispatch -->|Gitea| gitea[httpx]
+    dispatch -->|GitLab| glab[python-gitlab]
+    dispatch -->|Woodpecker| wp[httpx]
+    localgit --> audit[audit.py]
+    gh --> audit
+    gitea --> audit
+    glab --> audit
+    wp --> audit
+    audit -->|HMAC-signed JSONL| logfile[(audit log)]
+    tool -.->|write ops| bus[[agent-bus event]]
+```
+
+Path-taking tools resolve their allowlist before touching the filesystem. An explicit `ALLOWED_REPO_ROOTS` always wins; otherwise the agent manifest is consulted as a fallback; if neither yields a root, the operation fails closed.
+
+```mermaid
+flowchart TD
+    call[path-taking tool call] --> env{ALLOWED_REPO_ROOTS set?}
+    env -->|yes| envroots[use env roots]
+    env -->|no| manifest{manifest roots available?}
+    manifest -->|yes| mroots[use manifest-declared roots]
+    manifest -->|no| deny[deny — fail closed]
+    envroots --> validate{path under an allowed root?}
+    mroots --> validate
+    validate -->|yes| allow[proceed]
+    validate -->|no| deny
+```
 
 ## Why githost-mcp?
 
@@ -15,7 +55,7 @@ Every tool call is tagged with the caller agent (`AGENT_ID`), written to a struc
 
 **githost-mcp fills the gap:** local git + multi-provider remote via native APIs + per-agent structured audit trail.
 
-## Tools (32 total)
+## Tools (39 total)
 
 ### Local Git (11)
 `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`
@@ -23,8 +63,8 @@ Every tool call is tagged with the caller agent (`AGENT_ID`), written to a struc
 ### GitHub (7)
 `github_create_release`, `github_get_release`, `github_list_releases`, `github_workflow_list`, `github_workflow_status`, `github_pr_list`, `github_pr_comments`
 
-### Gitea (4)
-`gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_pr_list`
+### Gitea (8)
+`gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`
 
 ### GitLab (4)
 `gitlab_create_release`, `gitlab_get_release`, `gitlab_list_releases`, `gitlab_mr_list`
@@ -35,8 +75,8 @@ Every tool call is tagged with the caller agent (`AGENT_ID`), written to a struc
 ### Registry (2)
 `pypi_publish`, `npm_publish`
 
-### Woodpecker CI (2)
-`woodpecker_trigger`, `woodpecker_status`
+### Woodpecker CI (5)
+`woodpecker_trigger`, `woodpecker_list_pipelines`, `woodpecker_get_logs`, `woodpecker_pipeline_cancel`, `woodpecker_status`
 
 ### Audit (1)
 `audit_log_query` — query the JSONL audit log by agent, tool, repo, or time range

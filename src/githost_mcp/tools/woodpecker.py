@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 import httpx
 import structlog
 
-_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
-
 from ..audit import AuditCtx
 from ..config import get_config
+
+_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+_REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
 
 log = structlog.get_logger(__name__)
 
@@ -20,7 +20,10 @@ def _woodpecker_headers() -> dict[str, str]:
     config = get_config()
     if not config.woodpecker_token:
         raise ValueError("WOODPECKER_TOKEN is not set")
-    return {"Authorization": f"Bearer {config.woodpecker_token}", "Content-Type": "application/json"}
+    return {
+        "Authorization": f"Bearer {config.woodpecker_token}",
+        "Content-Type": "application/json",
+    }
 
 
 def _woodpecker_base() -> str:
@@ -59,7 +62,7 @@ async def _woodpecker_repo_id(
 
 def register(mcp) -> None:
     @mcp.tool
-    async def woodpecker_trigger(repo: str, branch: Optional[str] = None) -> dict:
+    async def woodpecker_trigger(repo: str, branch: str | None = None) -> dict:
         """Trigger a Woodpecker CI pipeline for a repository.
 
         Args:
@@ -67,7 +70,7 @@ def register(mcp) -> None:
             branch: Branch to trigger (default: repo default branch).
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         ac = AuditCtx("woodpecker_trigger", "woodpecker", repo, {"repo": repo, "branch": branch})
         try:
             owner, name = repo.split("/", 1)
@@ -99,7 +102,7 @@ def register(mcp) -> None:
     async def woodpecker_list_pipelines(
         repo: str,
         limit: int = 10,
-        status: Optional[str] = None,
+        status: str | None = None,
     ) -> dict:
         """List recent pipeline runs for a Woodpecker repository.
 
@@ -109,10 +112,12 @@ def register(mcp) -> None:
             status: Optional filter by status (e.g. pending/running/success/failure/error).
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         limit = min(limit, 100)
         ac = AuditCtx(
-            "woodpecker_list_pipelines", "woodpecker", repo,
+            "woodpecker_list_pipelines",
+            "woodpecker",
+            repo,
             {"repo": repo, "limit": limit, "status": status},
         )
         try:
@@ -153,7 +158,7 @@ def register(mcp) -> None:
     async def woodpecker_get_logs(
         repo: str,
         pipeline_id: int,
-        step_name: Optional[str] = None,
+        step_name: str | None = None,
     ) -> dict:
         """Fetch step output from a Woodpecker pipeline run.
 
@@ -167,11 +172,13 @@ def register(mcp) -> None:
             step_name: Step name to fetch (default: first step).
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         # NOTE: Only metadata is logged here — step output may contain secrets from
         # pipeline environment variables and must not appear in the audit trail.
         ac = AuditCtx(
-            "woodpecker_get_logs", "woodpecker", repo,
+            "woodpecker_get_logs",
+            "woodpecker",
+            repo,
             {"repo": repo, "pipeline_id": pipeline_id, "step_name": step_name},
         )
         try:
@@ -242,9 +249,11 @@ def register(mcp) -> None:
             pipeline_id: Pipeline ID to cancel.
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         ac = AuditCtx(
-            "woodpecker_pipeline_cancel", "woodpecker", repo,
+            "woodpecker_pipeline_cancel",
+            "woodpecker",
+            repo,
             {"repo": repo, "pipeline_id": pipeline_id},
         )
         try:
@@ -276,8 +285,10 @@ def register(mcp) -> None:
             pipeline_id: Pipeline ID or number from woodpecker_trigger.
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
-        ac = AuditCtx("woodpecker_status", "woodpecker", repo, {"repo": repo, "pipeline_id": pipeline_id})
+            return {"error": _REPO_FMT_ERR}
+        ac = AuditCtx(
+            "woodpecker_status", "woodpecker", repo, {"repo": repo, "pipeline_id": pipeline_id}
+        )
         try:
             owner, name = repo.split("/", 1)
             base = _woodpecker_base()

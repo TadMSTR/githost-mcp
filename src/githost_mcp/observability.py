@@ -8,7 +8,6 @@ for optional dependencies are silenced so the server starts without them.
 from __future__ import annotations
 
 import json
-import os
 import time
 from typing import Any
 
@@ -45,13 +44,23 @@ def _init_otel() -> None:
         resource = Resource.create({"service.name": config.otel_service_name})
 
         if config.otel_protocol == "grpc":
-            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter  # type: ignore
-            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter  # type: ignore
+            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+                OTLPMetricExporter,  # type: ignore
+            )
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter,  # type: ignore
+            )
+
             span_exporter = OTLPSpanExporter(endpoint=config.otel_endpoint)
             metric_exporter = OTLPMetricExporter(endpoint=config.otel_endpoint)
         else:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter  # type: ignore
-            from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter  # type: ignore
+            from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+                OTLPMetricExporter,  # type: ignore
+            )
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter,  # type: ignore
+            )
+
             span_exporter = OTLPSpanExporter(endpoint=config.otel_endpoint)
             metric_exporter = OTLPMetricExporter(endpoint=config.otel_endpoint)
 
@@ -153,9 +162,7 @@ async def _push_loki(labels: dict[str, str], message: str) -> None:
 
         all_labels = {**_loki_static_labels, **labels}
         ts_ns = str(int(time.time() * 1e9))
-        payload = {
-            "streams": [{"stream": all_labels, "values": [[ts_ns, message]]}]
-        }
+        payload = {"streams": [{"stream": all_labels, "values": [[ts_ns, message]]}]}
         async with httpx.AsyncClient(timeout=3.0) as client:
             await client.post(
                 f"{_loki_url}/loki/api/v1/push",
@@ -203,6 +210,7 @@ async def _publish_nats(subject_suffix: str, data: dict) -> None:
 # Unified emit — called by audit.py after each tool invocation
 # ---------------------------------------------------------------------------
 
+
 async def emit_tool_event(
     tool: str,
     provider: str,
@@ -216,23 +224,25 @@ async def emit_tool_event(
     # OTEL span + metrics
     if _tracer is not None:
         try:
-            from opentelemetry import trace  # type: ignore
-
             with _tracer.start_as_current_span(f"githost.{tool}") as span:
-                span.set_attributes({
-                    "githost.tool": tool,
-                    "githost.provider": provider,
-                    "githost.agent_id": agent_id,
-                    "githost.repo": repo_basename,
-                    "githost.result": result,
-                    "githost.duration_ms": duration_ms,
-                })
+                span.set_attributes(
+                    {
+                        "githost.tool": tool,
+                        "githost.provider": provider,
+                        "githost.agent_id": agent_id,
+                        "githost.repo": repo_basename,
+                        "githost.result": result,
+                        "githost.duration_ms": duration_ms,
+                    }
+                )
         except Exception as exc:
             log.warning("otel_span_failed", error=str(exc))
 
     if _tool_calls_counter is not None:
         try:
-            _tool_calls_counter.add(1, {"tool": tool, "provider": provider, "agent_id": agent_id, "result": result})
+            _tool_calls_counter.add(
+                1, {"tool": tool, "provider": provider, "agent_id": agent_id, "result": result}
+            )
             _tool_duration_histogram.record(duration_ms, {"tool": tool, "provider": provider})
         except Exception as exc:
             log.warning("otel_metric_failed", error=str(exc))
@@ -240,7 +250,9 @@ async def emit_tool_event(
     # Prometheus
     if _prom_tool_calls is not None:
         try:
-            _prom_tool_calls.labels(tool=tool, provider=provider, agent_id=agent_id, result=result).inc()
+            _prom_tool_calls.labels(
+                tool=tool, provider=provider, agent_id=agent_id, result=result
+            ).inc()
             _prom_tool_duration.labels(tool=tool, provider=provider).observe(duration_ms)
         except Exception as exc:
             log.warning("prometheus_record_failed", error=str(exc))
@@ -248,15 +260,23 @@ async def emit_tool_event(
     # Loki
     if _loki_url:
         loki_labels = {"agent_id": agent_id, "tool": tool, "provider": provider}
-        msg = json.dumps({"tool": tool, "provider": provider, "result": result, "duration_ms": duration_ms})
+        msg = json.dumps(
+            {"tool": tool, "provider": provider, "result": result, "duration_ms": duration_ms}
+        )
         await _push_loki(loki_labels, msg)
 
     # NATS
     if _nats_client is not None:
         await _publish_nats(
             f"tool.{tool}",
-            {"tool": tool, "provider": provider, "agent_id": agent_id, "repo": repo_basename,
-             "result": result, "duration_ms": duration_ms},
+            {
+                "tool": tool,
+                "provider": provider,
+                "agent_id": agent_id,
+                "repo": repo_basename,
+                "result": result,
+                "duration_ms": duration_ms,
+            },
         )
 
 
@@ -276,6 +296,7 @@ def emit_release_target(target: str, result: str) -> None:
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
+
 
 def init_sync() -> None:
     """Call at process start (before event loop) for sync init."""

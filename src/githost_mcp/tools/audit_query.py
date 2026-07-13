@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import structlog
 
@@ -24,17 +23,17 @@ def _parse_iso_utc(value: str) -> datetime:
     """
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
 def register(mcp) -> None:
     @mcp.tool
     def audit_log_query(
-        agent_id: Optional[str] = None,
-        tool: Optional[str] = None,
-        repo: Optional[str] = None,
-        since: Optional[str] = None,
+        agent_id: str | None = None,
+        tool: str | None = None,
+        repo: str | None = None,
+        since: str | None = None,
         limit: int = 50,
     ) -> dict:
         """Query the structured JSONL audit log.
@@ -54,12 +53,16 @@ def register(mcp) -> None:
         if not os.path.exists(audit_path):
             return {"entries": [], "total_matched": 0}
 
-        since_dt: Optional[datetime] = None
+        since_dt: datetime | None = None
         if since:
             try:
                 since_dt = _parse_iso_utc(since)
             except ValueError:
-                return {"error": f"Invalid 'since' date format: '{since}'. Use ISO format like '2026-05-20'."}
+                return {
+                    "error": (
+                        f"Invalid 'since' date format: '{since}'. Use ISO format like '2026-05-20'."
+                    )
+                }
 
         entries = []
         try:

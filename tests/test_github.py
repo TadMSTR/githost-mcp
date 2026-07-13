@@ -1,6 +1,7 @@
 """Tests for GitHub tools with mocked PyGithub."""
 
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from githost_mcp.audit import init_logging
@@ -17,6 +18,7 @@ def setup_env(tmp_path, monkeypatch):
     init_logging()
     # Reset cached github client
     import githost_mcp._providers.github_client as gc
+
     gc._client = None
 
 
@@ -30,6 +32,7 @@ def tools():
             return fn
 
     from githost_mcp.tools.github import register
+
     register(MockMCP())
     return registered
 
@@ -54,8 +57,12 @@ def test_github_create_release(tools):
     mock_gh = MagicMock()
     mock_gh.get_repo.return_value = mock_repo
 
-    with patch("githost_mcp.tools.github.get_github", return_value=mock_gh), \
-         patch("githost_mcp.tools.github.github_call", side_effect=lambda fn, *a, **kw: fn(*a, **kw)):
+    with (
+        patch("githost_mcp.tools.github.get_github", return_value=mock_gh),
+        patch(
+            "githost_mcp.tools.github.github_call", side_effect=lambda fn, *a, **kw: fn(*a, **kw)
+        ),
+    ):
         result = fns["github_create_release"]("owner/repo", "v1.0.0")
     assert result["tag"] == "v1.0.0"
     assert "url" in result
@@ -68,6 +75,7 @@ def test_github_401_surfaces_clean_error(tools, monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", token)
     reset_config()
     import githost_mcp._providers.github_client as gc
+
     gc._client = None
 
     def raise_401(*args, **kwargs):
@@ -96,8 +104,12 @@ def test_github_pr_list(tools):
     mock_gh = MagicMock()
     mock_gh.get_repo.return_value = mock_repo
 
-    with patch("githost_mcp.tools.github.get_github", return_value=mock_gh), \
-         patch("githost_mcp.tools.github.github_call", side_effect=lambda fn, *a, **kw: fn(*a, **kw)):
+    with (
+        patch("githost_mcp.tools.github.get_github", return_value=mock_gh),
+        patch(
+            "githost_mcp.tools.github.github_call", side_effect=lambda fn, *a, **kw: fn(*a, **kw)
+        ),
+    ):
         result = fns["github_pr_list"]("owner/repo")
     assert len(result["prs"]) == 1
     assert result["prs"][0]["number"] == 42

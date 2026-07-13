@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import structlog
 
 from .._providers.gitlab_client import get_gitlab, gitlab_call
@@ -22,8 +20,8 @@ def register(mcp) -> None:
     def gitlab_create_release(
         project: str,
         tag: str,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
+        name: str | None = None,
+        description: str | None = None,
     ) -> dict:
         """Create a GitLab release for a tag.
 
@@ -46,7 +44,11 @@ def register(mcp) -> None:
                 },
             )
             ac.finish("ok")
-            return {"tag": tag, "name": release.name, "url": getattr(release, "_links", {}).get("self", "")}
+            return {
+                "tag": tag,
+                "name": release.name,
+                "url": getattr(release, "_links", {}).get("self", ""),
+            }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
@@ -83,17 +85,21 @@ def register(mcp) -> None:
             project: Project in 'namespace/project' format.
             limit: Max releases to return (default 10).
         """
-        ac = AuditCtx("gitlab_list_releases", "gitlab", project, {"project": project, "limit": limit})
+        ac = AuditCtx(
+            "gitlab_list_releases", "gitlab", project, {"project": project, "limit": limit}
+        )
         try:
             gl = get_gitlab()
             proj = gitlab_call(gl.projects.get, project)
             releases = []
             for r in gitlab_call(proj.releases.list, get_all=False)[:limit]:
-                releases.append({
-                    "tag": r.tag_name,
-                    "name": r.name,
-                    "released_at": r.released_at,
-                })
+                releases.append(
+                    {
+                        "tag": r.tag_name,
+                        "name": r.name,
+                        "released_at": r.released_at,
+                    }
+                )
             ac.finish("ok")
             return {"project": project, "releases": releases}
         except Exception as e:
@@ -115,16 +121,18 @@ def register(mcp) -> None:
             proj = gitlab_call(gl.projects.get, project)
             mrs = []
             for mr in gitlab_call(proj.mergerequests.list, state=state, get_all=False)[:limit]:
-                mrs.append({
-                    "iid": mr.iid,
-                    "title": mr.title,
-                    "state": mr.state,
-                    "author": mr.author.get("username") if mr.author else None,
-                    "source_branch": mr.source_branch,
-                    "target_branch": mr.target_branch,
-                    "created_at": mr.created_at,
-                    "web_url": mr.web_url,
-                })
+                mrs.append(
+                    {
+                        "iid": mr.iid,
+                        "title": mr.title,
+                        "state": mr.state,
+                        "author": mr.author.get("username") if mr.author else None,
+                        "source_branch": mr.source_branch,
+                        "target_branch": mr.target_branch,
+                        "created_at": mr.created_at,
+                        "web_url": mr.web_url,
+                    }
+                )
             ac.finish("ok")
             return {"project": project, "mrs": mrs}
         except Exception as e:

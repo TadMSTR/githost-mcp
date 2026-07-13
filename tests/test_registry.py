@@ -36,6 +36,7 @@ def tools():
             return fn
 
     from githost_mcp.tools.registry import register
+
     register(MockMCP())
     return registered
 
@@ -66,10 +67,13 @@ def _mock_run(returncode=0, stdout="", stderr=""):
 
 # --- pypi_publish -----------------------------------------------------------
 
+
 def test_pypi_publish_success(tools, pkg_repo):
     check_ok = _mock_run(returncode=0, stdout="Checking dist...PASSED")
     upload_ok = _mock_run(returncode=0, stdout="Uploaded pkg-1.0.0")
-    with patch("githost_mcp.tools.registry.subprocess.run", side_effect=[check_ok, upload_ok]) as run:
+    with patch(
+        "githost_mcp.tools.registry.subprocess.run", side_effect=[check_ok, upload_ok]
+    ) as run:
         result = tools["pypi_publish"](str(pkg_repo))
     assert "error" not in result
     assert result["target"] == "pypi"
@@ -176,6 +180,7 @@ def test_pypi_publish_path_outside_allowed_root_blocked(tools, tmp_path):
 
 
 # --- npm_publish -------------------------------------------------------------
+
 
 @pytest.fixture()
 def npm_repo(tmp_path):

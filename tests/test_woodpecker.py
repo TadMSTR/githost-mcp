@@ -1,8 +1,8 @@
 """Tests for Woodpecker tools with respx HTTP mocks (Woodpecker 3.x API)."""
 
+import httpx
 import pytest
 import respx
-import httpx
 
 from githost_mcp.audit import init_logging
 from githost_mcp.config import reset_config
@@ -33,6 +33,7 @@ def tools():
             return fn
 
     from githost_mcp.tools.woodpecker import register
+
     register(MockMCP())
     return registered
 
@@ -47,16 +48,30 @@ def _lookup_mock():
 @pytest.mark.asyncio
 async def test_woodpecker_list_pipelines_success(tools):
     mock_data = [
-        {"id": 1, "number": 1, "status": "success", "branch": "main", "event": "push",
-         "created": 1000, "started": 1001, "finished": 1010},
-        {"id": 2, "number": 2, "status": "failure", "branch": "feature", "event": "push",
-         "created": 2000, "started": 2001, "finished": 2010},
+        {
+            "id": 1,
+            "number": 1,
+            "status": "success",
+            "branch": "main",
+            "event": "push",
+            "created": 1000,
+            "started": 1001,
+            "finished": 1010,
+        },
+        {
+            "id": 2,
+            "number": 2,
+            "status": "failure",
+            "branch": "feature",
+            "event": "push",
+            "created": 2000,
+            "started": 2001,
+            "finished": 2010,
+        },
     ]
     with respx.mock:
         _lookup_mock()
-        respx.get(f"{REPO_URL}/pipelines").mock(
-            return_value=httpx.Response(200, json=mock_data)
-        )
+        respx.get(f"{REPO_URL}/pipelines").mock(return_value=httpx.Response(200, json=mock_data))
         result = await tools["woodpecker_list_pipelines"]("owner/repo")
     assert "pipelines" in result
     assert len(result["pipelines"]) == 2
@@ -67,16 +82,30 @@ async def test_woodpecker_list_pipelines_success(tools):
 @pytest.mark.asyncio
 async def test_woodpecker_list_pipelines_status_filter(tools):
     mock_data = [
-        {"id": 1, "number": 1, "status": "success", "branch": "main", "event": "push",
-         "created": 1000, "started": 1001, "finished": 1010},
-        {"id": 2, "number": 2, "status": "failure", "branch": "feature", "event": "push",
-         "created": 2000, "started": 2001, "finished": 2010},
+        {
+            "id": 1,
+            "number": 1,
+            "status": "success",
+            "branch": "main",
+            "event": "push",
+            "created": 1000,
+            "started": 1001,
+            "finished": 1010,
+        },
+        {
+            "id": 2,
+            "number": 2,
+            "status": "failure",
+            "branch": "feature",
+            "event": "push",
+            "created": 2000,
+            "started": 2001,
+            "finished": 2010,
+        },
     ]
     with respx.mock:
         _lookup_mock()
-        respx.get(f"{REPO_URL}/pipelines").mock(
-            return_value=httpx.Response(200, json=mock_data)
-        )
+        respx.get(f"{REPO_URL}/pipelines").mock(return_value=httpx.Response(200, json=mock_data))
         result = await tools["woodpecker_list_pipelines"]("owner/repo", status="success")
     assert len(result["pipelines"]) == 1
     assert result["pipelines"][0]["status"] == "success"
@@ -129,9 +158,7 @@ async def test_woodpecker_get_logs_truncation(tools):
 async def test_woodpecker_pipeline_cancel_success(tools):
     with respx.mock:
         _lookup_mock()
-        respx.delete(f"{REPO_URL}/pipelines/7").mock(
-            return_value=httpx.Response(204)
-        )
+        respx.delete(f"{REPO_URL}/pipelines/7").mock(return_value=httpx.Response(204))
         result = await tools["woodpecker_pipeline_cancel"]("owner/repo", 7)
     assert result["cancelled"] is True
     assert result["id"] == 7

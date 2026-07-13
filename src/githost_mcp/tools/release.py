@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import structlog
 
 from ..audit import AuditCtx
@@ -41,7 +43,12 @@ def register(mcp) -> None:
         """
         config = get_config()
         tag = f"v{version}"
-        params = {"repo_path": repo_path, "version": version, "targets": targets, "dry_run": dry_run}
+        params = {
+            "repo_path": repo_path,
+            "version": version,
+            "targets": targets,
+            "dry_run": dry_run,
+        }
         ac = AuditCtx("release", "local", repo_path, params)
 
         try:
@@ -75,6 +82,7 @@ def register(mcp) -> None:
             }
 
         import git
+
         try:
             repo = git.Repo(repo_path, search_parent_directories=False)
         except Exception as e:
@@ -94,7 +102,7 @@ def register(mcp) -> None:
 
         # Step 1: git tag + push
         try:
-            git_tag = repo.create_tag(tag, message=f"Release {tag}")
+            repo.create_tag(tag, message=f"Release {tag}")
             repo.remotes["origin"].push(tag)
             created.append("git_tag")
             log.info("release_tag_created", tag=tag)
@@ -121,6 +129,7 @@ def register(mcp) -> None:
             try:
                 from .._providers.gitea_client import gitea_post
                 from ..config import get_config as _gc
+
                 owner = gitea_repo.split("/")[0] if "/" in gitea_repo else _gc().gitea_owner
                 repo_name = gitea_repo.split("/")[-1]
                 data = {"tag_name": tag, "name": tag, "body": notes or ""}
@@ -138,6 +147,7 @@ def register(mcp) -> None:
         if "gitlab" in effective_targets and gitlab_project:
             try:
                 from .._providers.gitlab_client import get_gitlab, gitlab_call
+
                 gl = get_gitlab()
                 proj = gitlab_call(gl.projects.get, gitlab_project)
                 gl_rel = gitlab_call(
@@ -156,16 +166,28 @@ def register(mcp) -> None:
         # Step 5: PyPI (immutable — no rollback)
         if "pypi" in effective_targets:
             try:
-                import subprocess, os as _os
+                import os as _os
+                import subprocess
+
                 config = get_config()
                 dist_path = _os.path.join(repo_path, "dist")
-                upload_env = {**_os.environ, "TWINE_PASSWORD": config.pypi_token, "TWINE_USERNAME": "__token__"}
+                upload_env = {
+                    **_os.environ,
+                    "TWINE_PASSWORD": config.pypi_token,
+                    "TWINE_USERNAME": "__token__",
+                }
                 result = subprocess.run(
                     ["twine", "upload", f"{dist_path}/*"],
-                    cwd=repo_path, env=upload_env, capture_output=True, text=True, timeout=120,
+                    cwd=repo_path,
+                    env=upload_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
                 )
                 if result.returncode == 0:
-                    urls["pypi"] = f"https://pypi.org/project/{_get_package_name(repo_path)}/{version}/"
+                    urls["pypi"] = (
+                        f"https://pypi.org/project/{_get_package_name(repo_path)}/{version}/"
+                    )
                     emit_release_target("pypi", "ok")
                 else:
                     emit_release_target("pypi", "error")
@@ -177,12 +199,18 @@ def register(mcp) -> None:
         # Step 6: npm (immutable — no rollback)
         if "npm" in effective_targets:
             try:
-                import subprocess, os as _os
+                import os as _os
+                import subprocess
+
                 config = get_config()
                 pub_env = {**_os.environ, "NPM_TOKEN": config.npm_token}
                 result = subprocess.run(
                     ["npm", "publish"],
-                    cwd=repo_path, env=pub_env, capture_output=True, text=True, timeout=120,
+                    cwd=repo_path,
+                    env=pub_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
                 )
                 if result.returncode == 0:
                     emit_release_target("npm", "ok")
@@ -218,43 +246,50 @@ def _rollback(
     if "github" in created and github_repo:
         try:
             from .._providers.github_client import get_github, github_call
+
             gh = get_github()
             gh_repo = github_call(gh.get_repo, github_repo)
             rel = github_call(gh_repo.get_release, tag)
             github_call(rel.delete_release)
             log.info("rollback_deleted_github_release", tag=tag)
         except Exception as exc:
-            log.warning("rollback_github_release_failed", tag=tag, url=urls.get("github"), error=str(exc))
+            log.warning(
+                "rollback_github_release_failed", tag=tag, url=urls.get("github"), error=str(exc)
+            )
 
     if "gitlab" in created and gitlab_project:
         try:
             from .._providers.gitlab_client import get_gitlab, gitlab_call
+
             gl = get_gitlab()
             proj = gitlab_call(gl.projects.get, gitlab_project)
             gitlab_call(proj.releases.delete, tag)
             log.info("rollback_deleted_gitlab_release", tag=tag)
         except Exception as exc:
-            log.warning("rollback_gitlab_release_failed", tag=tag, url=urls.get("gitlab"), error=str(exc))
+            log.warning(
+                "rollback_gitlab_release_failed", tag=tag, url=urls.get("gitlab"), error=str(exc)
+            )
 
     if "gitea" in created:
         # No delete client implemented — log orphan for manual cleanup
-        log.warning("rollback_gitea_orphan", tag=tag, url=urls.get("gitea"),
-                    note="Gitea release delete not implemented; manual cleanup required")
+        log.warning(
+            "rollback_gitea_orphan",
+            tag=tag,
+            url=urls.get("gitea"),
+            note="Gitea release delete not implemented; manual cleanup required",
+        )
 
     # Delete local and remote git tag
     if "git_tag" in created:
-        try:
+        with contextlib.suppress(Exception):
             repo.delete_tag(tag)
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             repo.remotes["origin"].push(f":refs/tags/{tag}")
-        except Exception:
-            pass
 
 
 async def _create_release_sync(github_repo: str, tag: str, notes: str | None) -> str:
     from .._providers.github_client import get_github, github_call
+
     gh = get_github()
     gh_repo = github_call(gh.get_repo, github_repo)
     release = github_call(
@@ -269,7 +304,9 @@ async def _create_release_sync(github_repo: str, tag: str, notes: str | None) ->
 
 
 def _get_package_name(repo_path: str) -> str:
-    import re, os
+    import os
+    import re
+
     toml_path = os.path.join(repo_path, "pyproject.toml")
     if os.path.exists(toml_path):
         with open(toml_path) as f:
