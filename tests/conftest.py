@@ -1,8 +1,7 @@
 """Shared test fixtures."""
 
-import os
-import pytest
 import git
+import pytest
 
 
 @pytest.fixture()
@@ -28,6 +27,7 @@ def reset_config(monkeypatch):
     monkeypatch.delenv("AGENT_ID", raising=False)
     monkeypatch.delenv("AGENT_MANIFEST_PATH", raising=False)
     from githost_mcp.config import reset_config
+
     reset_config()
     yield
     reset_config()

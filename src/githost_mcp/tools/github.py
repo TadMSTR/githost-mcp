@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import structlog
 
 from .._providers.github_client import get_github, github_call
@@ -22,8 +20,8 @@ def register(mcp) -> None:
     def github_create_release(
         repo: str,
         tag: str,
-        name: Optional[str] = None,
-        body: Optional[str] = None,
+        name: str | None = None,
+        body: str | None = None,
         draft: bool = False,
         prerelease: bool = False,
         generate_release_notes: bool = False,
@@ -99,14 +97,16 @@ def register(mcp) -> None:
             gh_repo = github_call(gh.get_repo, repo)
             releases = []
             for r in github_call(gh_repo.get_releases).get_page(0)[:limit]:
-                releases.append({
-                    "tag": r.tag_name,
-                    "name": r.title,
-                    "url": r.html_url,
-                    "draft": r.draft,
-                    "prerelease": r.prerelease,
-                    "published_at": r.published_at.isoformat() if r.published_at else None,
-                })
+                releases.append(
+                    {
+                        "tag": r.tag_name,
+                        "name": r.title,
+                        "url": r.html_url,
+                        "draft": r.draft,
+                        "prerelease": r.prerelease,
+                        "published_at": r.published_at.isoformat() if r.published_at else None,
+                    }
+                )
             ac.finish("ok")
             return {"repo": repo, "releases": releases}
         except Exception as e:
@@ -114,7 +114,7 @@ def register(mcp) -> None:
             return _err(e)
 
     @mcp.tool
-    def github_workflow_list(repo: str, ref: Optional[str] = None, limit: int = 10) -> dict:
+    def github_workflow_list(repo: str, ref: str | None = None, limit: int = 10) -> dict:
         """List workflow runs for a repo, optionally filtered by ref.
 
         Args:
@@ -131,15 +131,17 @@ def register(mcp) -> None:
                 kwargs["branch"] = ref
             runs = []
             for run in github_call(gh_repo.get_workflow_runs, **kwargs)[:limit]:
-                runs.append({
-                    "id": run.id,
-                    "name": run.name,
-                    "status": run.status,
-                    "conclusion": run.conclusion,
-                    "workflow": run.workflow_id,
-                    "created_at": run.created_at.isoformat(),
-                    "url": run.html_url,
-                })
+                runs.append(
+                    {
+                        "id": run.id,
+                        "name": run.name,
+                        "status": run.status,
+                        "conclusion": run.conclusion,
+                        "workflow": run.workflow_id,
+                        "created_at": run.created_at.isoformat(),
+                        "url": run.html_url,
+                    }
+                )
             ac.finish("ok")
             return {"repo": repo, "runs": runs}
         except Exception as e:
@@ -188,16 +190,18 @@ def register(mcp) -> None:
             gh_repo = github_call(gh.get_repo, repo)
             prs = []
             for pr in github_call(gh_repo.get_pulls, state=state)[:limit]:
-                prs.append({
-                    "number": pr.number,
-                    "title": pr.title,
-                    "state": pr.state,
-                    "author": pr.user.login if pr.user else None,
-                    "base": pr.base.ref,
-                    "head": pr.head.ref,
-                    "created_at": pr.created_at.isoformat(),
-                    "url": pr.html_url,
-                })
+                prs.append(
+                    {
+                        "number": pr.number,
+                        "title": pr.title,
+                        "state": pr.state,
+                        "author": pr.user.login if pr.user else None,
+                        "base": pr.base.ref,
+                        "head": pr.head.ref,
+                        "created_at": pr.created_at.isoformat(),
+                        "url": pr.html_url,
+                    }
+                )
             ac.finish("ok")
             return {"repo": repo, "prs": prs}
         except Exception as e:
@@ -219,13 +223,15 @@ def register(mcp) -> None:
             pr = github_call(gh_repo.get_pull, pr_number)
             comments = []
             for c in github_call(pr.get_issue_comments):
-                comments.append({
-                    "id": c.id,
-                    "author": c.user.login if c.user else None,
-                    "body": c.body,
-                    "created_at": c.created_at.isoformat(),
-                    "updated_at": c.updated_at.isoformat(),
-                })
+                comments.append(
+                    {
+                        "id": c.id,
+                        "author": c.user.login if c.user else None,
+                        "body": c.body,
+                        "created_at": c.created_at.isoformat(),
+                        "updated_at": c.updated_at.isoformat(),
+                    }
+                )
             ac.finish("ok")
             return {"repo": repo, "pr": pr_number, "comments": comments}
         except Exception as e:

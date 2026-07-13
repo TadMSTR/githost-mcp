@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `LICENSE` (MIT) and the repo-standards Baseline README badges (Built with Claude Code, License: MIT).
+- GitHub Actions CI (`.github/workflows/ci.yml`): ruff lint + format check, pytest with
+  coverage, and `pip-audit --strict`, across Python 3.11/3.12/3.13, with every action pinned
+  to a commit SHA. Replaces the non-functional Woodpecker config, which was never wired to the
+  GitHub repo (GHOST-10).
+- `[tool.ruff]` / `[tool.ruff.lint]` and `[tool.coverage]` configuration in `pyproject.toml`;
+  `ruff` and `pip-audit` added to the `dev` extra.
+- Two Mermaid architecture diagrams in the README (provider-dispatch → audit-log flow, and the
+  `ALLOWED_REPO_ROOTS` env-vs-manifest resolution flow).
+
+### Fixed
+- `pypi_publish` / `npm_publish`: a failing `twine check` was captured but its result never
+  inspected, so a distribution that failed metadata/render validation could still proceed to
+  upload. The check now aborts the publish on non-zero exit, matching the adjacent build and
+  upload checks.
+
+### Changed
+- Applied `ruff format` across the codebase and resolved all `ruff check` findings (import
+  ordering, PEP 604 optionals, exception chaining, `contextlib.suppress`, unused bindings).
+- Corrected the README tool inventory to 39 tools (was mislabeled 32); Gitea (4→8) and
+  Woodpecker (2→5) counts were stale.
+
+### Removed
+- `.woodpecker.yml` — non-functional CI config, superseded by GitHub Actions.
+
 ## [0.4.0] — 2026-07-13
 
 ### Added

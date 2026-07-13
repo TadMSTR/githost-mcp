@@ -28,6 +28,7 @@ def tools():
             return fn
 
     from githost_mcp.tools.audit_query import register
+
     register(MockMCP())
     return registered
 
@@ -79,8 +80,14 @@ def test_query_filter_by_repo_substring(tools):
 def test_query_filter_by_since(tools, tmp_path):
     audit_path = tmp_path / "audit.jsonl"
     old_entry = {
-        "ts": "2026-01-01T00:00:00.000Z", "agent_id": "test-agent", "tool": "git_status",
-        "provider": "local", "repo": "/repo", "params": {}, "result": "ok", "duration_ms": 1,
+        "ts": "2026-01-01T00:00:00.000Z",
+        "agent_id": "test-agent",
+        "tool": "git_status",
+        "provider": "local",
+        "repo": "/repo",
+        "params": {},
+        "result": "ok",
+        "duration_ms": 1,
     }
     with open(audit_path, "w") as f:
         f.write(json.dumps(old_entry) + "\n")
@@ -148,6 +155,7 @@ def test_query_no_signing_key_never_flags_tamper(tools, monkeypatch):
 
 def test_query_unreadable_log_returns_error(tools, tmp_path, monkeypatch):
     import os
+
     audit_path = tmp_path / "unreadable.jsonl"
     audit_path.write_text('{"ts": "x"}\n')
     os.chmod(audit_path, 0o000)

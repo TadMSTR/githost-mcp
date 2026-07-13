@@ -1,7 +1,5 @@
 """Tests for allowlist resolution: explicit env var vs. manifest-aware fallback."""
 
-import os
-
 import pytest
 
 from githost_mcp.config import get_config, reset_config
@@ -9,6 +7,7 @@ from githost_mcp.config import get_config, reset_config
 
 def _write_manifest(path, workspace_access):
     import yaml
+
     with open(path, "w") as f:
         yaml.safe_dump({"workspace_access": workspace_access}, f)
 
@@ -81,6 +80,7 @@ def test_no_env_no_manifest_fails_closed(tmp_path, monkeypatch):
     assert config.allowlist_source == "none"
 
     from githost_mcp.security import validate_write_path
+
     with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
         validate_write_path("/tmp/any/path")
 
@@ -114,6 +114,7 @@ def test_malformed_manifest_yaml_fails_closed(tmp_path, manifest_path, monkeypat
 
 def test_manifest_with_no_workspace_access_key_fails_closed(tmp_path, manifest_path, monkeypatch):
     import yaml
+
     with open(manifest_path, "w") as f:
         yaml.safe_dump({"agent_type": "developer"}, f)
 

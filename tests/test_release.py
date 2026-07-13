@@ -1,6 +1,6 @@
 """Tests for release orchestration: dry-run and rollback."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import git
 import pytest
@@ -30,6 +30,7 @@ def tools():
             return fn
 
     from githost_mcp.tools.release import register
+
     register(MockMCP())
     return registered
 
@@ -69,6 +70,7 @@ async def test_dirty_repo_blocked(tools, clean_repo):
     fns = tools
     (clean_repo / "dirty.txt").write_text("dirty")
     import git as g
+
     repo = g.Repo(str(clean_repo))
     repo.index.add(["dirty.txt"])
     result = await fns["release"](str(clean_repo), "1.0.0")
@@ -125,15 +127,18 @@ async def test_gitea_failure_after_github_success_rolls_back_github_release(tool
     async def _gitea_boom(*a, **kw):
         raise ValueError("Gitea API error 500")
 
-    with patch(
-        "githost_mcp.tools.release._create_release_sync",
-        return_value="https://github.com/owner/repo/releases/tag/v1.0.0",
-    ), patch("githost_mcp._providers.gitea_client.gitea_post", side_effect=_gitea_boom), \
-         patch("githost_mcp._providers.github_client.get_github", return_value=mock_gh), \
-         patch(
-             "githost_mcp._providers.github_client.github_call",
-             side_effect=lambda fn, *a, **kw: fn(*a, **kw),
-         ):
+    with (
+        patch(
+            "githost_mcp.tools.release._create_release_sync",
+            return_value="https://github.com/owner/repo/releases/tag/v1.0.0",
+        ),
+        patch("githost_mcp._providers.gitea_client.gitea_post", side_effect=_gitea_boom),
+        patch("githost_mcp._providers.github_client.get_github", return_value=mock_gh),
+        patch(
+            "githost_mcp._providers.github_client.github_call",
+            side_effect=lambda fn, *a, **kw: fn(*a, **kw),
+        ),
+    ):
         result = await tools["release"](
             str(clean_repo),
             "1.0.0",
@@ -155,11 +160,14 @@ async def test_gitea_failure_after_github_success_rolls_back_github_release(tool
 @pytest.mark.asyncio
 async def test_gitea_created_rollback_logs_orphan_no_delete_attempted(tools, clean_repo):
     """Gitea has no release-delete client — rollback must not raise, just log the orphan."""
+
     async def _gitea_ok(*a, **kw):
         return {"html_url": "https://gitea.example.com/owner/repo/releases/tag/v1.0.0"}
 
-    with patch("githost_mcp._providers.gitea_client.gitea_post", side_effect=_gitea_ok), \
-         patch("githost_mcp._providers.gitlab_client.get_gitlab", side_effect=ValueError("boom")):
+    with (
+        patch("githost_mcp._providers.gitea_client.gitea_post", side_effect=_gitea_ok),
+        patch("githost_mcp._providers.gitlab_client.get_gitlab", side_effect=ValueError("boom")),
+    ):
         result = await tools["release"](
             str(clean_repo),
             "1.0.0",

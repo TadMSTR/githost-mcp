@@ -28,13 +28,20 @@ log = structlog.get_logger(__name__)
 # Credential filter (structlog processor)
 # ---------------------------------------------------------------------------
 
+
 def _credential_filter(logger: Any, method: str, event_dict: dict) -> dict:
     config = get_config()
     tokens = [
-        t for t in [
-            config.github_token, config.gitea_token, config.gitlab_token,
-            config.woodpecker_token, config.pypi_token, config.pypi_test_token,
-            config.npm_token, config.audit_signing_key,
+        t
+        for t in [
+            config.github_token,
+            config.gitea_token,
+            config.gitlab_token,
+            config.woodpecker_token,
+            config.pypi_token,
+            config.pypi_test_token,
+            config.npm_token,
+            config.audit_signing_key,
         ]
         if t and len(t) > 4
     ]
@@ -51,6 +58,7 @@ def _credential_filter(logger: Any, method: str, event_dict: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Logging initialisation
 # ---------------------------------------------------------------------------
+
 
 def init_logging() -> None:
     global _agent_id, _audit_log_path, _signing_key
@@ -116,6 +124,7 @@ def init_logging() -> None:
 # HMAC helpers
 # ---------------------------------------------------------------------------
 
+
 def _compute_hmac(entry_without_hmac: dict) -> str:
     canonical = json.dumps(entry_without_hmac, sort_keys=True, separators=(",", ":"))
     return _hmac.new(_signing_key, canonical.encode(), hashlib.sha256).hexdigest()
@@ -135,14 +144,21 @@ def verify_entry_hmac(entry: dict) -> bool:
 # JSONL writer
 # ---------------------------------------------------------------------------
 
+
 def _scrub_dict(d: dict) -> dict:
     """Recursively replace credential values in a dict."""
     config = get_config()
     tokens = [
-        t for t in [
-            config.github_token, config.gitea_token, config.gitlab_token,
-            config.woodpecker_token, config.pypi_token, config.pypi_test_token,
-            config.npm_token, config.audit_signing_key,
+        t
+        for t in [
+            config.github_token,
+            config.gitea_token,
+            config.gitlab_token,
+            config.woodpecker_token,
+            config.pypi_token,
+            config.pypi_test_token,
+            config.npm_token,
+            config.audit_signing_key,
         ]
         if t and len(t) > 4
     ]
@@ -174,10 +190,16 @@ def write_audit_entry(
     # Scrub credentials from params and result before writing
     config = get_config()
     tokens = [
-        t for t in [
-            config.github_token, config.gitea_token, config.gitlab_token,
-            config.woodpecker_token, config.pypi_token, config.pypi_test_token,
-            config.npm_token, config.audit_signing_key,
+        t
+        for t in [
+            config.github_token,
+            config.gitea_token,
+            config.gitlab_token,
+            config.woodpecker_token,
+            config.pypi_token,
+            config.pypi_test_token,
+            config.npm_token,
+            config.audit_signing_key,
         ]
         if t and len(t) > 4
     ]
@@ -226,6 +248,7 @@ def write_audit_entry(
 # ---------------------------------------------------------------------------
 # Timing context helper
 # ---------------------------------------------------------------------------
+
 
 class AuditCtx:
     """Capture duration and write audit entry on finish()."""

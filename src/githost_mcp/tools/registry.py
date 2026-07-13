@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-from typing import Optional
 
 import structlog
 
@@ -35,7 +34,9 @@ def register(mcp) -> None:
             target: 'pypi', 'testpypi', or 'gitea' (default: pypi).
             dist_dir: Directory containing built distributions (default: dist).
         """
-        ac = AuditCtx("pypi_publish", "registry", repo_path, {"repo_path": repo_path, "target": target})
+        ac = AuditCtx(
+            "pypi_publish", "registry", repo_path, {"repo_path": repo_path, "target": target}
+        )
         try:
             validate_write_path(repo_path)
             config = get_config()
@@ -82,6 +83,8 @@ def register(mcp) -> None:
                 timeout=30,
                 shell=False,
             )
+            if check_result.returncode != 0:
+                raise ValueError(f"Twine check failed: {check_result.stderr[:500]}")
 
             # twine upload — token via env, never in args
             upload_env = {**os.environ, "TWINE_PASSWORD": token, "TWINE_USERNAME": "__token__"}
@@ -105,8 +108,8 @@ def register(mcp) -> None:
     @mcp.tool
     def npm_publish(
         repo_path: str,
-        registry: Optional[str] = None,
-        tag: Optional[str] = None,
+        registry: str | None = None,
+        tag: str | None = None,
     ) -> dict:
         """Publish an npm package. Token is injected via environment, not CLI args.
 
@@ -115,7 +118,9 @@ def register(mcp) -> None:
             registry: Registry URL (default: https://registry.npmjs.org/).
             tag: Publish tag (default: 'latest').
         """
-        ac = AuditCtx("npm_publish", "registry", repo_path, {"repo_path": repo_path, "registry": registry})
+        ac = AuditCtx(
+            "npm_publish", "registry", repo_path, {"repo_path": repo_path, "registry": registry}
+        )
         try:
             validate_write_path(repo_path)
             config = get_config()
@@ -151,7 +156,10 @@ def register(mcp) -> None:
                 raise ValueError(f"npm publish failed: {result.stderr[:500]}")
 
             ac.finish("ok")
-            return {"stdout": result.stdout[:500], "registry": registry or "https://registry.npmjs.org/"}
+            return {
+                "stdout": result.stdout[:500],
+                "registry": registry or "https://registry.npmjs.org/",
+            }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": str(e)}

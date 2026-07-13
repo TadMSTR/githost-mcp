@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 import structlog
 import yaml
@@ -34,7 +33,7 @@ class Config:
     loki_url: str = ""
     loki_labels: str = "app=githost-mcp"
     # Prometheus
-    metrics_port: Optional[int] = None
+    metrics_port: int | None = None
     # NATS
     nats_url: str = ""
     nats_subject_prefix: str = "githost"
@@ -112,12 +111,18 @@ def _resolve_allowed_roots(env_raw: str, manifest_path: str) -> tuple[list[str],
 def load_config() -> Config:
     metrics_raw = os.getenv("METRICS_PORT", "")
     _agent_id = os.getenv("AGENT_ID", "unknown")
-    _git_agent_name = (os.getenv("GIT_AGENT_NAME") or (
-        f"{_agent_id}-agent" if _agent_id != "unknown" else ""
-    )).replace("\n", "").replace("\r", "").replace("\0", "")
-    _git_agent_email = (os.getenv("GIT_AGENT_EMAIL") or (
-        f"{_agent_id}@forge" if _agent_id != "unknown" else ""
-    )).replace("\n", "").replace("\r", "").replace("\0", "")
+    _git_agent_name = (
+        (os.getenv("GIT_AGENT_NAME") or (f"{_agent_id}-agent" if _agent_id != "unknown" else ""))
+        .replace("\n", "")
+        .replace("\r", "")
+        .replace("\0", "")
+    )
+    _git_agent_email = (
+        (os.getenv("GIT_AGENT_EMAIL") or (f"{_agent_id}@forge" if _agent_id != "unknown" else ""))
+        .replace("\n", "")
+        .replace("\r", "")
+        .replace("\0", "")
+    )
 
     _manifest_path_raw = os.getenv("AGENT_MANIFEST_PATH", "") or _default_manifest_path(_agent_id)
     _manifest_path = os.path.expanduser(_manifest_path_raw) if _manifest_path_raw else ""

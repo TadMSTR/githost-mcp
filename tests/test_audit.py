@@ -95,7 +95,9 @@ def test_credential_not_in_audit_log(audit_env, monkeypatch):
     reset_config()
     init_logging()
     write_audit_entry(
-        "github_create_release", "github", "owner/repo",
+        "github_create_release",
+        "github",
+        "owner/repo",
         {"token_leaked": fake_token},
         f"error with {fake_token}",
         5,

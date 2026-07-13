@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 import structlog
-
-_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 
 from .._providers.gitea_client import gitea_get, gitea_post, gitea_post_void
 from ..audit import AuditCtx
 from ..config import get_config
+
+_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+_REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
 
 log = structlog.get_logger(__name__)
 
@@ -21,8 +21,8 @@ def register(mcp) -> None:
     async def gitea_create_release(
         repo: str,
         tag: str,
-        name: Optional[str] = None,
-        body: Optional[str] = None,
+        name: str | None = None,
+        body: str | None = None,
         draft: bool = False,
         prerelease: bool = False,
     ) -> dict:
@@ -37,7 +37,7 @@ def register(mcp) -> None:
             prerelease: Mark as pre-release (default False).
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -66,7 +66,7 @@ def register(mcp) -> None:
             tag: Tag name.
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -99,7 +99,7 @@ def register(mcp) -> None:
             limit: Max releases to return (default 10, max 100).
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         limit = min(limit, 100)
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
@@ -126,7 +126,6 @@ def register(mcp) -> None:
 
     @mcp.tool
     async def gitea_pr_list(repo: str, state: str = "open", limit: int = 20) -> dict:
-
         """List pull requests on a Gitea repository.
 
         Args:
@@ -135,7 +134,7 @@ def register(mcp) -> None:
             limit: Max PRs to return (default 20, max 100).
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         limit = min(limit, 100)
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
@@ -168,7 +167,7 @@ def register(mcp) -> None:
         title: str,
         head: str,
         base: str,
-        body: Optional[str] = None,
+        body: str | None = None,
         draft: bool = False,
     ) -> dict:
         """Open a pull request on a Gitea repository.
@@ -182,7 +181,7 @@ def register(mcp) -> None:
             draft: Create as draft PR (default False).
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -210,7 +209,7 @@ def register(mcp) -> None:
             pr_number: Pull request number.
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -244,7 +243,7 @@ def register(mcp) -> None:
             body: Comment text (markdown supported).
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -269,7 +268,7 @@ def register(mcp) -> None:
         repo: str,
         pr_number: int,
         merge_style: str = "merge",
-        message: Optional[str] = None,
+        message: str | None = None,
     ) -> dict:
         """Merge a Gitea pull request.
 
@@ -284,7 +283,7 @@ def register(mcp) -> None:
             message: Optional merge commit message title.
         """
         if not _REPO_RE.match(repo):
-            return {"error": "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"}
+            return {"error": _REPO_FMT_ERR}
         valid_styles = {"merge", "squash", "rebase"}
         if merge_style not in valid_styles:
             return {"error": f"merge_style must be one of: {', '.join(sorted(valid_styles))}"}
@@ -292,7 +291,9 @@ def register(mcp) -> None:
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
         ac = AuditCtx(
-            "gitea_pr_merge", "gitea", repo,
+            "gitea_pr_merge",
+            "gitea",
+            repo,
             {"repo": repo, "pr_number": pr_number, "merge_style": merge_style},
         )
         try:

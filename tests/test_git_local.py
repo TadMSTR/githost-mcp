@@ -1,7 +1,5 @@
 """Tests for local git tools using real temporary repositories."""
 
-import os
-
 import git
 import pytest
 
@@ -44,6 +42,7 @@ def tools(repo_path, monkeypatch):
             return fn
 
     from githost_mcp.tools.git_local import register
+
     register(MockMCP())
     return registered, repo_path
 
@@ -106,6 +105,7 @@ def test_git_commit_appends_agent_id(tools, tmp_path):
     fns["git_add"](str(path), ["agent.txt"])
     fns["git_commit"](str(path), "Agent commit")
     import git as gitmod
+
     repo = gitmod.Repo(str(path))
     msg = repo.head.commit.message
     assert "agent-id: test" in msg

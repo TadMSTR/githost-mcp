@@ -28,8 +28,7 @@ def validate_write_path(repo_path: str) -> None:
             continue
 
     raise ValueError(
-        f"Path '{repo_path}' is not under any allowed root. "
-        f"Allowed: {config.allowed_repo_roots}"
+        f"Path '{repo_path}' is not under any allowed root. Allowed: {config.allowed_repo_roots}"
     )
 
 

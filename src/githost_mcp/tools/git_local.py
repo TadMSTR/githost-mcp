@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-from typing import Optional
-
 import git
 import structlog
 
@@ -20,9 +16,9 @@ def _open_repo(repo_path: str) -> git.Repo:
     try:
         return git.Repo(repo_path, search_parent_directories=False)
     except git.InvalidGitRepositoryError:
-        raise ValueError(f"Not a git repository: {repo_path}")
+        raise ValueError(f"Not a git repository: {repo_path}") from None
     except git.NoSuchPathError:
-        raise ValueError(f"Path does not exist: {repo_path}")
+        raise ValueError(f"Path does not exist: {repo_path}") from None
 
 
 def register(mcp) -> None:
@@ -37,12 +33,16 @@ def register(mcp) -> None:
         try:
             validate_read_path(repo_path)
             repo = _open_repo(repo_path)
-            staged = [item.a_path for item in repo.index.diff("HEAD")] if repo.head.is_valid() else []
+            staged = (
+                [item.a_path for item in repo.index.diff("HEAD")] if repo.head.is_valid() else []
+            )
             unstaged = [item.a_path for item in repo.index.diff(None)]
             untracked = repo.untracked_files
             result = {
                 "repo": repo_path,
-                "branch": repo.active_branch.name if not repo.head.is_detached else "HEAD (detached)",
+                "branch": repo.active_branch.name
+                if not repo.head.is_detached
+                else "HEAD (detached)",
                 "staged": staged,
                 "unstaged": unstaged,
                 "untracked": list(untracked),
@@ -55,7 +55,7 @@ def register(mcp) -> None:
             return {"error": str(e)}
 
     @mcp.tool
-    def git_diff(repo_path: str, staged: bool = False, file_path: Optional[str] = None) -> dict:
+    def git_diff(repo_path: str, staged: bool = False, file_path: str | None = None) -> dict:
         """Show diff — staged or unstaged, optionally for a specific file.
 
         Args:
@@ -63,7 +63,12 @@ def register(mcp) -> None:
             staged: If True, show staged diff (vs HEAD). Default False (unstaged).
             file_path: Optional file path to diff (relative to repo root).
         """
-        ac = AuditCtx("git_diff", "local", repo_path, {"repo_path": repo_path, "staged": staged, "file_path": file_path})
+        ac = AuditCtx(
+            "git_diff",
+            "local",
+            repo_path,
+            {"repo_path": repo_path, "staged": staged, "file_path": file_path},
+        )
         try:
             validate_read_path(repo_path)
             repo = _open_repo(repo_path)
@@ -78,11 +83,13 @@ def register(mcp) -> None:
             patches = []
             for d in diffs:
                 try:
-                    patches.append({
-                        "file": d.a_path,
-                        "change_type": d.change_type,
-                        "diff": d.diff.decode("utf-8", errors="replace") if d.diff else "",
-                    })
+                    patches.append(
+                        {
+                            "file": d.a_path,
+                            "change_type": d.change_type,
+                            "diff": d.diff.decode("utf-8", errors="replace") if d.diff else "",
+                        }
+                    )
                 except Exception:
                     patches.append({"file": d.a_path, "change_type": d.change_type, "diff": ""})
 
@@ -93,7 +100,7 @@ def register(mcp) -> None:
             return {"error": str(e)}
 
     @mcp.tool
-    def git_log(repo_path: str, limit: int = 20, branch: Optional[str] = None) -> dict:
+    def git_log(repo_path: str, limit: int = 20, branch: str | None = None) -> dict:
         """Recent commit log with author, date, and message.
 
         Args:
@@ -109,12 +116,14 @@ def register(mcp) -> None:
             ref = branch or repo.active_branch.name
             commits = []
             for c in repo.iter_commits(ref, max_count=limit):
-                commits.append({
-                    "sha": c.hexsha[:12],
-                    "author": f"{c.author.name} <{c.author.email}>",
-                    "date": c.authored_datetime.isoformat(),
-                    "message": c.message.strip(),
-                })
+                commits.append(
+                    {
+                        "sha": c.hexsha[:12],
+                        "author": f"{c.author.name} <{c.author.email}>",
+                        "date": c.authored_datetime.isoformat(),
+                        "message": c.message.strip(),
+                    }
+                )
             ac.finish("ok")
             return {"repo": repo_path, "branch": ref, "commits": commits}
         except Exception as e:
@@ -154,7 +163,7 @@ def register(mcp) -> None:
     def git_branch(
         repo_path: str,
         action: str = "list",
-        branch_name: Optional[str] = None,
+        branch_name: str | None = None,
     ) -> dict:
         """List, create, or delete branches.
 
@@ -227,7 +236,9 @@ def register(mcp) -> None:
             # Use git binary to stage files; repo.index.add(["."])  would recurse
             # into .git/ internals. The git binary skips .git/ by design. (GHOST-1)
             repo.git.add("--", *paths)
-            staged = [item.a_path for item in repo.index.diff("HEAD")] if repo.head.is_valid() else paths
+            staged = (
+                [item.a_path for item in repo.index.diff("HEAD")] if repo.head.is_valid() else paths
+            )
             ac.finish("ok")
             return {"staged": staged}
         except Exception as e:
@@ -250,7 +261,11 @@ def register(mcp) -> None:
             agent_tag = f"\n\nagent-id: {config.agent_id}" if config.agent_id != "unknown" else ""
             full_message = message + agent_tag
 
-            actor = git.Actor(config.git_agent_name, config.git_agent_email) if config.git_agent_name else None
+            actor = (
+                git.Actor(config.git_agent_name, config.git_agent_email)
+                if config.git_agent_name
+                else None
+            )
             signing_key = config.git_signing_key
             if signing_key:
                 # gitpython uses -S with GPG key ID (not the key value)
@@ -274,7 +289,7 @@ def register(mcp) -> None:
     def git_push(
         repo_path: str,
         remote: str = "origin",
-        branch: Optional[str] = None,
+        branch: str | None = None,
     ) -> dict:
         """Push branch to remote.
 
@@ -320,7 +335,7 @@ def register(mcp) -> None:
     def git_tag(
         repo_path: str,
         tag_name: str,
-        message: Optional[str] = None,
+        message: str | None = None,
         push: bool = False,
         remote: str = "origin",
     ) -> dict:
