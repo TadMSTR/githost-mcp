@@ -184,3 +184,138 @@ async def test_woodpecker_repo_not_found(tools):
         result = await tools["woodpecker_list_pipelines"]("owner/repo")
     assert "error" in result
     assert "not found" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_trigger_with_branch(tools):
+    with respx.mock:
+        _lookup_mock()
+        route = respx.post(f"{REPO_URL}/pipelines").mock(
+            return_value=httpx.Response(200, json={"id": 88, "status": "pending", "branch": "dev"})
+        )
+        result = await tools["woodpecker_trigger"]("owner/repo", branch="dev")
+    assert result["pipeline_id"] == 88
+    assert result["branch"] == "dev"
+    assert route.calls.last.request.url.params["branch"] == "dev"
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_trigger_default_branch(tools):
+    with respx.mock:
+        _lookup_mock()
+        respx.post(f"{REPO_URL}/pipelines").mock(
+            return_value=httpx.Response(200, json={"number": 3, "status": "pending"})
+        )
+        result = await tools["woodpecker_trigger"]("owner/repo")
+    assert result["pipeline_id"] == 3
+    assert result["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_status_success(tools):
+    with respx.mock:
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/9").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": 9,
+                    "status": "success",
+                    "branch": "main",
+                    "started": 1000,
+                    "finished": 1010,
+                },
+            )
+        )
+        result = await tools["woodpecker_status"]("owner/repo", 9)
+    assert result["id"] == 9
+    assert result["status"] == "success"
+    assert result["finished_at"] == 1010
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_get_logs_no_steps(tools):
+    with respx.mock:
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/1/steps").mock(return_value=httpx.Response(200, json=[]))
+        result = await tools["woodpecker_get_logs"]("owner/repo", 1)
+    assert "error" in result
+    assert "No steps" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_get_logs_step_not_found(tools):
+    with respx.mock:
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/1/steps").mock(
+            return_value=httpx.Response(200, json=[{"id": 10, "name": "build"}])
+        )
+        result = await tools["woodpecker_get_logs"]("owner/repo", 1, step_name="deploy")
+    assert "error" in result
+    assert "not found" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_check_response_401(tools):
+    """A 401 on the action endpoint surfaces a clean auth error."""
+    with respx.mock:
+        _lookup_mock()
+        respx.post(f"{REPO_URL}/pipelines").mock(return_value=httpx.Response(401))
+        result = await tools["woodpecker_trigger"]("owner/repo")
+    assert "error" in result
+    assert "authentication failed" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_check_response_403(tools):
+    with respx.mock:
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/9").mock(return_value=httpx.Response(403))
+        result = await tools["woodpecker_status"]("owner/repo", 9)
+    assert "error" in result
+    assert "authorization denied" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_check_response_500(tools):
+    with respx.mock:
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/9").mock(return_value=httpx.Response(500))
+        result = await tools["woodpecker_status"]("owner/repo", 9)
+    assert "error" in result
+    assert "500" in result["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("woodpecker_trigger", ("bad repo",)),
+        ("woodpecker_list_pipelines", ("bad repo",)),
+        ("woodpecker_get_logs", ("bad repo", 1)),
+        ("woodpecker_pipeline_cancel", ("bad repo", 1)),
+        ("woodpecker_status", ("bad repo", 1)),
+    ],
+)
+async def test_woodpecker_rejects_bad_repo_format(tools, tool_name, args):
+    result = await tools[tool_name](*args)
+    assert "error" in result
+    assert "owner/repo" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_missing_token(tools, monkeypatch):
+    monkeypatch.delenv("WOODPECKER_TOKEN", raising=False)
+    reset_config()
+    result = await tools["woodpecker_trigger"]("owner/repo")
+    assert "error" in result
+    assert "WOODPECKER_TOKEN" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_missing_url(tools, monkeypatch):
+    monkeypatch.delenv("WOODPECKER_URL", raising=False)
+    reset_config()
+    result = await tools["woodpecker_trigger"]("owner/repo")
+    assert "error" in result
+    assert "WOODPECKER_URL" in result["error"]

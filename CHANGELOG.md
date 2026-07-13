@@ -24,6 +24,11 @@
   ordering, PEP 604 optionals, exception chaining, `contextlib.suppress`, unused bindings).
 - Corrected the README tool inventory to 39 tools (was mislabeled 32); Gitea (4→8) and
   Woodpecker (2→5) counts were stale.
+- Test coverage raised 64% → 84%; the repo-standards 80% floor is now enforced via
+  `[tool.coverage.report] fail_under = 80` and the CI pytest step. Newly covered:
+  `tools/github.py` 41→100%, `tools/gitlab.py` 48→100%, both provider clients →100%,
+  `tools/woodpecker.py` 65→96%, `server.py` 0→97%, `observability.py` 20→74% (OTEL-endpoint
+  init path deferred to the `[otel]` extra's own suite).
 
 ### Removed
 - `.woodpecker.yml` — non-functional CI config, superseded by GitHub Actions.
