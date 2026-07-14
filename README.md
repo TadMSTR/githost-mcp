@@ -111,7 +111,7 @@ audit_log_query(agent_id="sysadmin", tool="git_push", since="2026-05-20")
 
 ### Repo path allowlist
 
-All tools — both read and write — reject any path not under `ALLOWED_REPO_ROOTS`. Read tools (`git_status`, `git_diff`, `git_log`, `git_show`) and write tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`, `git_branch create/delete`, `release`) are validated against the allowlist. **When `ALLOWED_REPO_ROOTS` is not set, all operations are disabled** — fail closed, not open.
+All tools — both read and write — reject any path not under the resolved allowlist. Read tools (`git_status`, `git_diff`, `git_log`, `git_show`) and write tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`, `git_branch create/delete`, `release`) are validated against it. An explicit `ALLOWED_REPO_ROOTS` always wins when set; otherwise `config.py` falls back to the `git_backed: true` `workspace_access` entries in the agent's manifest at `AGENT_MANIFEST_PATH` (see Architecture diagram above). **When neither source yields a root, all operations are disabled** — fail closed, not open. A malformed or unreadable manifest resolves to zero roots rather than raising, so it fails closed the same way an unset `ALLOWED_REPO_ROOTS` does.
 
 ### Per-agent committer identity
 
@@ -147,6 +147,15 @@ Each provider has its own env vars — a compromised GitHub token does not expos
 AGENT_ID=dev                     # agent attribution — set per launcher
 AUDIT_SIGNING_KEY=<32-byte-hex>  # generate: python3 -c "import secrets; print(secrets.token_hex(32))"
 ALLOWED_REPO_ROOTS=/home/user/repos/personal,/home/user/repos/work  # enforced on ALL tools (read + write)
+```
+
+`ALLOWED_REPO_ROOTS` is not strictly required if `AGENT_MANIFEST_PATH` resolves to a manifest
+with `git_backed: true` `workspace_access` entries (see `AGENT_MANIFEST_PATH` below) — but one
+of the two must yield at least one root, or every path-taking tool is denied.
+
+```env
+AGENT_MANIFEST_PATH=/home/user/.claude/manifests/dev-agent.yml  # optional — allowlist fallback
+# Default: ~/.claude/manifests/{AGENT_ID}-agent.yml (only when AGENT_ID is set to a real identity)
 ```
 
 ### Agent Identity (optional)
