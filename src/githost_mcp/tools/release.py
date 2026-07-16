@@ -169,10 +169,12 @@ def register(mcp) -> None:
                 import os as _os
                 import subprocess
 
+                from ..security import clean_env
+
                 config = get_config()
                 dist_path = _os.path.join(repo_path, "dist")
                 upload_env = {
-                    **_os.environ,
+                    **clean_env(),
                     "TWINE_PASSWORD": config.pypi_token,
                     "TWINE_USERNAME": "__token__",
                 }
@@ -202,8 +204,10 @@ def register(mcp) -> None:
                 import os as _os
                 import subprocess
 
+                from ..security import clean_env
+
                 config = get_config()
-                pub_env = {**_os.environ, "NPM_TOKEN": config.npm_token}
+                pub_env = {**clean_env(), "NPM_TOKEN": config.npm_token}
                 result = subprocess.run(
                     ["npm", "publish"],
                     cwd=repo_path,

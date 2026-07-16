@@ -9,7 +9,7 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
-from ..security import validate_write_path
+from ..security import clean_env, validate_write_path
 
 log = structlog.get_logger(__name__)
 
@@ -70,6 +70,7 @@ def register(mcp) -> None:
                     capture_output=True,
                     text=True,
                     timeout=120,
+                    env=clean_env(),
                 )
                 if build_result.returncode != 0:
                     raise ValueError(f"Build failed: {build_result.stderr[:500]}")
@@ -82,12 +83,13 @@ def register(mcp) -> None:
                 text=True,
                 timeout=30,
                 shell=False,
+                env=clean_env(),
             )
             if check_result.returncode != 0:
                 raise ValueError(f"Twine check failed: {check_result.stderr[:500]}")
 
             # twine upload — token via env, never in args
-            upload_env = {**os.environ, "TWINE_PASSWORD": token, "TWINE_USERNAME": "__token__"}
+            upload_env = {**clean_env(), "TWINE_PASSWORD": token, "TWINE_USERNAME": "__token__"}
             upload_result = subprocess.run(
                 ["twine", "upload", "--repository-url", repo_url, f"{dist_path}/*"],
                 cwd=repo_path,
@@ -143,7 +145,7 @@ def register(mcp) -> None:
                 cmd += ["--tag", tag]
 
             # Token via environment, not in command args
-            pub_env = {**os.environ, "NPM_TOKEN": config.npm_token}
+            pub_env = {**clean_env(), "NPM_TOKEN": config.npm_token}
             result = subprocess.run(
                 cmd,
                 cwd=repo_path,

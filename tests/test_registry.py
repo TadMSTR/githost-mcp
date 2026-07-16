@@ -255,3 +255,62 @@ def test_npm_publish_custom_registry_and_tag(tools, npm_repo):
     assert "--registry" in publish_cmd and "https://npm.example.com" in publish_cmd
     assert "--tag" in publish_cmd and "beta" in publish_cmd
     assert result["registry"] == "https://npm.example.com"
+
+
+# --- NODE_CHANNEL_FD env stripping (GHOST-11) --------------------------------
+
+
+_PM2_IPC_ENV_VARS = ("NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE", "NODE_UNIQUE_ID")
+
+
+def test_npm_publish_strips_pm2_ipc_vars(tools, npm_repo, monkeypatch):
+    """Regression for GHOST-11: the npm child must not inherit PM2's IPC vars."""
+    for var in _PM2_IPC_ENV_VARS:
+        monkeypatch.setenv(var, "leaked")
+    which_ok = _mock_run(returncode=0)
+    publish_ok = _mock_run(returncode=0)
+    with patch(
+        "githost_mcp.tools.registry.subprocess.run", side_effect=[which_ok, publish_ok]
+    ) as run:
+        tools["npm_publish"](str(npm_repo))
+    publish_env = run.call_args_list[1].kwargs["env"]
+    for var in _PM2_IPC_ENV_VARS:
+        assert var not in publish_env
+    assert publish_env["NPM_TOKEN"] == FAKE_NPM_TOKEN
+
+
+def test_pypi_publish_upload_strips_pm2_ipc_vars(tools, pkg_repo, monkeypatch):
+    """Regression for GHOST-11: the twine upload child must not inherit PM2's IPC vars."""
+    for var in _PM2_IPC_ENV_VARS:
+        monkeypatch.setenv(var, "leaked")
+    check_ok = _mock_run(returncode=0)
+    upload_ok = _mock_run(returncode=0)
+    with patch(
+        "githost_mcp.tools.registry.subprocess.run", side_effect=[check_ok, upload_ok]
+    ) as run:
+        tools["pypi_publish"](str(pkg_repo))
+    upload_env = run.call_args_list[1].kwargs["env"]
+    for var in _PM2_IPC_ENV_VARS:
+        assert var not in upload_env
+    assert upload_env["TWINE_PASSWORD"] == FAKE_PYPI_TOKEN
+
+
+def test_pypi_publish_build_and_check_strip_pm2_ipc_vars(tools, tmp_path, monkeypatch):
+    """The bare `python -m build` and `twine check` calls also need env= stripped."""
+    for var in _PM2_IPC_ENV_VARS:
+        monkeypatch.setenv(var, "leaked")
+    repo = tmp_path / "pkg-build"
+    (repo / "dist").mkdir(parents=True)
+    build_ok = _mock_run(returncode=0)
+    check_ok = _mock_run(returncode=0)
+    upload_ok = _mock_run(returncode=0)
+    with patch(
+        "githost_mcp.tools.registry.subprocess.run",
+        side_effect=[build_ok, check_ok, upload_ok],
+    ) as run:
+        tools["pypi_publish"](str(repo))
+    build_env = run.call_args_list[0].kwargs["env"]
+    check_env = run.call_args_list[1].kwargs["env"]
+    for var in _PM2_IPC_ENV_VARS:
+        assert var not in build_env
+        assert var not in check_env

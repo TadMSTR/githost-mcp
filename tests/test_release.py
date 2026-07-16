@@ -206,6 +206,39 @@ async def test_npm_failure_does_not_roll_back_and_still_reports_success(tools, c
     assert "v1.0.0" in [t.name for t in repo.tags]
 
 
+# --- NODE_CHANNEL_FD env stripping (GHOST-11) --------------------------------
+
+_PM2_IPC_ENV_VARS = ("NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE", "NODE_UNIQUE_ID")
+
+
+@pytest.mark.asyncio
+async def test_npm_release_strips_pm2_ipc_vars(tools, clean_repo, monkeypatch):
+    """Regression for GHOST-11: the npm publish child must not inherit PM2's IPC vars."""
+    for var in _PM2_IPC_ENV_VARS:
+        monkeypatch.setenv(var, "leaked")
+    ok = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("subprocess.run", return_value=ok) as run:
+        await tools["release"](str(clean_repo), "1.0.0", targets=["npm"])
+
+    publish_env = run.call_args.kwargs["env"]
+    for var in _PM2_IPC_ENV_VARS:
+        assert var not in publish_env
+
+
+@pytest.mark.asyncio
+async def test_pypi_release_strips_pm2_ipc_vars(tools, clean_repo, monkeypatch):
+    """Regression for GHOST-11: the twine upload child must not inherit PM2's IPC vars."""
+    for var in _PM2_IPC_ENV_VARS:
+        monkeypatch.setenv(var, "leaked")
+    ok = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("subprocess.run", return_value=ok) as run:
+        await tools["release"](str(clean_repo), "1.0.0", targets=["pypi"])
+
+    upload_env = run.call_args.kwargs["env"]
+    for var in _PM2_IPC_ENV_VARS:
+        assert var not in upload_env
+
+
 @pytest.mark.asyncio
 async def test_gitlab_failure_rolls_back_tag_only_when_nothing_else_created(tools, clean_repo):
     with patch(

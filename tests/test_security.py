@@ -4,7 +4,12 @@ import os
 
 import pytest
 
-from githost_mcp.security import validate_read_path, validate_write_path
+from githost_mcp.security import (
+    _PM2_IPC_ENV_VARS,
+    clean_env,
+    validate_read_path,
+    validate_write_path,
+)
 
 
 @pytest.fixture()
@@ -128,3 +133,18 @@ def test_manifest_sourced_path_outside_allowed_root_blocked(manifest_allowed_env
     os.makedirs(outside, exist_ok=True)
     with pytest.raises(ValueError, match="not under any allowed root"):
         validate_write_path(outside)
+
+
+# --- clean_env (GHOST-11) -----------------------------------------------------
+
+
+def test_clean_env_strips_pm2_vars(monkeypatch):
+    for var in _PM2_IPC_ENV_VARS:
+        monkeypatch.setenv(var, "leaked")
+    monkeypatch.setenv("KEEP_ME", "yes")
+
+    env = clean_env()
+
+    for var in _PM2_IPC_ENV_VARS:
+        assert var not in env
+    assert env["KEEP_ME"] == "yes"
