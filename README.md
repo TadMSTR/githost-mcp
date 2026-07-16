@@ -139,6 +139,24 @@ Each provider has its own env vars — a compromised GitHub token does not expos
 
 `AUDIT_SIGNING_KEY` (required) is a server-side secret set in the launcher. Each JSONL entry includes `hmac: HMAC-SHA256(canonical_json, key)`. The `audit_log_query` tool verifies every returned entry. This is symmetric (same key signs and verifies) — it proves the file wasn't edited after write, not that the agent identity is genuine. Agent identity proof is the scoped-mcp layer's job.
 
+### HTTP transport surface
+
+`TRANSPORT=http` (see [Deploy](#deploy)) opens a local network listener where stdio mode has
+none. Two controls are mandatory together, not either/or:
+
+- **Loopback-only bind, fail closed.** `main()` refuses to start if `HTTP_HOST` resolves to
+  anything other than `127.0.0.1` / `localhost` / `::1`, unless `GITHOST_MCP_ALLOW_NONLOOPBACK=1`
+  is set explicitly. There is no default that silently exposes the port beyond the host.
+- **Bearer token auth.** When `GITHOST_MCP_AUTH_TOKEN` is set, FastMCP's built-in
+  `StaticTokenVerifier` rejects any request without a matching `Authorization: Bearer <token>`
+  header (401). scoped-mcp's manifest `headers` block supplies it — see the Configuration block
+  in the build plan. The token is included in the credential filter, so it's never written to
+  logs or the audit trail, same as the provider tokens.
+
+githost-mcp will not ship `TRANSPORT=http` with a reachable port and no token configured — that
+combination is a config error, not a supported deploy shape. In stdio mode (the default), neither
+control is relevant: there's no listening port to protect.
+
 ## Environment Variables
 
 ### Required
@@ -217,6 +235,16 @@ METRICS_PORT=9185
 NATS_URL=nats://localhost:4222
 ```
 
+### Transport (optional — default stdio)
+
+```env
+TRANSPORT=stdio          # or "http" — see Deploy below
+HTTP_HOST=127.0.0.1      # http mode only; must be loopback unless overridden below
+HTTP_PORT=8620           # http mode only
+GITHOST_MCP_ALLOW_NONLOOPBACK=   # set to "1" to bind a non-loopback HTTP_HOST (not recommended)
+GITHOST_MCP_AUTH_TOKEN=  # required whenever TRANSPORT=http
+```
+
 ## Installation
 
 ```bash
@@ -240,3 +268,43 @@ export LOG_FILE="/opt/appdata/githost-mcp/logs/githost-mcp.log"
 export AUDIT_LOG_FILE="/opt/appdata/githost-mcp/audit/githost.jsonl"
 exec /opt/agents/dev/venv/bin/python3 -m githost_mcp.server
 ```
+
+This is `TRANSPORT=stdio` (the default): scoped-mcp spawns a fresh subprocess per call and
+tears it down afterward. Simple, but Prometheus counters, OTEL spans, and Loki pushes rarely
+survive that short a lifetime — they reset or drop every call.
+
+## Deploy
+
+Transport is selected by `TRANSPORT` (`stdio` default, or `http`) so both models are supported
+by the same codebase — no fork, no rewrite to move between them.
+
+| | `stdio` (default) | `http` |
+|---|---|---|
+| Process lifetime | One per scoped-mcp call, recycled every turn | Long-lived, one PM2 service per agent |
+| Observability | Rotating file log + audit JSONL only — Prometheus/OTEL/Loki/NATS rarely survive teardown | All of it actually works — metrics accumulate, spans flush, NATS stays connected |
+| Restart | N/A — recycled automatically | `pm2 restart githost-mcp-<agent>`, independent of scoped-mcp |
+| Network surface | None | Local HTTP listener — must be loopback-bound + token-authed (see [Security Model](#http-transport-surface)) |
+
+**Per-agent processes, not one shared process.** Each agent gets its own OS process (own
+`AGENT_ID`, own tokens, own `ALLOWED_REPO_ROOTS`), so a compromised process can't see another
+agent's credentials and `AGENT_ID` can't be spoofed via a request header. This is a deliberate
+security tradeoff over a single shared process with per-request identity — see the build plan's
+"Option A vs Option B" rationale if that tradeoff ever needs revisiting.
+
+### Running as PM2 services
+
+`ecosystem.config.js` in this repo builds one app per agent from a single `AGENT_ID -> {httpPort,
+metricsPort}` map, reusing the same per-agent secrets files (`~/.secrets/githost-mcp-<agent>.env`)
+and shared tokens (`~/.secrets/forge.env`) the stdio launchers already read — no separate secret
+plumbing to maintain.
+
+```bash
+pm2 start ecosystem.config.js
+pm2 save
+```
+
+Each service comes up with `TRANSPORT=http`, `HTTP_HOST=127.0.0.1`, its own `HTTP_PORT` /
+`METRICS_PORT`, and `GITHOST_MCP_AUTH_TOKEN` sourced from `~/.secrets/forge.env`. Point
+scoped-mcp's manifest at the corresponding `http://127.0.0.1:<port>/mcp/` URL with the token in
+an `Authorization: Bearer` header (requires `type: http` on the manifest block — a bare
+`{url, headers}` entry is silently skipped).

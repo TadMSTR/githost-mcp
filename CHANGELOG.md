@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0] — 2026-07-16
+
+### Added
+- Env-selectable transport: `TRANSPORT=stdio|http` (default `stdio`, unchanged behavior). `http`
+  mode runs `mcp.run(transport="http", host=HTTP_HOST, port=HTTP_PORT)` as a long-lived process —
+  fixes Prometheus/OTEL/Loki/NATS observability, which rarely survived the per-turn stdio recycle
+  scoped-mcp does today — and lets githost-mcp restart independently of scoped-mcp.
+  (GHOST-13, Phase 1 of 2; Phase 2 — sysadmin PM2 cutover — is a separate follow-up build.)
+- HTTP transport hard requirements, both fail-closed in `server.py::main()`, not just documented:
+  - Refuses to bind any `HTTP_HOST` other than `127.0.0.1`/`localhost`/`::1` unless
+    `GITHOST_MCP_ALLOW_NONLOOPBACK=1` is set explicitly.
+  - Refuses to start `TRANSPORT=http` at all unless `GITHOST_MCP_AUTH_TOKEN` is set — FastMCP's
+    built-in `StaticTokenVerifier` then rejects any request missing a matching
+    `Authorization: Bearer <token>` header (401). The token is included in the existing
+    credential filter (audit JSONL + structlog), so it is never written to logs.
+- Real per-agent `ecosystem.config.js`: one PM2 app per agent (developer, sysadmin, security,
+  writer, research, harlock — 6, corrected from the original build plan's list of 5 during
+  `shared-build-review`), generated from a single `AGENT_ID -> {httpPort, metricsPort}` map and
+  reusing the same per-agent secrets files the stdio launchers already read.
+- README "Deploy" section (stdio vs http tradeoffs, PM2 usage) and a new Security Model
+  subsection on the HTTP transport surface; `AGENTS.md` and `.env.example` updated to match.
+
 ## [0.5.1] — 2026-07-16
 
 ### Fixed

@@ -54,6 +54,12 @@ class Config:
     # Woodpecker
     woodpecker_url: str = ""
     woodpecker_token: str = ""
+    # Transport
+    transport: str = "stdio"
+    http_host: str = "127.0.0.1"
+    http_port: int | None = None
+    allow_nonloopback: bool = False
+    auth_token: str = ""
 
 
 def _parse_allowed_roots(raw: str) -> list[str]:
@@ -110,6 +116,7 @@ def _resolve_allowed_roots(env_raw: str, manifest_path: str) -> tuple[list[str],
 
 def load_config() -> Config:
     metrics_raw = os.getenv("METRICS_PORT", "")
+    http_port_raw = os.getenv("HTTP_PORT", "")
     _agent_id = os.getenv("AGENT_ID", "unknown")
     _git_agent_name = (
         (os.getenv("GIT_AGENT_NAME") or (f"{_agent_id}-agent" if _agent_id != "unknown" else ""))
@@ -163,6 +170,11 @@ def load_config() -> Config:
         npm_token=os.getenv("NPM_TOKEN", ""),
         woodpecker_url=os.getenv("WOODPECKER_URL", ""),
         woodpecker_token=os.getenv("WOODPECKER_TOKEN", ""),
+        transport=os.getenv("TRANSPORT", "stdio"),
+        http_host=os.getenv("HTTP_HOST", "127.0.0.1"),
+        http_port=int(http_port_raw) if http_port_raw else None,
+        allow_nonloopback=os.getenv("GITHOST_MCP_ALLOW_NONLOOPBACK", "") == "1",
+        auth_token=os.getenv("GITHOST_MCP_AUTH_TOKEN", ""),
     )
 
 

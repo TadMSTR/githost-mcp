@@ -11,12 +11,17 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastmcp import FastMCP
+from fastmcp.server.auth import StaticTokenVerifier
 
 from .audit import init_logging
+from .config import get_config
 from .observability import init_async, init_sync
 from .tools import audit_query, git_local, gitea, github, gitlab, registry, release, woodpecker
 
 log = structlog.get_logger(__name__)
+
+# Hosts treated as loopback for the non-loopback fail-closed guard in main().
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 @asynccontextmanager
@@ -27,6 +32,18 @@ async def lifespan(app):
     log.info("githost_mcp_stopped")
 
 
+_config = get_config()
+
+# Auth is gated on GITHOST_MCP_AUTH_TOKEN being set, independent of transport —
+# stdio mode has no HTTP surface so this only matters when TRANSPORT=http.
+# Option B: per-request identity would hook here (swap this static verifier for
+# one that resolves AGENT_ID from a request header instead of the process env).
+_auth = None
+if _config.auth_token:
+    _auth = StaticTokenVerifier(
+        tokens={_config.auth_token: {"sub": "scoped-mcp", "client_id": "cli"}}
+    )
+
 mcp = FastMCP(
     name="githost-mcp",
     instructions=(
@@ -36,6 +53,7 @@ mcp = FastMCP(
         "AGENT_ID. Write operations require ALLOWED_REPO_ROOTS to be configured."
     ),
     lifespan=lifespan,
+    auth=_auth,
 )
 
 # Register tools from each module
@@ -54,7 +72,21 @@ init_sync()
 
 
 def main() -> None:
-    mcp.run()
+    config = get_config()
+    if config.transport == "http":
+        if config.http_host not in _LOOPBACK_HOSTS and not config.allow_nonloopback:
+            raise RuntimeError(
+                f"Refusing to bind githost-mcp HTTP transport to non-loopback host "
+                f"{config.http_host!r}. Set GITHOST_MCP_ALLOW_NONLOOPBACK=1 to override."
+            )
+        if not config.auth_token:
+            raise RuntimeError(
+                "Refusing to start githost-mcp HTTP transport without GITHOST_MCP_AUTH_TOKEN "
+                "set. HTTP mode must not run with an unauthenticated, reachable port."
+            )
+        mcp.run(transport="http", host=config.http_host, port=config.http_port)
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":
