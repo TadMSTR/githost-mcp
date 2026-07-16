@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.1] — 2026-07-16
+
+### Fixed
+- `security.clean_env()`: new shared helper strips `NODE_CHANNEL_FD`, `NODE_CHANNEL_SERIALIZATION_MODE`,
+  and `NODE_UNIQUE_ID` from subprocess environments before spawning `npm`, `twine`, or `python -m build`
+  children. PM2 injects these for its own IPC channel; leaking them into a spawned Node.js child causes
+  a SIGABRT during teardown. Applied to all 4 env-construction sites (`registry.py` twine/npm upload envs,
+  `release.py` twine/npm upload envs) and the 2 bare `subprocess.run` calls that previously passed no
+  `env=` at all (`registry.py` build and twine-check). (GHOST-11, sibling to HLOPS-1)
+
 ## [0.5.0] — 2026-07-13
 
 ### Added
