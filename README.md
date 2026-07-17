@@ -237,6 +237,14 @@ METRICS_PORT=9185
 NATS_URL=nats://localhost:4222
 ```
 
+> **`METRICS_PORT` is currently disabled on the forge PM2 deploy.**
+> `start_http_server(config.metrics_port)` in `observability.py` doesn't pass an
+> `addr=` argument, so `prometheus_client` defaults to binding `0.0.0.0` — a
+> LAN-reachable metrics endpoint, which violates the loopback-only requirement
+> for this migration. `ecosystem.config.js` intentionally leaves `METRICS_PORT`
+> unset for all 6 agent processes until `observability.py` passes
+> `addr="127.0.0.1"`. Track re-enablement under Plane GHOST-13.
+
 ### Transport (optional — default stdio)
 
 ```env
