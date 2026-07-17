@@ -22,6 +22,19 @@
 - README "Deploy" section (stdio vs http tradeoffs, PM2 usage) and a new Security Model
   subsection on the HTTP transport surface; `AGENTS.md` and `.env.example` updated to match.
 
+### Security
+- Audit `githost-mcp-http-pm2-migration-2026-07` (2 Low, 2 Info; full report:
+  `host-forge/build-reports/githost-mcp-http-pm2-migration-2026-07/audit.md`). Both Low findings
+  remediated before merge:
+  - `main()` now also refuses to start `TRANSPORT=http` if `GITHOST_MCP_AUTH_TOKEN` is shorter
+    than 16 characters — the credential filter only redacts tokens over 4 characters, so a
+    shorter token could have appeared in cleartext in logs/audit trail despite the README's
+    claim otherwise.
+  - Bumped `starlette` (>=1.3.1, fixes PYSEC-2026-248/249), `mcp` (>=1.28.1, fixes
+    CVE-2026-59950), and `cryptography` (>=48.0.1, fixes GHSA-537c-gmf6-5ccf) — none of these
+    were reachable through githost-mcp's actual routes, but this is the first build where the
+    dependency chain backs a real network listener instead of stdio.
+
 ## [0.5.1] — 2026-07-16
 
 ### Fixed

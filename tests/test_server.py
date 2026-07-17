@@ -81,6 +81,33 @@ def test_main_http_without_auth_token_fails_closed(monkeypatch, tmp_path):
     run.assert_not_called()
 
 
+def test_main_http_short_auth_token_fails_closed(monkeypatch, tmp_path):
+    srv = _import_server(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRANSPORT", "http")
+    monkeypatch.setenv("HTTP_HOST", "127.0.0.1")
+    monkeypatch.setenv("HTTP_PORT", "8620")
+    monkeypatch.setenv("GITHOST_MCP_AUTH_TOKEN", "short")
+    reset_config()
+    with (
+        patch.object(srv.mcp, "run") as run,
+        pytest.raises(RuntimeError, match="too short"),
+    ):
+        srv.main()
+    run.assert_not_called()
+
+
+def test_main_http_min_length_auth_token_allowed(monkeypatch, tmp_path):
+    srv = _import_server(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRANSPORT", "http")
+    monkeypatch.setenv("HTTP_HOST", "127.0.0.1")
+    monkeypatch.setenv("HTTP_PORT", "8620")
+    monkeypatch.setenv("GITHOST_MCP_AUTH_TOKEN", "a" * 16)
+    reset_config()
+    with patch.object(srv.mcp, "run") as run:
+        srv.main()
+    run.assert_called_once_with(transport="http", host="127.0.0.1", port=8620)
+
+
 def test_main_http_nonloopback_host_fails_closed(monkeypatch, tmp_path):
     srv = _import_server(monkeypatch, tmp_path)
     monkeypatch.setenv("TRANSPORT", "http")

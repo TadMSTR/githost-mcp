@@ -64,7 +64,7 @@ pyproject.toml
 | `TRANSPORT`                | `stdio` (default) or `http` — see `server.py::main()` and README "Deploy" |
 | `HTTP_HOST`                | HTTP transport bind address; must be loopback unless `GITHOST_MCP_ALLOW_NONLOOPBACK=1` |
 | `HTTP_PORT`                | HTTP transport port (one per agent PM2 process)              |
-| `GITHOST_MCP_AUTH_TOKEN`   | Bearer token for HTTP transport; required whenever `TRANSPORT=http` |
+| `GITHOST_MCP_AUTH_TOKEN`   | Bearer token for HTTP transport; required whenever `TRANSPORT=http`, must be >= 16 chars |
 
 ## Architecture decisions
 
@@ -78,8 +78,10 @@ pyproject.toml
   at process launch, not read from a request header) and contains credential blast radius. Do
   not collapse this to a single shared process with per-request identity without a deliberate
   decision — that's "Option B", explicitly deferred. `main()` hard-fails closed on a
-  non-loopback `HTTP_HOST` and refuses to start `http` transport without
-  `GITHOST_MCP_AUTH_TOKEN` set — both checks are load-bearing, not defensive filler.
+  non-loopback `HTTP_HOST`, a missing `GITHOST_MCP_AUTH_TOKEN`, and a token shorter than 16
+  chars (the credential filter in `audit.py`/`security.py` only redacts tokens over 4 chars,
+  so a too-short token could leak into logs) — all three checks are load-bearing, not
+  defensive filler.
 
 ## Testing
 

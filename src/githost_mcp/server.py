@@ -23,6 +23,12 @@ log = structlog.get_logger(__name__)
 # Hosts treated as loopback for the non-loopback fail-closed guard in main().
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
+# audit.py/security.py credential scrubbing only redacts tokens longer than 4 chars
+# (`if t and len(t) > 4`) — a shorter GITHOST_MCP_AUTH_TOKEN would silently defeat that
+# and could appear in cleartext in logs/audit trail. Require enough length that the
+# scrub floor is never in play, well short of what secrets.token_hex(32) produces.
+_MIN_AUTH_TOKEN_LENGTH = 16
+
 
 @asynccontextmanager
 async def lifespan(app):
@@ -83,6 +89,12 @@ def main() -> None:
             raise RuntimeError(
                 "Refusing to start githost-mcp HTTP transport without GITHOST_MCP_AUTH_TOKEN "
                 "set. HTTP mode must not run with an unauthenticated, reachable port."
+            )
+        if len(config.auth_token) < _MIN_AUTH_TOKEN_LENGTH:
+            raise RuntimeError(
+                f"GITHOST_MCP_AUTH_TOKEN is too short ({len(config.auth_token)} chars, need "
+                f">= {_MIN_AUTH_TOKEN_LENGTH}) to be reliably redacted by the credential filter. "
+                'Generate one with: python3 -c "import secrets; print(secrets.token_hex(32))"'
             )
         mcp.run(transport="http", host=config.http_host, port=config.http_port)
     else:

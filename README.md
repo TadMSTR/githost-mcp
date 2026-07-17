@@ -150,12 +150,14 @@ none. Two controls are mandatory together, not either/or:
 - **Bearer token auth.** When `GITHOST_MCP_AUTH_TOKEN` is set, FastMCP's built-in
   `StaticTokenVerifier` rejects any request without a matching `Authorization: Bearer <token>`
   header (401). scoped-mcp's manifest `headers` block supplies it — see the Configuration block
-  in the build plan. The token is included in the credential filter, so it's never written to
-  logs or the audit trail, same as the provider tokens.
+  in the build plan. The token is included in the credential filter (`audit.py` / `security.py`),
+  so it's never written to logs or the audit trail — **provided it's at least 16 characters**;
+  the scrub only redacts tokens over 4 characters, so `main()` separately hard-fails on a
+  shorter token rather than silently accepting one the filter can't reliably catch.
 
-githost-mcp will not ship `TRANSPORT=http` with a reachable port and no token configured — that
-combination is a config error, not a supported deploy shape. In stdio mode (the default), neither
-control is relevant: there's no listening port to protect.
+githost-mcp will not ship `TRANSPORT=http` with a reachable port and no token configured, or with
+a token under 16 characters — both are config errors, not a supported deploy shape. In stdio mode
+(the default), neither control is relevant: there's no listening port to protect.
 
 ## Environment Variables
 
@@ -242,7 +244,7 @@ TRANSPORT=stdio          # or "http" — see Deploy below
 HTTP_HOST=127.0.0.1      # http mode only; must be loopback unless overridden below
 HTTP_PORT=8620           # http mode only
 GITHOST_MCP_ALLOW_NONLOOPBACK=   # set to "1" to bind a non-loopback HTTP_HOST (not recommended)
-GITHOST_MCP_AUTH_TOKEN=  # required whenever TRANSPORT=http
+GITHOST_MCP_AUTH_TOKEN=  # required whenever TRANSPORT=http; must be >= 16 chars
 ```
 
 ## Installation
