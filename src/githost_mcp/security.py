@@ -89,6 +89,7 @@ def mask_credentials(text: str) -> str:
         config.pypi_test_token,
         config.npm_token,
         config.audit_signing_key,
+        config.auth_token,
     ]:
         if token and len(token) > 4:
             result = result.replace(token, "***")

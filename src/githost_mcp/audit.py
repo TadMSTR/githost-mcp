@@ -42,6 +42,7 @@ def _credential_filter(logger: Any, method: str, event_dict: dict) -> dict:
             config.pypi_test_token,
             config.npm_token,
             config.audit_signing_key,
+            config.auth_token,
         ]
         if t and len(t) > 4
     ]
@@ -159,6 +160,7 @@ def _scrub_dict(d: dict) -> dict:
             config.pypi_test_token,
             config.npm_token,
             config.audit_signing_key,
+            config.auth_token,
         ]
         if t and len(t) > 4
     ]
@@ -200,6 +202,7 @@ def write_audit_entry(
             config.pypi_test_token,
             config.npm_token,
             config.audit_signing_key,
+            config.auth_token,
         ]
         if t and len(t) > 4
     ]

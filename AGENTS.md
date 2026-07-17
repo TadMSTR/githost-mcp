@@ -61,6 +61,10 @@ pyproject.toml
 | `AGENT_ID`                 | Injected into audit log records                             |
 | `AGENT_MANIFEST_PATH`      | Path to this agent's manifest YAML; used as an allowlist fallback when `ALLOWED_REPO_ROOTS` is unset (default: `~/.claude/manifests/{AGENT_ID}-agent.yml`) |
 | `LOG_LEVEL`                | Logging verbosity                                           |
+| `TRANSPORT`                | `stdio` (default) or `http` — see `server.py::main()` and README "Deploy" |
+| `HTTP_HOST`                | HTTP transport bind address; must be loopback unless `GITHOST_MCP_ALLOW_NONLOOPBACK=1` |
+| `HTTP_PORT`                | HTTP transport port (one per agent PM2 process)              |
+| `GITHOST_MCP_AUTH_TOKEN`   | Bearer token for HTTP transport; required whenever `TRANSPORT=http`, must be >= 16 chars |
 
 ## Architecture decisions
 
@@ -68,6 +72,16 @@ pyproject.toml
 - **Every tool call is audit-logged** — `audit.py` writes a JSONL record with agent_id, tool name, args, and outcome for every invocation. `audit_query` lets agents review their own call history.
 - **`woodpecker_get_logs` content is excluded from audit** — log output can be large and may contain sensitive values. Only the call metadata (pipeline_id, step_name) is recorded; the log text itself is not.
 - **Registry publishing uses subprocess** — `npm_publish` and `pypi_publish` shell out rather than using library APIs. This keeps credentials out of the server process and delegates to the standard toolchains.
+- **Per-agent processes, not a shared process (Option A)** — `TRANSPORT=http` runs one PM2
+  service per agent (`ecosystem.config.js`), each with its own `AGENT_ID`, tokens, and
+  `ALLOWED_REPO_ROOTS` in a separate address space. This keeps `AGENT_ID` non-spoofable (fixed
+  at process launch, not read from a request header) and contains credential blast radius. Do
+  not collapse this to a single shared process with per-request identity without a deliberate
+  decision — that's "Option B", explicitly deferred. `main()` hard-fails closed on a
+  non-loopback `HTTP_HOST`, a missing `GITHOST_MCP_AUTH_TOKEN`, and a token shorter than 16
+  chars (the credential filter in `audit.py`/`security.py` only redacts tokens over 4 chars,
+  so a too-short token could leak into logs) — all three checks are load-bearing, not
+  defensive filler.
 
 ## Testing
 

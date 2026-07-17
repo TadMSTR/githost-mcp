@@ -128,6 +128,45 @@ def test_manifest_with_no_workspace_access_key_fails_closed(tmp_path, manifest_p
     assert config.allowlist_source == "none"
 
 
+def test_transport_defaults_to_stdio_loopback_no_auth(monkeypatch):
+    monkeypatch.delenv("TRANSPORT", raising=False)
+    monkeypatch.delenv("HTTP_PORT", raising=False)
+    monkeypatch.delenv("GITHOST_MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHOST_MCP_ALLOW_NONLOOPBACK", raising=False)
+    reset_config()
+
+    config = get_config()
+    assert config.transport == "stdio"
+    assert config.http_host == "127.0.0.1"
+    assert config.http_port is None
+    assert config.allow_nonloopback is False
+    assert config.auth_token == ""
+
+
+def test_transport_http_reads_host_port_and_token(monkeypatch):
+    monkeypatch.setenv("TRANSPORT", "http")
+    monkeypatch.setenv("HTTP_HOST", "127.0.0.1")
+    monkeypatch.setenv("HTTP_PORT", "8620")
+    monkeypatch.setenv("GITHOST_MCP_AUTH_TOKEN", "s3cr3t-token-value")
+    reset_config()
+
+    config = get_config()
+    assert config.transport == "http"
+    assert config.http_host == "127.0.0.1"
+    assert config.http_port == 8620
+    assert config.auth_token == "s3cr3t-token-value"
+
+
+def test_allow_nonloopback_only_true_when_flag_is_exactly_one(monkeypatch):
+    monkeypatch.setenv("GITHOST_MCP_ALLOW_NONLOOPBACK", "true")
+    reset_config()
+    assert get_config().allow_nonloopback is False
+
+    monkeypatch.setenv("GITHOST_MCP_ALLOW_NONLOOPBACK", "1")
+    reset_config()
+    assert get_config().allow_nonloopback is True
+
+
 def test_default_manifest_path_derived_from_agent_id(tmp_path, monkeypatch):
     """When AGENT_MANIFEST_PATH is unset, it's derived from AGENT_ID."""
     fake_home = tmp_path / "home"
