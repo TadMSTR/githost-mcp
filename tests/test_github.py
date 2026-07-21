@@ -376,3 +376,137 @@ def test_github_rejects_bad_repo_format(tools, tool_name, args):
     result = tools[tool_name](*args)
     assert "error" in result
     assert "owner/repo" in result["error"]
+
+
+# --------------------------------------------------------------------------
+# github_pr_review (method-dispatch)
+# --------------------------------------------------------------------------
+
+
+def _pr_review_mock():
+    pr = MagicMock()
+    pr.url = "https://api.github.com/repos/owner/repo/pulls/42"
+    mock_repo = MagicMock()
+    mock_repo.get_pull.return_value = pr
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+    return mock_gh, pr
+
+
+def test_github_pr_review_get_diff(tools):
+    mock_gh, pr = _pr_review_mock()
+    pr._requester.requestBlob.return_value = (200, {}, "diff --git a/f b/f\n+x\n")
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_review"]("owner/repo", 42, "get_diff")
+    assert result["diff"].startswith("diff --git")
+    assert pr._requester.requestBlob.call_args.kwargs["headers"] == {
+        "Accept": "application/vnd.github.v3.diff"
+    }
+
+
+def test_github_pr_review_get_files(tools):
+    mock_gh, pr = _pr_review_mock()
+    f = MagicMock()
+    f.filename = "app.py"
+    f.status = "modified"
+    f.additions = 3
+    f.deletions = 1
+    f.changes = 4
+    f.patch = "@@ -1 +1,3 @@"
+    f.previous_filename = None
+    pr.get_files.return_value = [f]
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_review"]("owner/repo", 42, "get_files")
+    assert result["files"][0]["filename"] == "app.py"
+    assert result["files"][0]["additions"] == 3
+
+
+def test_github_pr_review_get_reviews(tools):
+    mock_gh, pr = _pr_review_mock()
+    rev = MagicMock()
+    rev.id = 5
+    rev.user.login = "reviewer"
+    rev.state = "APPROVED"
+    rev.body = "ok"
+    rev.submitted_at.isoformat.return_value = "2026-05-01T00:00:00"
+    pr.get_reviews.return_value = [rev]
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_review"]("owner/repo", 42, "get_reviews")
+    assert result["reviews"][0]["state"] == "APPROVED"
+    assert result["reviews"][0]["user"] == "reviewer"
+
+
+def test_github_pr_review_submit_approve(tools):
+    mock_gh, pr = _pr_review_mock()
+    rev = MagicMock()
+    rev.id = 9
+    rev.state = "APPROVED"
+    pr.create_review.return_value = rev
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_review"]("owner/repo", 42, "submit_review", event="APPROVE")
+    assert result["review_id"] == 9
+    assert result["event"] == "APPROVE"
+    # APPROVE needs no body
+    assert pr.create_review.call_args.kwargs["event"] == "APPROVE"
+
+
+def test_github_pr_review_submit_requires_body_for_comment(tools):
+    mock_gh, _pr = _pr_review_mock()
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_review"]("owner/repo", 42, "submit_review", event="COMMENT")
+    assert "error" in result
+    assert "body is required" in result["error"]
+
+
+def test_github_pr_review_submit_rejects_bad_event(tools):
+    mock_gh, _pr = _pr_review_mock()
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_review"]("owner/repo", 42, "submit_review", event="LGTM")
+    assert "error" in result
+    assert "event must be one of" in result["error"]
+
+
+def test_github_pr_review_dismiss(tools):
+    mock_gh, pr = _pr_review_mock()
+    rev = MagicMock()
+    pr.get_review.return_value = rev
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_review"](
+            "owner/repo", 42, "dismiss_review", review_id=7, message="stale"
+        )
+    assert result["dismissed"] is True
+    rev.dismiss.assert_called_once_with("stale")
+
+
+def test_github_pr_review_dismiss_requires_review_id(tools):
+    mock_gh, _pr = _pr_review_mock()
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_review"]("owner/repo", 42, "dismiss_review", message="x")
+    assert "error" in result
+    assert "review_id is required" in result["error"]
+
+
+def test_github_pr_review_rejects_bad_method(tools):
+    result = tools["github_pr_review"]("owner/repo", 42, "delete_everything")
+    assert "error" in result
+    assert "method must be one of" in result["error"]
+
+
+def test_github_pr_review_rejects_bad_repo(tools):
+    result = tools["github_pr_review"]("bad-no-slash", 42, "get_diff")
+    assert "error" in result
+    assert "owner/repo" in result["error"]
+
+
+def test_github_pr_review_error_path(tools):
+    with patch("githost_mcp.tools.github.get_github", side_effect=ValueError("boom")):
+        result = tools["github_pr_review"]("owner/repo", 42, "get_files")
+    assert "error" in result

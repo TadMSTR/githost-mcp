@@ -6,7 +6,7 @@ import re
 
 import structlog
 
-from .._providers.gitea_client import gitea_get, gitea_post, gitea_post_void
+from .._providers.gitea_client import gitea_get, gitea_get_text, gitea_post, gitea_post_void
 from ..audit import AuditCtx
 from ..config import get_config
 
@@ -303,6 +303,111 @@ def register(mcp) -> None:
             await gitea_post_void(f"/repos/{owner}/{repo_name}/pulls/{pr_number}/merge", data)
             ac.finish("ok")
             return {"merged": True, "pr_number": pr_number}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return {"error": str(e)}
+
+    @mcp.tool
+    async def gitea_pr_review(
+        repo: str,
+        pr_number: int,
+        method: str,
+        body: str | None = None,
+        event: str | None = None,
+        review_id: int | None = None,
+        message: str | None = None,
+    ) -> dict:
+        """Read or submit reviews on a Gitea pull request (method-dispatch).
+
+        Methods:
+          - get_diff: return the unified diff for the PR (raw `.diff` text).
+          - get_files: list changed files (filename, status, additions, deletions).
+          - submit_review: post a review. `event` in {APPROVE, REQUEST_CHANGES, COMMENT}
+            (APPROVE maps to Gitea's APPROVED); `body` required for REQUEST_CHANGES/COMMENT.
+          - dismiss_review: dismiss a submitted review. Requires `review_id` and `message`.
+
+        DESTRUCTIVE methods: submit_review (event=APPROVE or REQUEST_CHANGES) and
+        dismiss_review change PR state and must be HITL gated at the (tool, method) level
+        in scoped-mcp manifests.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            pr_number: Pull request number.
+            method: get_diff | get_files | submit_review | dismiss_review.
+            body: Review body markdown (submit_review).
+            event: APPROVE, REQUEST_CHANGES, or COMMENT (submit_review).
+            review_id: Review ID to dismiss (dismiss_review).
+            message: Dismissal reason (dismiss_review).
+        """
+        if not _REPO_RE.match(repo):
+            return {"error": _REPO_FMT_ERR}
+        valid = {"get_diff", "get_files", "submit_review", "dismiss_review"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        config = get_config()
+        owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
+        repo_name = repo.split("/")[-1]
+        base = f"/repos/{owner}/{repo_name}/pulls/{pr_number}"
+        ac = AuditCtx(
+            "gitea_pr_review",
+            "gitea",
+            repo,
+            {"repo": repo, "pr_number": pr_number, "method": method},
+        )
+        try:
+            if method == "get_diff":
+                diff = await gitea_get_text(f"{base}.diff")
+                ac.finish("ok")
+                return {"repo": repo, "pr": pr_number, "diff": diff}
+
+            if method == "get_files":
+                data = await gitea_get(f"{base}/files")
+                files = [
+                    {
+                        "filename": f.get("filename"),
+                        "status": f.get("status"),
+                        "additions": f.get("additions"),
+                        "deletions": f.get("deletions"),
+                        "changes": f.get("changes"),
+                        "previous_filename": f.get("previous_filename"),
+                    }
+                    for f in (data if isinstance(data, list) else [])
+                ]
+                ac.finish("ok")
+                return {"repo": repo, "pr": pr_number, "files": files}
+
+            if method == "submit_review":
+                event_map = {
+                    "APPROVE": "APPROVED",
+                    "REQUEST_CHANGES": "REQUEST_CHANGES",
+                    "COMMENT": "COMMENT",
+                }
+                if event not in event_map:
+                    raise ValueError(f"event must be one of: {', '.join(sorted(event_map))}")
+                if event in {"REQUEST_CHANGES", "COMMENT"} and not body:
+                    raise ValueError(f"body is required when event is {event}")
+                result = await gitea_post(
+                    f"{base}/reviews", {"event": event_map[event], "body": body or ""}
+                )
+                ac.finish("ok")
+                return {
+                    "repo": repo,
+                    "pr": pr_number,
+                    "review_id": result.get("id"),
+                    "state": result.get("state"),
+                }
+
+            # dismiss_review
+            if review_id is None:
+                raise ValueError("review_id is required for dismiss_review")
+            if not message:
+                raise ValueError("message is required for dismiss_review")
+            await gitea_post(
+                f"{base}/reviews/{review_id}/dismissals",
+                {"message": message, "priors": False},
+            )
+            ac.finish("ok")
+            return {"repo": repo, "pr": pr_number, "review_id": review_id, "dismissed": True}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": str(e)}

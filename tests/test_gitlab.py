@@ -287,3 +287,102 @@ def test_gitlab_accepts_nested_and_numeric_project(tools, project):
     with p1, p2:
         result = tools["gitlab_mr_get"](project, 5)
     assert result["iid"] == 5  # passed validation and reached the client
+
+
+# --------------------------------------------------------------------------
+# gitlab_mr_review (method-dispatch)
+# --------------------------------------------------------------------------
+
+
+def _mr_review_mock():
+    mr = MagicMock()
+    mock_proj = MagicMock()
+    mock_proj.mergerequests.get.return_value = mr
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    return mock_gl, mr
+
+
+def test_gitlab_mr_review_get_diffs(tools):
+    mock_gl, mr = _mr_review_mock()
+    mr.changes.return_value = {
+        "changes": [
+            {
+                "old_path": "a.py",
+                "new_path": "a.py",
+                "diff": "@@ -1 +1 @@",
+                "new_file": False,
+                "renamed_file": False,
+                "deleted_file": False,
+            }
+        ]
+    }
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_review"]("owner/project", 5, "get_diffs")
+    assert result["diffs"][0]["new_path"] == "a.py"
+    assert result["diffs"][0]["diff"] == "@@ -1 +1 @@"
+
+
+def test_gitlab_mr_review_get_changed_files(tools):
+    mock_gl, mr = _mr_review_mock()
+    mr.changes.return_value = {
+        "changes": [
+            {"new_path": "b.py", "new_file": True, "renamed_file": False, "deleted_file": False}
+        ]
+    }
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_review"]("owner/project", 5, "get_changed_files")
+    assert result["files"][0]["path"] == "b.py"
+    assert result["files"][0]["new_file"] is True
+
+
+def test_gitlab_mr_review_approve(tools):
+    mock_gl, mr = _mr_review_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_review"]("owner/project", 5, "approve")
+    assert result["approved"] is True
+    mr.approve.assert_called_once()
+
+
+def test_gitlab_mr_review_unapprove(tools):
+    mock_gl, mr = _mr_review_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_review"]("owner/project", 5, "unapprove")
+    assert result["approved"] is False
+    mr.unapprove.assert_called_once()
+
+
+def test_gitlab_mr_review_get_approval_state(tools):
+    mock_gl, mr = _mr_review_mock()
+    approvals = MagicMock()
+    approvals.approvals_required = 2
+    approvals.approvals_left = 1
+    approvals.approved_by = [{"user": {"username": "alice"}}]
+    mr.approvals.get.return_value = approvals
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_review"]("owner/project", 5, "get_approval_state")
+    assert result["approvals_required"] == 2
+    assert result["approvals_left"] == 1
+    assert result["approved_by"] == ["alice"]
+
+
+def test_gitlab_mr_review_rejects_bad_method(tools):
+    result = tools["gitlab_mr_review"]("owner/project", 5, "nuke")
+    assert "error" in result
+    assert "method must be one of" in result["error"]
+
+
+def test_gitlab_mr_review_rejects_bad_project(tools):
+    result = tools["gitlab_mr_review"]("!!bad!!", 5, "get_diffs")
+    assert "error" in result
+
+
+def test_gitlab_mr_review_error_path(tools):
+    with patch("githost_mcp.tools.gitlab.get_gitlab", side_effect=ValueError("boom")):
+        result = tools["gitlab_mr_review"]("owner/project", 5, "approve")
+    assert "error" in result

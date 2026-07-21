@@ -290,3 +290,96 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
+
+    @mcp.tool
+    def gitlab_mr_review(project: str, mr_iid: int, method: str) -> dict:
+        """Review operations on a GitLab merge request (method-dispatch).
+
+        Methods:
+          - get_diffs: return per-file diffs for the MR.
+          - get_changed_files: list changed file paths with new/renamed/deleted flags.
+          - approve: approve the MR.
+          - unapprove: remove your approval from the MR.
+          - get_approval_state: return approvals required/left and approver usernames.
+
+        DESTRUCTIVE methods: approve and unapprove change MR approval state and must be
+        HITL gated at the (tool, method) level in scoped-mcp manifests. get_diffs,
+        get_changed_files, and get_approval_state are read-only.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            mr_iid: Merge request internal ID (iid), not the global id.
+            method: get_diffs | get_changed_files | approve | unapprove | get_approval_state.
+        """
+        if err := _bad_project(project):
+            return err
+        valid = {"get_diffs", "get_changed_files", "approve", "unapprove", "get_approval_state"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx(
+            "gitlab_mr_review",
+            "gitlab",
+            project,
+            {"project": project, "mr_iid": mr_iid, "method": method},
+        )
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+            mr = gitlab_call(proj.mergerequests.get, mr_iid)
+
+            if method in {"get_diffs", "get_changed_files"}:
+                changes = gitlab_call(mr.changes)
+                raw = changes.get("changes", []) if isinstance(changes, dict) else []
+                if method == "get_diffs":
+                    diffs = [
+                        {
+                            "old_path": c.get("old_path"),
+                            "new_path": c.get("new_path"),
+                            "diff": c.get("diff"),
+                            "new_file": c.get("new_file"),
+                            "renamed_file": c.get("renamed_file"),
+                            "deleted_file": c.get("deleted_file"),
+                        }
+                        for c in raw
+                    ]
+                    ac.finish("ok")
+                    return {"project": project, "mr_iid": mr_iid, "diffs": diffs}
+                files = [
+                    {
+                        "path": c.get("new_path"),
+                        "new_file": c.get("new_file"),
+                        "renamed_file": c.get("renamed_file"),
+                        "deleted_file": c.get("deleted_file"),
+                    }
+                    for c in raw
+                ]
+                ac.finish("ok")
+                return {"project": project, "mr_iid": mr_iid, "files": files}
+
+            if method == "approve":
+                gitlab_call(mr.approve)
+                ac.finish("ok")
+                return {"project": project, "mr_iid": mr_iid, "approved": True}
+
+            if method == "unapprove":
+                gitlab_call(mr.unapprove)
+                ac.finish("ok")
+                return {"project": project, "mr_iid": mr_iid, "approved": False}
+
+            # get_approval_state
+            approvals = gitlab_call(mr.approvals.get)
+            approved_by = [
+                a.get("user", {}).get("username")
+                for a in (getattr(approvals, "approved_by", None) or [])
+            ]
+            ac.finish("ok")
+            return {
+                "project": project,
+                "mr_iid": mr_iid,
+                "approvals_required": getattr(approvals, "approvals_required", None),
+                "approvals_left": getattr(approvals, "approvals_left", None),
+                "approved_by": approved_by,
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)

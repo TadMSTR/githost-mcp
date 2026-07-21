@@ -393,3 +393,121 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
+
+    @mcp.tool
+    def github_pr_review(
+        repo: str,
+        pr_number: int,
+        method: str,
+        body: str | None = None,
+        event: str | None = None,
+        review_id: int | None = None,
+        message: str | None = None,
+    ) -> dict:
+        """Read or submit reviews on a GitHub pull request (method-dispatch).
+
+        Methods:
+          - get_diff: return the unified diff for the PR (raw `git diff` text).
+          - get_files: list changed files (filename, status, additions, deletions, patch).
+          - get_reviews: list submitted reviews (id, author, state, body).
+          - submit_review: post a review. `event` in {APPROVE, REQUEST_CHANGES, COMMENT};
+            `body` required for REQUEST_CHANGES/COMMENT.
+          - dismiss_review: dismiss a submitted review. Requires `review_id` and `message`.
+
+        DESTRUCTIVE methods: submit_review (event=APPROVE or REQUEST_CHANGES) and
+        dismiss_review change PR state and must be HITL gated at the (tool, method) level
+        in scoped-mcp manifests. get_diff/get_files/get_reviews and a COMMENT-only
+        submit_review are read/comment-only.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            pr_number: Pull request number.
+            method: get_diff | get_files | get_reviews | submit_review | dismiss_review.
+            body: Review body markdown (submit_review).
+            event: APPROVE, REQUEST_CHANGES, or COMMENT (submit_review).
+            review_id: Review ID to dismiss (dismiss_review).
+            message: Dismissal reason (dismiss_review).
+        """
+        if err := _bad_repo(repo):
+            return err
+        valid = {"get_diff", "get_files", "get_reviews", "submit_review", "dismiss_review"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx(
+            "github_pr_review",
+            "github",
+            repo,
+            {"repo": repo, "pr_number": pr_number, "method": method},
+        )
+        try:
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+            pr = github_call(gh_repo.get_pull, pr_number)
+
+            if method == "get_diff":
+                # PyGithub has no typed diff accessor; the requester fetches the raw
+                # unified diff via the diff media type. Returns (status, headers, body).
+                _status, _headers, data = pr._requester.requestBlob(
+                    "GET", pr.url, headers={"Accept": "application/vnd.github.v3.diff"}
+                )
+                ac.finish("ok")
+                return {"repo": repo, "pr": pr_number, "diff": data}
+
+            if method == "get_files":
+                files = [
+                    {
+                        "filename": f.filename,
+                        "status": f.status,
+                        "additions": f.additions,
+                        "deletions": f.deletions,
+                        "changes": f.changes,
+                        "patch": f.patch,
+                        "previous_filename": getattr(f, "previous_filename", None),
+                    }
+                    for f in github_call(pr.get_files)
+                ]
+                ac.finish("ok")
+                return {"repo": repo, "pr": pr_number, "files": files}
+
+            if method == "get_reviews":
+                reviews = [
+                    {
+                        "id": r.id,
+                        "user": r.user.login if r.user else None,
+                        "state": r.state,
+                        "body": r.body,
+                        "submitted_at": r.submitted_at.isoformat() if r.submitted_at else None,
+                    }
+                    for r in github_call(pr.get_reviews)
+                ]
+                ac.finish("ok")
+                return {"repo": repo, "pr": pr_number, "reviews": reviews}
+
+            if method == "submit_review":
+                valid_events = {"APPROVE", "REQUEST_CHANGES", "COMMENT"}
+                if event not in valid_events:
+                    raise ValueError(f"event must be one of: {', '.join(sorted(valid_events))}")
+                if event in {"REQUEST_CHANGES", "COMMENT"} and not body:
+                    raise ValueError(f"body is required when event is {event}")
+                review = github_call(pr.create_review, body=body or "", event=event)
+                ac.finish("ok")
+                return {
+                    "repo": repo,
+                    "pr": pr_number,
+                    "review_id": review.id,
+                    "state": review.state,
+                    "event": event,
+                }
+
+            # dismiss_review
+            if review_id is None:
+                raise ValueError("review_id is required for dismiss_review")
+            if not message:
+                raise ValueError("message is required for dismiss_review")
+            review = github_call(pr.get_review, review_id)
+            github_call(review.dismiss, message)
+            ac.finish("ok")
+            return {"repo": repo, "pr": pr_number, "review_id": review_id, "dismissed": True}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)

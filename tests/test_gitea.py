@@ -173,3 +173,87 @@ async def test_gitea_pr_merge_conflict(tools):
         result = await fns["gitea_pr_merge"]("testowner/repo", 3)
     assert "error" in result
     assert "merged" not in result
+
+
+# --------------------------------------------------------------------------
+# gitea_pr_review (method-dispatch)
+# --------------------------------------------------------------------------
+
+_GT_BASE = "https://gitea.example.com/api/v1/repos/testowner/repo/pulls/3"
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_get_diff(tools):
+    with respx.mock:
+        respx.get(f"{_GT_BASE}.diff").mock(
+            return_value=httpx.Response(200, text="diff --git a/f b/f\n+x\n")
+        )
+        result = await tools["gitea_pr_review"]("testowner/repo", 3, "get_diff")
+    assert result["diff"].startswith("diff --git")
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_get_files(tools):
+    mock_files = [
+        {"filename": "app.py", "status": "modified", "additions": 2, "deletions": 1, "changes": 3}
+    ]
+    with respx.mock:
+        respx.get(f"{_GT_BASE}/files").mock(return_value=httpx.Response(200, json=mock_files))
+        result = await tools["gitea_pr_review"]("testowner/repo", 3, "get_files")
+    assert result["files"][0]["filename"] == "app.py"
+    assert result["files"][0]["additions"] == 2
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_submit_approve_maps_event(tools):
+    captured = {}
+
+    def _capture(request):
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"id": 11, "state": "APPROVED"})
+
+    with respx.mock:
+        respx.post(f"{_GT_BASE}/reviews").mock(side_effect=_capture)
+        result = await tools["gitea_pr_review"](
+            "testowner/repo", 3, "submit_review", event="APPROVE"
+        )
+    assert result["review_id"] == 11
+    # APPROVE is translated to Gitea's APPROVED
+    assert captured["event"] == "APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_submit_requires_body_for_request_changes(tools):
+    result = await tools["gitea_pr_review"](
+        "testowner/repo", 3, "submit_review", event="REQUEST_CHANGES"
+    )
+    assert "error" in result
+    assert "body is required" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_dismiss(tools):
+    with respx.mock:
+        respx.post(f"{_GT_BASE}/reviews/5/dismissals").mock(
+            return_value=httpx.Response(200, json={"id": 5})
+        )
+        result = await tools["gitea_pr_review"](
+            "testowner/repo", 3, "dismiss_review", review_id=5, message="stale"
+        )
+    assert result["dismissed"] is True
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_rejects_bad_method(tools):
+    result = await tools["gitea_pr_review"]("testowner/repo", 3, "nuke")
+    assert "error" in result
+    assert "method must be one of" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_rejects_bad_repo(tools):
+    result = await tools["gitea_pr_review"]("bad-no-slash", 3, "get_diff")
+    assert "error" in result
+    assert "owner/repo" in result["error"]
