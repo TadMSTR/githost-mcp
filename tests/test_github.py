@@ -510,3 +510,96 @@ def test_github_pr_review_error_path(tools):
     with patch("githost_mcp.tools.github.get_github", side_effect=ValueError("boom")):
         result = tools["github_pr_review"]("owner/repo", 42, "get_files")
     assert "error" in result
+
+
+# --------------------------------------------------------------------------
+# github_actions (method-dispatch)
+# --------------------------------------------------------------------------
+
+
+def test_github_actions_run_workflow(tools):
+    wf = MagicMock()
+    wf.create_dispatch.return_value = True
+    mock_repo = MagicMock()
+    mock_repo.get_workflow.return_value = wf
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_actions"](
+            "owner/repo", "run_workflow", workflow="ci.yml", ref="main", inputs={"env": "prod"}
+        )
+    assert result["dispatched"] is True
+    wf.create_dispatch.assert_called_once_with("main", {"env": "prod"})
+
+
+def test_github_actions_run_workflow_requires_ref(tools):
+    mock_gh = MagicMock()
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_actions"]("owner/repo", "run_workflow", workflow="ci.yml")
+    assert "error" in result
+    assert "workflow and ref are required" in result["error"]
+
+
+def test_github_actions_rerun_and_cancel(tools):
+    run = MagicMock()
+    mock_repo = MagicMock()
+    mock_repo.get_workflow_run.return_value = run
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        r1 = tools["github_actions"]("owner/repo", "rerun_workflow", run_id=5)
+        r2 = tools["github_actions"]("owner/repo", "rerun_failed_jobs", run_id=5)
+        r3 = tools["github_actions"]("owner/repo", "cancel_run", run_id=5)
+    assert r1["rerun"] is True
+    assert r2["rerun_failed_jobs"] is True
+    assert r3["cancelled"] is True
+    run.rerun.assert_called_once()
+    run.rerun_failed_jobs.assert_called_once()
+    run.cancel.assert_called_once()
+
+
+def test_github_actions_rerun_requires_run_id(tools):
+    mock_gh = MagicMock()
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_actions"]("owner/repo", "cancel_run")
+    assert "error" in result
+    assert "run_id is required" in result["error"]
+
+
+def test_github_actions_get_run_logs(tools):
+    job = MagicMock()
+    job.id = 3
+    job.name = "build"
+    job.status = "completed"
+    job.conclusion = "success"
+    job.html_url = "https://github.com/owner/repo/actions/runs/5/job/3"
+    run = MagicMock()
+    run.jobs.return_value = [job]
+    mock_repo = MagicMock()
+    mock_repo.get_workflow_run.return_value = run
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_actions"]("owner/repo", "get_run_logs", run_id=5)
+    assert result["jobs"][0]["name"] == "build"
+    assert result["jobs"][0]["conclusion"] == "success"
+
+
+def test_github_actions_rejects_bad_method(tools):
+    result = tools["github_actions"]("owner/repo", "delete_repo")
+    assert "error" in result
+    assert "method must be one of" in result["error"]
+
+
+def test_github_actions_error_path(tools):
+    with patch("githost_mcp.tools.github.get_github", side_effect=ValueError("boom")):
+        result = tools["github_actions"]("owner/repo", "cancel_run", run_id=1)
+    assert "error" in result

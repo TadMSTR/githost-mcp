@@ -383,3 +383,108 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
+
+    @mcp.tool
+    def gitlab_pipeline(
+        project: str,
+        method: str,
+        pipeline_id: int | None = None,
+        ref: str | None = None,
+        job_id: int | None = None,
+        limit: int = 20,
+    ) -> dict:
+        """Control GitLab CI pipelines (method-dispatch).
+
+        Methods:
+          - list: list recent pipelines (id, status, ref, sha, web_url).
+          - get: get a single pipeline by id. Requires `pipeline_id`.
+          - create: trigger a new pipeline on `ref`. Requires `ref`.
+          - retry: retry failed/cancelled jobs of a pipeline. Requires `pipeline_id`.
+          - cancel: cancel a running pipeline. Requires `pipeline_id`.
+          - get_job_log: return the raw trace log for a job. Requires `job_id`.
+
+        DESTRUCTIVE methods (create, retry, cancel) change CI state and must be HITL gated
+        at the (tool, method) level in scoped-mcp manifests. list/get/get_job_log are
+        read-only.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            method: list | get | create | retry | cancel | get_job_log.
+            pipeline_id: Pipeline ID (get, retry, cancel).
+            ref: Branch or tag to run against (create).
+            job_id: Job ID (get_job_log).
+            limit: Max pipelines to return for list (default 20).
+        """
+        if err := _bad_project(project):
+            return err
+        valid = {"list", "get", "create", "retry", "cancel", "get_job_log"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx("gitlab_pipeline", "gitlab", project, {"project": project, "method": method})
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+
+            if method == "list":
+                pipelines = [
+                    {
+                        "id": p.id,
+                        "status": p.status,
+                        "ref": p.ref,
+                        "sha": p.sha,
+                        "web_url": p.web_url,
+                    }
+                    for p in gitlab_call(proj.pipelines.list, get_all=False)[:limit]
+                ]
+                ac.finish("ok")
+                return {"project": project, "pipelines": pipelines}
+
+            if method == "create":
+                if not ref:
+                    raise ValueError("ref is required for create")
+                pipe = gitlab_call(proj.pipelines.create, {"ref": ref})
+                ac.finish("ok")
+                return {
+                    "project": project,
+                    "id": pipe.id,
+                    "status": pipe.status,
+                    "ref": pipe.ref,
+                    "web_url": pipe.web_url,
+                }
+
+            if method == "get_job_log":
+                if job_id is None:
+                    raise ValueError("job_id is required for get_job_log")
+                job = gitlab_call(proj.jobs.get, job_id)
+                trace = gitlab_call(job.trace)
+                if isinstance(trace, bytes):
+                    trace = trace.decode("utf-8", errors="replace")
+                ac.finish("ok")
+                return {"project": project, "job_id": job_id, "log": trace}
+
+            # get / retry / cancel all need a pipeline_id
+            if pipeline_id is None:
+                raise ValueError(f"pipeline_id is required for {method}")
+            pipe = gitlab_call(proj.pipelines.get, pipeline_id)
+
+            if method == "get":
+                ac.finish("ok")
+                return {
+                    "project": project,
+                    "id": pipe.id,
+                    "status": pipe.status,
+                    "ref": pipe.ref,
+                    "sha": pipe.sha,
+                    "web_url": pipe.web_url,
+                }
+            if method == "retry":
+                gitlab_call(pipe.retry)
+                ac.finish("ok")
+                return {"project": project, "id": pipeline_id, "retried": True}
+            # cancel
+            gitlab_call(pipe.cancel)
+            ac.finish("ok")
+            return {"project": project, "id": pipeline_id, "cancelled": True}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)

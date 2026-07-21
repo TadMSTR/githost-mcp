@@ -386,3 +386,98 @@ def test_gitlab_mr_review_error_path(tools):
     with patch("githost_mcp.tools.gitlab.get_gitlab", side_effect=ValueError("boom")):
         result = tools["gitlab_mr_review"]("owner/project", 5, "approve")
     assert "error" in result
+
+
+# --------------------------------------------------------------------------
+# gitlab_pipeline (method-dispatch)
+# --------------------------------------------------------------------------
+
+
+def _pipeline_mock():
+    pipe = MagicMock()
+    pipe.id = 100
+    pipe.status = "running"
+    pipe.ref = "main"
+    pipe.sha = "abc123"
+    pipe.web_url = "https://gitlab.com/owner/project/-/pipelines/100"
+    mock_proj = MagicMock()
+    mock_proj.pipelines.get.return_value = pipe
+    mock_proj.pipelines.create.return_value = pipe
+    mock_proj.pipelines.list.return_value = [pipe]
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    return mock_gl, mock_proj, pipe
+
+
+def test_gitlab_pipeline_list(tools):
+    mock_gl, _proj, _pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "list")
+    assert result["pipelines"][0]["id"] == 100
+
+
+def test_gitlab_pipeline_get(tools):
+    mock_gl, _proj, _pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "get", pipeline_id=100)
+    assert result["status"] == "running"
+
+
+def test_gitlab_pipeline_create(tools):
+    mock_gl, proj, _pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "create", ref="main")
+    assert result["id"] == 100
+    proj.pipelines.create.assert_called_once_with({"ref": "main"})
+
+
+def test_gitlab_pipeline_create_requires_ref(tools):
+    mock_gl, _proj, _pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "create")
+    assert "error" in result
+    assert "ref is required" in result["error"]
+
+
+def test_gitlab_pipeline_retry_and_cancel(tools):
+    mock_gl, _proj, pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        r1 = tools["gitlab_pipeline"]("owner/project", "retry", pipeline_id=100)
+        r2 = tools["gitlab_pipeline"]("owner/project", "cancel", pipeline_id=100)
+    assert r1["retried"] is True
+    assert r2["cancelled"] is True
+    pipe.retry.assert_called_once()
+    pipe.cancel.assert_called_once()
+
+
+def test_gitlab_pipeline_retry_requires_id(tools):
+    mock_gl, _proj, _pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "retry")
+    assert "error" in result
+    assert "pipeline_id is required" in result["error"]
+
+
+def test_gitlab_pipeline_get_job_log(tools):
+    job = MagicMock()
+    job.trace.return_value = b"job output line\n"
+    mock_proj = MagicMock()
+    mock_proj.jobs.get.return_value = job
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "get_job_log", job_id=9)
+    assert "job output line" in result["log"]
+
+
+def test_gitlab_pipeline_rejects_bad_method(tools):
+    result = tools["gitlab_pipeline"]("owner/project", "nuke")
+    assert "error" in result
+    assert "method must be one of" in result["error"]

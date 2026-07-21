@@ -511,3 +511,105 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
+
+    @mcp.tool
+    def github_actions(
+        repo: str,
+        method: str,
+        workflow: str | None = None,
+        ref: str | None = None,
+        run_id: int | None = None,
+        inputs: dict | None = None,
+    ) -> dict:
+        """Control GitHub Actions workflow runs (method-dispatch).
+
+        Methods:
+          - run_workflow: trigger a workflow_dispatch. Requires `workflow` (id or file
+            name, e.g. 'ci.yml') and `ref` (branch/tag); optional `inputs` dict.
+          - rerun_workflow: re-run all jobs of a run. Requires `run_id`.
+          - rerun_failed_jobs: re-run only the failed jobs of a run. Requires `run_id`.
+          - cancel_run: cancel an in-progress run. Requires `run_id`.
+          - get_run_logs: return the job breakdown for a run (name/status/conclusion/url).
+            GitHub's raw logs are a downloadable zip archive, not inline text — this
+            returns the per-job status view instead. Requires `run_id`.
+
+        Read-only workflow listing/status stays in github_workflow_list /
+        github_workflow_status. DESTRUCTIVE methods (run_workflow, rerun_workflow,
+        rerun_failed_jobs, cancel_run) change CI state and must be HITL gated at the
+        (tool, method) level in scoped-mcp manifests.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            method: run_workflow | rerun_workflow | rerun_failed_jobs | cancel_run |
+                get_run_logs.
+            workflow: Workflow id or file name (run_workflow).
+            ref: Branch or tag to run against (run_workflow).
+            run_id: Workflow run ID (rerun_workflow, rerun_failed_jobs, cancel_run,
+                get_run_logs).
+            inputs: Optional workflow_dispatch inputs mapping (run_workflow).
+        """
+        if err := _bad_repo(repo):
+            return err
+        valid = {
+            "run_workflow",
+            "rerun_workflow",
+            "rerun_failed_jobs",
+            "cancel_run",
+            "get_run_logs",
+        }
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx("github_actions", "github", repo, {"repo": repo, "method": method})
+        try:
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+
+            if method == "run_workflow":
+                if not workflow or not ref:
+                    raise ValueError("workflow and ref are required for run_workflow")
+                wf = github_call(gh_repo.get_workflow, workflow)
+                if inputs:
+                    created = github_call(wf.create_dispatch, ref, inputs)
+                else:
+                    created = github_call(wf.create_dispatch, ref)
+                ac.finish("ok")
+                return {"repo": repo, "workflow": workflow, "ref": ref, "dispatched": bool(created)}
+
+            if run_id is None:
+                raise ValueError(f"run_id is required for {method}")
+            run = github_call(gh_repo.get_workflow_run, run_id)
+
+            if method == "rerun_workflow":
+                github_call(run.rerun)
+                ac.finish("ok")
+                return {"repo": repo, "run_id": run_id, "rerun": True}
+            if method == "rerun_failed_jobs":
+                github_call(run.rerun_failed_jobs)
+                ac.finish("ok")
+                return {"repo": repo, "run_id": run_id, "rerun_failed_jobs": True}
+            if method == "cancel_run":
+                github_call(run.cancel)
+                ac.finish("ok")
+                return {"repo": repo, "run_id": run_id, "cancelled": True}
+
+            # get_run_logs
+            jobs = [
+                {
+                    "id": j.id,
+                    "name": j.name,
+                    "status": j.status,
+                    "conclusion": j.conclusion,
+                    "url": j.html_url,
+                }
+                for j in github_call(run.jobs)
+            ]
+            ac.finish("ok")
+            return {
+                "repo": repo,
+                "run_id": run_id,
+                "jobs": jobs,
+                "note": "GitHub Actions raw logs are a zip archive; use each job's url to view.",
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)

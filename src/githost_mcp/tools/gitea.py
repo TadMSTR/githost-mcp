@@ -411,3 +411,146 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": str(e)}
+
+    @mcp.tool
+    async def gitea_actions(
+        repo: str,
+        method: str,
+        run_id: int | None = None,
+        workflow: str | None = None,
+        ref: str | None = None,
+        inputs: dict | None = None,
+        job_id: int | None = None,
+        limit: int = 20,
+    ) -> dict:
+        """Control Gitea Actions workflow runs (method-dispatch).
+
+        Methods:
+          - list_runs: list recent action runs (id, status, conclusion, event, branch).
+          - get_run: get a single run by id. Requires `run_id`.
+          - list_jobs: list jobs for a run (id, name, status, conclusion). Requires `run_id`.
+          - get_job_log: return the raw text log for a job. Requires `job_id`.
+          - dispatch_workflow: trigger a workflow_dispatch. Requires `workflow` (file name,
+            e.g. 'ci.yml') and `ref`; optional `inputs` dict.
+          - rerun_run: re-run all jobs of a run. Requires `run_id`.
+          - rerun_failed_jobs: re-run only the failed jobs of a run. Requires `run_id`.
+
+        Gitea 1.26 has no API to cancel a run (only rerun / delete), so cancel is not
+        exposed here. DESTRUCTIVE methods (dispatch_workflow, rerun_run, rerun_failed_jobs)
+        change CI state and must be HITL gated at the (tool, method) level in scoped-mcp
+        manifests.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            method: list_runs | get_run | list_jobs | get_job_log | dispatch_workflow |
+                rerun_run | rerun_failed_jobs.
+            run_id: Action run ID (get_run, list_jobs, rerun_run, rerun_failed_jobs).
+            workflow: Workflow file name (dispatch_workflow).
+            ref: Branch or tag to run against (dispatch_workflow).
+            inputs: Optional workflow_dispatch inputs mapping (dispatch_workflow).
+            job_id: Action job ID (get_job_log).
+            limit: Max runs to return for list_runs (default 20, max 100).
+        """
+        if not _REPO_RE.match(repo):
+            return {"error": _REPO_FMT_ERR}
+        valid = {
+            "list_runs",
+            "get_run",
+            "list_jobs",
+            "get_job_log",
+            "dispatch_workflow",
+            "rerun_run",
+            "rerun_failed_jobs",
+        }
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        config = get_config()
+        owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
+        repo_name = repo.split("/")[-1]
+        base = f"/repos/{owner}/{repo_name}/actions"
+        ac = AuditCtx("gitea_actions", "gitea", repo, {"repo": repo, "method": method})
+        try:
+            if method == "list_runs":
+                limit = min(limit, 100)
+                data = await gitea_get(f"{base}/runs?limit={limit}")
+                runs = data.get("workflow_runs", []) if isinstance(data, dict) else []
+                out = [
+                    {
+                        "id": r.get("id"),
+                        "status": r.get("status"),
+                        "conclusion": r.get("conclusion"),
+                        "event": r.get("event"),
+                        "head_branch": r.get("head_branch"),
+                        "run_number": r.get("run_number"),
+                        "title": r.get("display_title"),
+                        "url": r.get("html_url"),
+                    }
+                    for r in runs
+                ]
+                ac.finish("ok")
+                return {"repo": repo, "runs": out}
+
+            if method == "get_run":
+                if run_id is None:
+                    raise ValueError("run_id is required for get_run")
+                r = await gitea_get(f"{base}/runs/{run_id}")
+                ac.finish("ok")
+                return {
+                    "id": r.get("id"),
+                    "status": r.get("status"),
+                    "conclusion": r.get("conclusion"),
+                    "event": r.get("event"),
+                    "head_branch": r.get("head_branch"),
+                    "head_sha": r.get("head_sha"),
+                    "run_number": r.get("run_number"),
+                    "title": r.get("display_title"),
+                    "url": r.get("html_url"),
+                    "started_at": r.get("started_at"),
+                    "completed_at": r.get("completed_at"),
+                }
+
+            if method == "list_jobs":
+                if run_id is None:
+                    raise ValueError("run_id is required for list_jobs")
+                data = await gitea_get(f"{base}/runs/{run_id}/jobs")
+                jobs = data.get("jobs", []) if isinstance(data, dict) else []
+                out = [
+                    {
+                        "id": j.get("id"),
+                        "name": j.get("name"),
+                        "status": j.get("status"),
+                        "conclusion": j.get("conclusion"),
+                        "url": j.get("html_url"),
+                    }
+                    for j in jobs
+                ]
+                ac.finish("ok")
+                return {"repo": repo, "run_id": run_id, "jobs": out}
+
+            if method == "get_job_log":
+                if job_id is None:
+                    raise ValueError("job_id is required for get_job_log")
+                text = await gitea_get_text(f"{base}/jobs/{job_id}/logs")
+                ac.finish("ok")
+                return {"repo": repo, "job_id": job_id, "log": text}
+
+            if method == "dispatch_workflow":
+                if not workflow or not ref:
+                    raise ValueError("workflow and ref are required for dispatch_workflow")
+                await gitea_post_void(
+                    f"{base}/workflows/{workflow}/dispatches",
+                    {"ref": ref, "inputs": inputs or {}},
+                )
+                ac.finish("ok")
+                return {"repo": repo, "workflow": workflow, "ref": ref, "dispatched": True}
+
+            # rerun_run / rerun_failed_jobs
+            if run_id is None:
+                raise ValueError(f"run_id is required for {method}")
+            suffix = "rerun" if method == "rerun_run" else "rerun-failed-jobs"
+            await gitea_post_void(f"{base}/runs/{run_id}/{suffix}", {})
+            ac.finish("ok")
+            return {"repo": repo, "run_id": run_id, method: True}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return {"error": str(e)}
