@@ -52,6 +52,20 @@ Method-level gating is tracked by the companion plan
 | `github_release_delete` / `gitea_release_delete` / `gitlab_release_delete` | (whole tool) |
 | `github_issue_write` / `gitea_issue_write` / `gitlab_issue_write` | `close` (and `create`/`update`/`add_comment` at operator discretion) |
 
+### Security
+
+- Audit `githost-mcp-tier1-parity-2026-07` (1 Medium, 1 Low, 3 Info; full report:
+  `host-forge/build-reports/githost-mcp-tier1-parity-2026-07/audit.md`). Both findings
+  remediated before merge:
+  - **Medium (SC-14 / GHOST-8):** `gitea.py` now routes every exception return through a
+    `mask_credentials` `_err()` helper, matching `github.py`/`gitlab.py`. Closes the
+    long-open GHOST-8 for all Gitea tools (the audit log was already scrubbed
+    independently; this covers the direct tool-return value). Restores the build plan's
+    credential-isolation invariant across all three providers.
+  - **Low:** added the missing unsafe-tag rejection test for `gitea_release_update`.
+- Pre-audit baseline also fixed IV-01 (unvalidated `tag`/`workflow` interpolated into raw
+  Gitea httpx paths — now guarded by `_bad_tag`/`_WORKFLOW_RE`).
+
 ### Fixed
 
 - `__init__.py` `__version__` was stuck at `0.5.0` while `pyproject.toml` had moved to
