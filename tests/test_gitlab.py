@@ -481,3 +481,48 @@ def test_gitlab_pipeline_rejects_bad_method(tools):
     result = tools["gitlab_pipeline"]("owner/project", "nuke")
     assert "error" in result
     assert "method must be one of" in result["error"]
+
+
+# --------------------------------------------------------------------------
+# gitlab_release_update / gitlab_release_delete
+# --------------------------------------------------------------------------
+
+
+def test_gitlab_release_update(tools):
+    rel = MagicMock()
+    rel.tag_name = "v1.0.0"
+    rel.name = "old"
+    rel.description = "old desc"
+    mock_proj = MagicMock()
+    mock_proj.releases.get.return_value = rel
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_release_update"]("owner/project", "v1.0.0", name="new")
+    assert result["name"] == "new"
+    rel.save.assert_called_once()
+
+
+def test_gitlab_release_delete(tools):
+    mock_proj = MagicMock()
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_release_delete"]("owner/project", "v1.0.0")
+    assert result["deleted"] is True
+    mock_proj.releases.delete.assert_called_once_with("v1.0.0")
+
+
+def test_gitlab_release_delete_bad_project(tools):
+    result = tools["gitlab_release_delete"]("!!bad!!", "v1")
+    assert "error" in result
+
+
+def test_gitlab_release_update_error_path(tools):
+    with patch("githost_mcp.tools.gitlab.get_gitlab", side_effect=ValueError("boom")):
+        result = tools["gitlab_release_update"]("owner/project", "v1")
+    assert "error" in result

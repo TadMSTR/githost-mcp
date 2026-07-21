@@ -6,7 +6,14 @@ import re
 
 import structlog
 
-from .._providers.gitea_client import gitea_get, gitea_get_text, gitea_post, gitea_post_void
+from .._providers.gitea_client import (
+    gitea_delete,
+    gitea_get,
+    gitea_get_text,
+    gitea_patch,
+    gitea_post,
+    gitea_post_void,
+)
 from ..audit import AuditCtx
 from ..config import get_config
 
@@ -551,6 +558,85 @@ def register(mcp) -> None:
             await gitea_post_void(f"{base}/runs/{run_id}/{suffix}", {})
             ac.finish("ok")
             return {"repo": repo, "run_id": run_id, method: True}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return {"error": str(e)}
+
+    @mcp.tool
+    async def gitea_release_update(
+        repo: str,
+        tag: str,
+        name: str | None = None,
+        body: str | None = None,
+        draft: bool | None = None,
+        prerelease: bool | None = None,
+    ) -> dict:
+        """Update an existing Gitea release identified by tag.
+
+        Only the fields you pass are changed; omitted fields keep their current values.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            tag: Tag name of the release to update.
+            name: New release title (unchanged if omitted).
+            body: New release notes markdown (unchanged if omitted).
+            draft: New draft flag (unchanged if omitted).
+            prerelease: New prerelease flag (unchanged if omitted).
+        """
+        if not _REPO_RE.match(repo):
+            return {"error": _REPO_FMT_ERR}
+        config = get_config()
+        owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
+        repo_name = repo.split("/")[-1]
+        ac = AuditCtx("gitea_release_update", "gitea", repo, {"repo": repo, "tag": tag})
+        try:
+            # Gitea can only PATCH a release by numeric id; resolve the tag first.
+            existing = await gitea_get(f"/repos/{owner}/{repo_name}/releases/tags/{tag}")
+            rid = existing.get("id")
+            data: dict = {}
+            if name is not None:
+                data["name"] = name
+            if body is not None:
+                data["body"] = body
+            if draft is not None:
+                data["draft"] = draft
+            if prerelease is not None:
+                data["prerelease"] = prerelease
+            result = await gitea_patch(f"/repos/{owner}/{repo_name}/releases/{rid}", data)
+            ac.finish("ok")
+            return {
+                "id": result.get("id"),
+                "tag": result.get("tag_name"),
+                "name": result.get("name"),
+                "url": result.get("html_url"),
+                "draft": result.get("draft"),
+                "prerelease": result.get("prerelease"),
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return {"error": str(e)}
+
+    @mcp.tool
+    async def gitea_release_delete(repo: str, tag: str) -> dict:
+        """Delete a Gitea release by tag.
+
+        DESTRUCTIVE: permanently removes the release (the git tag itself is not deleted).
+        Must be HITL gated in scoped-mcp manifests.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            tag: Tag name of the release to delete.
+        """
+        if not _REPO_RE.match(repo):
+            return {"error": _REPO_FMT_ERR}
+        config = get_config()
+        owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
+        repo_name = repo.split("/")[-1]
+        ac = AuditCtx("gitea_release_delete", "gitea", repo, {"repo": repo, "tag": tag})
+        try:
+            await gitea_delete(f"/repos/{owner}/{repo_name}/releases/tags/{tag}")
+            ac.finish("ok")
+            return {"repo": repo, "tag": tag, "deleted": True}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": str(e)}

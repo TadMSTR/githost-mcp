@@ -351,3 +351,70 @@ async def test_gitea_actions_rejects_bad_method(tools):
     result = await tools["gitea_actions"]("testowner/repo", "cancel_run")
     assert "error" in result
     assert "method must be one of" in result["error"]
+
+
+# --------------------------------------------------------------------------
+# gitea_release_update / gitea_release_delete
+# --------------------------------------------------------------------------
+
+_REL_BASE = "https://gitea.example.com/api/v1/repos/testowner/repo/releases"
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_update(tools):
+    captured = {}
+
+    def _capture(request):
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": 5,
+                "tag_name": "v1.0.0",
+                "name": "renamed",
+                "html_url": f"{_REL_BASE}/5",
+                "draft": False,
+                "prerelease": True,
+            },
+        )
+
+    with respx.mock:
+        respx.get(f"{_REL_BASE}/tags/v1.0.0").mock(
+            return_value=httpx.Response(200, json={"id": 5, "tag_name": "v1.0.0"})
+        )
+        respx.patch(f"{_REL_BASE}/5").mock(side_effect=_capture)
+        result = await tools["gitea_release_update"](
+            "testowner/repo", "v1.0.0", name="renamed", prerelease=True
+        )
+    assert result["name"] == "renamed"
+    assert result["prerelease"] is True
+    # only supplied fields are sent
+    assert captured == {"name": "renamed", "prerelease": True}
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_delete(tools):
+    with respx.mock:
+        respx.delete(f"{_REL_BASE}/tags/v1.0.0").mock(return_value=httpx.Response(204))
+        result = await tools["gitea_release_delete"]("testowner/repo", "v1.0.0")
+    assert result["deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_delete_not_found(tools):
+    with respx.mock:
+        respx.delete(f"{_REL_BASE}/tags/nope").mock(
+            return_value=httpx.Response(404, text="not found")
+        )
+        result = await tools["gitea_release_delete"]("testowner/repo", "nope")
+    assert "error" in result
+    assert "deleted" not in result
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_update_bad_repo(tools):
+    result = await tools["gitea_release_update"]("bad-no-slash", "v1")
+    assert "error" in result
+    assert "owner/repo" in result["error"]

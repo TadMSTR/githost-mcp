@@ -613,3 +613,76 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
+
+    @mcp.tool
+    def github_release_update(
+        repo: str,
+        tag: str,
+        name: str | None = None,
+        body: str | None = None,
+        draft: bool | None = None,
+        prerelease: bool | None = None,
+    ) -> dict:
+        """Update an existing GitHub release identified by tag.
+
+        Only the fields you pass are changed; omitted fields keep their current values.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            tag: Tag name of the release to update.
+            name: New release title (unchanged if omitted).
+            body: New release notes markdown (unchanged if omitted).
+            draft: New draft flag (unchanged if omitted).
+            prerelease: New prerelease flag (unchanged if omitted).
+        """
+        if err := _bad_repo(repo):
+            return err
+        ac = AuditCtx("github_release_update", "github", repo, {"repo": repo, "tag": tag})
+        try:
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+            release = github_call(gh_repo.get_release, tag)
+            updated = github_call(
+                release.update_release,
+                name if name is not None else release.title,
+                body if body is not None else (release.body or ""),
+                draft if draft is not None else release.draft,
+                prerelease if prerelease is not None else release.prerelease,
+            )
+            ac.finish("ok")
+            return {
+                "id": updated.id,
+                "tag": updated.tag_name,
+                "name": updated.title,
+                "url": updated.html_url,
+                "draft": updated.draft,
+                "prerelease": updated.prerelease,
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def github_release_delete(repo: str, tag: str) -> dict:
+        """Delete a GitHub release by tag.
+
+        DESTRUCTIVE: permanently removes the release (the git tag itself is not deleted).
+        Must be HITL gated in scoped-mcp manifests.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            tag: Tag name of the release to delete.
+        """
+        if err := _bad_repo(repo):
+            return err
+        ac = AuditCtx("github_release_delete", "github", repo, {"repo": repo, "tag": tag})
+        try:
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+            release = github_call(gh_repo.get_release, tag)
+            github_call(release.delete_release)
+            ac.finish("ok")
+            return {"repo": repo, "tag": tag, "deleted": True}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)

@@ -603,3 +603,58 @@ def test_github_actions_error_path(tools):
     with patch("githost_mcp.tools.github.get_github", side_effect=ValueError("boom")):
         result = tools["github_actions"]("owner/repo", "cancel_run", run_id=1)
     assert "error" in result
+
+
+# --------------------------------------------------------------------------
+# github_release_update / github_release_delete
+# --------------------------------------------------------------------------
+
+
+def test_github_release_update_partial(tools):
+    existing = _mock_release()
+    existing.title = "old"
+    existing.body = "old body"
+    existing.draft = False
+    existing.prerelease = False
+    updated = _mock_release()
+    updated.title = "new"
+    existing.update_release.return_value = updated
+    mock_repo = MagicMock()
+    mock_repo.get_release.return_value = existing
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_release_update"]("owner/repo", "v1.0.0", name="new")
+    assert result["name"] == "new"
+    # omitted fields default to existing values (not wiped)
+    args = existing.update_release.call_args.args
+    assert args[0] == "new"  # name
+    assert args[1] == "old body"  # body kept
+
+
+def test_github_release_delete(tools):
+    release = _mock_release()
+    mock_repo = MagicMock()
+    mock_repo.get_release.return_value = release
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_release_delete"]("owner/repo", "v1.0.0")
+    assert result["deleted"] is True
+    release.delete_release.assert_called_once()
+
+
+def test_github_release_update_bad_repo(tools):
+    result = tools["github_release_update"]("bad-no-slash", "v1")
+    assert "error" in result
+    assert "owner/repo" in result["error"]
+
+
+def test_github_release_delete_error_path(tools):
+    with patch("githost_mcp.tools.github.get_github", side_effect=ValueError("boom")):
+        result = tools["github_release_delete"]("owner/repo", "v1")
+    assert "error" in result

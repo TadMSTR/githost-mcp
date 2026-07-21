@@ -488,3 +488,66 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
+
+    @mcp.tool
+    def gitlab_release_update(
+        project: str,
+        tag: str,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """Update an existing GitLab release identified by tag.
+
+        Only the fields you pass are changed; omitted fields keep their current values.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            tag: Tag name of the release to update.
+            name: New release name (unchanged if omitted).
+            description: New release notes markdown (unchanged if omitted).
+        """
+        if err := _bad_project(project):
+            return err
+        ac = AuditCtx("gitlab_release_update", "gitlab", project, {"project": project, "tag": tag})
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+            release = gitlab_call(proj.releases.get, tag)
+            if name is not None:
+                release.name = name
+            if description is not None:
+                release.description = description
+            gitlab_call(release.save)
+            ac.finish("ok")
+            return {
+                "tag": release.tag_name,
+                "name": release.name,
+                "description": release.description,
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def gitlab_release_delete(project: str, tag: str) -> dict:
+        """Delete a GitLab release by tag.
+
+        DESTRUCTIVE: permanently removes the release (the git tag itself is not deleted).
+        Must be HITL gated in scoped-mcp manifests.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            tag: Tag name of the release to delete.
+        """
+        if err := _bad_project(project):
+            return err
+        ac = AuditCtx("gitlab_release_delete", "gitlab", project, {"project": project, "tag": tag})
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+            gitlab_call(proj.releases.delete, tag)
+            ac.finish("ok")
+            return {"project": project, "tag": tag, "deleted": True}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
