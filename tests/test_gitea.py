@@ -430,6 +430,15 @@ async def test_gitea_release_delete_rejects_unsafe_tag(tools, bad_tag):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_tag", ["../../etc/passwd", "v1?admin=1", "v1 2", "..", "/abs"])
+async def test_gitea_release_update_rejects_unsafe_tag(tools, bad_tag):
+    """IV-01: gitea_release_update shares the _bad_tag guard — same rejection coverage."""
+    result = await tools["gitea_release_update"]("testowner/repo", bad_tag, name="x")
+    assert "error" in result
+    assert "path segment" in result["error"]
+
+
+@pytest.mark.asyncio
 async def test_gitea_release_delete_allows_slashed_tag(tools):
     """A legitimate slash-containing tag (release/1.2) is accepted."""
     with respx.mock:

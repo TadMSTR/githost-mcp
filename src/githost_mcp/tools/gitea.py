@@ -16,6 +16,18 @@ from .._providers.gitea_client import (
 )
 from ..audit import AuditCtx
 from ..config import get_config
+from ..security import mask_credentials
+
+
+def _err(e: Exception) -> dict:
+    """Scrub credentials from an exception before returning it to the caller.
+
+    Mirrors github.py / gitlab.py so the credential-isolation invariant holds for Gitea
+    tools too (SC-14 / GHOST-8): the audit log is scrubbed independently, but the direct
+    tool-return value must not carry a credential-shaped substring either.
+    """
+    return {"error": mask_credentials(str(e))}
+
 
 _REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
@@ -77,7 +89,7 @@ def register(mcp) -> None:
             return {"id": result.get("id"), "tag": tag, "url": result.get("html_url")}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_get_release(repo: str, tag: str) -> dict:
@@ -110,7 +122,7 @@ def register(mcp) -> None:
             raise ValueError(f"Release for tag '{tag}' not found in {repo}")
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_list_releases(repo: str, limit: int = 10) -> dict:
@@ -144,7 +156,7 @@ def register(mcp) -> None:
             return {"repo": repo, "releases": releases}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_pr_list(repo: str, state: str = "open", limit: int = 20) -> dict:
@@ -181,7 +193,7 @@ def register(mcp) -> None:
             return {"repo": repo, "prs": prs}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_pr_create(
@@ -220,7 +232,7 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_pr_get(repo: str, pr_number: int) -> dict:
@@ -253,7 +265,7 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_pr_comment(repo: str, pr_number: int, body: str) -> dict:
@@ -283,7 +295,7 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_pr_merge(
@@ -327,7 +339,7 @@ def register(mcp) -> None:
             return {"merged": True, "pr_number": pr_number}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_pr_review(
@@ -432,7 +444,7 @@ def register(mcp) -> None:
             return {"repo": repo, "pr": pr_number, "review_id": review_id, "dismissed": True}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_actions(
@@ -577,7 +589,7 @@ def register(mcp) -> None:
             return {"repo": repo, "run_id": run_id, method: True}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_release_update(
@@ -633,7 +645,7 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_release_delete(repo: str, tag: str) -> dict:
@@ -660,7 +672,7 @@ def register(mcp) -> None:
             return {"repo": repo, "tag": tag, "deleted": True}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_issue_read(
@@ -747,7 +759,7 @@ def register(mcp) -> None:
             return {"repo": repo, "issue": issue_number, "comments": comments}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
 
     @mcp.tool
     async def gitea_issue_write(
@@ -845,4 +857,4 @@ def register(mcp) -> None:
             return {"repo": repo, "number": issue_number, "state": new_state}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return _err(e)
