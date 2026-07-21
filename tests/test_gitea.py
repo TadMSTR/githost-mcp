@@ -420,6 +420,34 @@ async def test_gitea_release_update_bad_repo(tools):
     assert "owner/repo" in result["error"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_tag", ["../../etc/passwd", "v1?admin=1", "v1 2", "..", "/abs"])
+async def test_gitea_release_delete_rejects_unsafe_tag(tools, bad_tag):
+    """IV-01: tag is interpolated into a raw httpx path — reject traversal/injection."""
+    result = await tools["gitea_release_delete"]("testowner/repo", bad_tag)
+    assert "error" in result
+    assert "path segment" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_delete_allows_slashed_tag(tools):
+    """A legitimate slash-containing tag (release/1.2) is accepted."""
+    with respx.mock:
+        respx.delete(f"{_REL_BASE}/tags/release/1.2").mock(return_value=httpx.Response(204))
+        result = await tools["gitea_release_delete"]("testowner/repo", "release/1.2")
+    assert result["deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_dispatch_rejects_unsafe_workflow(tools):
+    """IV-01: workflow file name is interpolated into a raw httpx path."""
+    result = await tools["gitea_actions"](
+        "testowner/repo", "dispatch_workflow", workflow="../secrets", ref="main"
+    )
+    assert "error" in result
+    assert "path segment" in result["error"]
+
+
 # --------------------------------------------------------------------------
 # gitea_issue_read / gitea_issue_write (method-dispatch)
 # --------------------------------------------------------------------------

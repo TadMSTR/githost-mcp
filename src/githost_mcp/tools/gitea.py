@@ -20,6 +20,21 @@ from ..config import get_config
 _REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
 
+# String path segments (tag names, workflow file names) are interpolated into Gitea API
+# URLs and sent raw by httpx — unlike GitHub/GitLab which route through PyGithub/
+# python-gitlab (those URL-encode segments). Validate before use so an unvalidated value
+# can't traverse the path or inject a query string (IV-01). Tags may contain slashes;
+# workflow file names may not. `..` is rejected outright.
+_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+_WORKFLOW_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _bad_tag(tag: str) -> dict | None:
+    if ".." in tag or not _TAG_RE.match(tag):
+        return {"error": "tag contains characters not allowed in a Gitea API path segment"}
+    return None
+
+
 log = structlog.get_logger(__name__)
 
 
@@ -544,6 +559,8 @@ def register(mcp) -> None:
             if method == "dispatch_workflow":
                 if not workflow or not ref:
                     raise ValueError("workflow and ref are required for dispatch_workflow")
+                if not _WORKFLOW_RE.match(workflow):
+                    raise ValueError("workflow contains characters not allowed in a path segment")
                 await gitea_post_void(
                     f"{base}/workflows/{workflow}/dispatches",
                     {"ref": ref, "inputs": inputs or {}},
@@ -585,6 +602,8 @@ def register(mcp) -> None:
         """
         if not _REPO_RE.match(repo):
             return {"error": _REPO_FMT_ERR}
+        if err := _bad_tag(tag):
+            return err
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -629,6 +648,8 @@ def register(mcp) -> None:
         """
         if not _REPO_RE.match(repo):
             return {"error": _REPO_FMT_ERR}
+        if err := _bad_tag(tag):
+            return err
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
