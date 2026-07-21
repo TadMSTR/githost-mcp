@@ -1,6 +1,6 @@
 # githost-mcp
 
-FastMCP server providing 39 tools across local git, GitHub, Gitea, GitLab, Woodpecker CI, release orchestration, registry publishing, and audit log queries.
+FastMCP server providing 63 tools across local git, GitHub, Gitea, GitLab, Woodpecker CI, release orchestration, registry publishing, and audit log queries. PR/MR review, CI control, and issues are exposed as method-dispatch tools (one tool, a `method` argument, per-operation audit).
 
 ## Structure
 
@@ -10,9 +10,12 @@ src/githost_mcp/
   tools/
     git_local.py             Local git ops via gitpython: status, diff, add, commit,
                              push, pull, log, show, checkout, branch, tag
-    github.py                GitHub PR listing, comments, workflow status, releases
-    gitea.py                 Gitea PR CRUD and merge via httpx
-    gitlab.py                GitLab MR listing and releases
+    github.py                GitHub PRs + review/diff, Actions control, release
+                             CRUD, issues (method-dispatch), workflow status
+    gitea.py                 Gitea PRs + review/diff, Actions control, release
+                             CRUD, issues (method-dispatch) via httpx
+    gitlab.py                GitLab MRs + review/approve, pipeline control,
+                             release CRUD, issues (method-dispatch)
     release.py               Coordinated release tool: tag + publish in one operation
     registry.py              npm_publish, pypi_publish via subprocess
     woodpecker.py            Pipeline list/status/logs/trigger/cancel
@@ -35,9 +38,9 @@ pyproject.toml
 |-------------------------|----------------------------------------------------------|
 | `server.py`             | FastMCP app, lifespan, tool module registration          |
 | `tools/git_local.py`    | 11 local git tools                                       |
-| `tools/github.py`       | GitHub PRs, workflows, releases                          |
-| `tools/gitea.py`        | Gitea PR create/get/list/comment/merge                   |
-| `tools/gitlab.py`       | GitLab MRs and releases                                  |
+| `tools/github.py`       | GitHub PRs + review, Actions, release CRUD, issues       |
+| `tools/gitea.py`        | Gitea PRs + review, Actions, release CRUD, issues        |
+| `tools/gitlab.py`       | GitLab MRs + review, pipelines, release CRUD, issues     |
 | `tools/release.py`      | Coordinated tag-and-publish release flow                 |
 | `tools/registry.py`     | PyPI and npm publish via subprocess                      |
 | `tools/woodpecker.py`   | Woodpecker CI pipeline management                        |

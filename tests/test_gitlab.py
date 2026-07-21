@@ -287,3 +287,360 @@ def test_gitlab_accepts_nested_and_numeric_project(tools, project):
     with p1, p2:
         result = tools["gitlab_mr_get"](project, 5)
     assert result["iid"] == 5  # passed validation and reached the client
+
+
+# --------------------------------------------------------------------------
+# gitlab_mr_review (method-dispatch)
+# --------------------------------------------------------------------------
+
+
+def _mr_review_mock():
+    mr = MagicMock()
+    mock_proj = MagicMock()
+    mock_proj.mergerequests.get.return_value = mr
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    return mock_gl, mr
+
+
+def test_gitlab_mr_review_get_diffs(tools):
+    mock_gl, mr = _mr_review_mock()
+    mr.changes.return_value = {
+        "changes": [
+            {
+                "old_path": "a.py",
+                "new_path": "a.py",
+                "diff": "@@ -1 +1 @@",
+                "new_file": False,
+                "renamed_file": False,
+                "deleted_file": False,
+            }
+        ]
+    }
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_review"]("owner/project", 5, "get_diffs")
+    assert result["diffs"][0]["new_path"] == "a.py"
+    assert result["diffs"][0]["diff"] == "@@ -1 +1 @@"
+
+
+def test_gitlab_mr_review_get_changed_files(tools):
+    mock_gl, mr = _mr_review_mock()
+    mr.changes.return_value = {
+        "changes": [
+            {"new_path": "b.py", "new_file": True, "renamed_file": False, "deleted_file": False}
+        ]
+    }
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_review"]("owner/project", 5, "get_changed_files")
+    assert result["files"][0]["path"] == "b.py"
+    assert result["files"][0]["new_file"] is True
+
+
+def test_gitlab_mr_review_approve(tools):
+    mock_gl, mr = _mr_review_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_review"]("owner/project", 5, "approve")
+    assert result["approved"] is True
+    mr.approve.assert_called_once()
+
+
+def test_gitlab_mr_review_unapprove(tools):
+    mock_gl, mr = _mr_review_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_review"]("owner/project", 5, "unapprove")
+    assert result["approved"] is False
+    mr.unapprove.assert_called_once()
+
+
+def test_gitlab_mr_review_get_approval_state(tools):
+    mock_gl, mr = _mr_review_mock()
+    approvals = MagicMock()
+    approvals.approvals_required = 2
+    approvals.approvals_left = 1
+    approvals.approved_by = [{"user": {"username": "alice"}}]
+    mr.approvals.get.return_value = approvals
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_mr_review"]("owner/project", 5, "get_approval_state")
+    assert result["approvals_required"] == 2
+    assert result["approvals_left"] == 1
+    assert result["approved_by"] == ["alice"]
+
+
+def test_gitlab_mr_review_rejects_bad_method(tools):
+    result = tools["gitlab_mr_review"]("owner/project", 5, "nuke")
+    assert "error" in result
+    assert "method must be one of" in result["error"]
+
+
+def test_gitlab_mr_review_rejects_bad_project(tools):
+    result = tools["gitlab_mr_review"]("!!bad!!", 5, "get_diffs")
+    assert "error" in result
+
+
+def test_gitlab_mr_review_error_path(tools):
+    with patch("githost_mcp.tools.gitlab.get_gitlab", side_effect=ValueError("boom")):
+        result = tools["gitlab_mr_review"]("owner/project", 5, "approve")
+    assert "error" in result
+
+
+# --------------------------------------------------------------------------
+# gitlab_pipeline (method-dispatch)
+# --------------------------------------------------------------------------
+
+
+def _pipeline_mock():
+    pipe = MagicMock()
+    pipe.id = 100
+    pipe.status = "running"
+    pipe.ref = "main"
+    pipe.sha = "abc123"
+    pipe.web_url = "https://gitlab.com/owner/project/-/pipelines/100"
+    mock_proj = MagicMock()
+    mock_proj.pipelines.get.return_value = pipe
+    mock_proj.pipelines.create.return_value = pipe
+    mock_proj.pipelines.list.return_value = [pipe]
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    return mock_gl, mock_proj, pipe
+
+
+def test_gitlab_pipeline_list(tools):
+    mock_gl, _proj, _pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "list")
+    assert result["pipelines"][0]["id"] == 100
+
+
+def test_gitlab_pipeline_get(tools):
+    mock_gl, _proj, _pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "get", pipeline_id=100)
+    assert result["status"] == "running"
+
+
+def test_gitlab_pipeline_create(tools):
+    mock_gl, proj, _pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "create", ref="main")
+    assert result["id"] == 100
+    proj.pipelines.create.assert_called_once_with({"ref": "main"})
+
+
+def test_gitlab_pipeline_create_requires_ref(tools):
+    mock_gl, _proj, _pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "create")
+    assert "error" in result
+    assert "ref is required" in result["error"]
+
+
+def test_gitlab_pipeline_retry_and_cancel(tools):
+    mock_gl, _proj, pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        r1 = tools["gitlab_pipeline"]("owner/project", "retry", pipeline_id=100)
+        r2 = tools["gitlab_pipeline"]("owner/project", "cancel", pipeline_id=100)
+    assert r1["retried"] is True
+    assert r2["cancelled"] is True
+    pipe.retry.assert_called_once()
+    pipe.cancel.assert_called_once()
+
+
+def test_gitlab_pipeline_retry_requires_id(tools):
+    mock_gl, _proj, _pipe = _pipeline_mock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "retry")
+    assert "error" in result
+    assert "pipeline_id is required" in result["error"]
+
+
+def test_gitlab_pipeline_get_job_log(tools):
+    job = MagicMock()
+    job.trace.return_value = b"job output line\n"
+    mock_proj = MagicMock()
+    mock_proj.jobs.get.return_value = job
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_pipeline"]("owner/project", "get_job_log", job_id=9)
+    assert "job output line" in result["log"]
+
+
+def test_gitlab_pipeline_rejects_bad_method(tools):
+    result = tools["gitlab_pipeline"]("owner/project", "nuke")
+    assert "error" in result
+    assert "method must be one of" in result["error"]
+
+
+# --------------------------------------------------------------------------
+# gitlab_release_update / gitlab_release_delete
+# --------------------------------------------------------------------------
+
+
+def test_gitlab_release_update(tools):
+    rel = MagicMock()
+    rel.tag_name = "v1.0.0"
+    rel.name = "old"
+    rel.description = "old desc"
+    mock_proj = MagicMock()
+    mock_proj.releases.get.return_value = rel
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_release_update"]("owner/project", "v1.0.0", name="new")
+    assert result["name"] == "new"
+    rel.save.assert_called_once()
+
+
+def test_gitlab_release_delete(tools):
+    mock_proj = MagicMock()
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_release_delete"]("owner/project", "v1.0.0")
+    assert result["deleted"] is True
+    mock_proj.releases.delete.assert_called_once_with("v1.0.0")
+
+
+def test_gitlab_release_delete_bad_project(tools):
+    result = tools["gitlab_release_delete"]("!!bad!!", "v1")
+    assert "error" in result
+
+
+def test_gitlab_release_update_error_path(tools):
+    with patch("githost_mcp.tools.gitlab.get_gitlab", side_effect=ValueError("boom")):
+        result = tools["gitlab_release_update"]("owner/project", "v1")
+    assert "error" in result
+
+
+# --------------------------------------------------------------------------
+# gitlab_issue_read / gitlab_issue_write (method-dispatch)
+# --------------------------------------------------------------------------
+
+
+def _issue_obj(iid=1):
+    i = MagicMock()
+    i.iid = iid
+    i.title = "bug"
+    i.state = "opened"
+    i.description = "details"
+    i.author = {"username": "author"}
+    i.labels = ["bug"]
+    i.assignees = [{"username": "dev"}]
+    i.created_at = "2026-05-01T00:00:00Z"
+    i.updated_at = "2026-05-02T00:00:00Z"
+    i.web_url = f"https://gitlab.com/owner/project/-/issues/{iid}"
+    return i
+
+
+def test_gitlab_issue_read_list(tools):
+    mock_proj = MagicMock()
+    mock_proj.issues.list.return_value = [_issue_obj(1)]
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_read"]("owner/project", "list")
+    assert result["issues"][0]["iid"] == 1
+    assert result["issues"][0]["labels"] == ["bug"]
+
+
+def test_gitlab_issue_read_get(tools):
+    mock_proj = MagicMock()
+    mock_proj.issues.get.return_value = _issue_obj(4)
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_read"]("owner/project", "get", issue_iid=4)
+    assert result["iid"] == 4
+    assert result["assignees"] == ["dev"]
+
+
+def test_gitlab_issue_read_comments(tools):
+    note = MagicMock()
+    note.id = 7
+    note.author = {"username": "commenter"}
+    note.body = "hi"
+    note.created_at = "2026-05-01T00:00:00Z"
+    issue = _issue_obj(4)
+    issue.notes.list.return_value = [note]
+    mock_proj = MagicMock()
+    mock_proj.issues.get.return_value = issue
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_read"]("owner/project", "comments", issue_iid=4)
+    assert result["comments"][0]["author"] == "commenter"
+
+
+def test_gitlab_issue_write_create(tools):
+    created = _issue_obj(9)
+    mock_proj = MagicMock()
+    mock_proj.issues.create.return_value = created
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_write"](
+            "owner/project", "create", title="New", description="d", labels=["bug"]
+        )
+    assert result["iid"] == 9
+    assert mock_proj.issues.create.call_args.args[0]["labels"] == ["bug"]
+
+
+def test_gitlab_issue_write_close(tools):
+    issue = _issue_obj(4)
+    mock_proj = MagicMock()
+    mock_proj.issues.get.return_value = issue
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_write"]("owner/project", "close", issue_iid=4)
+    assert result["state"] == "closed"
+    assert issue.state_event == "close"
+    issue.save.assert_called_once()
+
+
+def test_gitlab_issue_write_add_comment(tools):
+    note = MagicMock()
+    note.id = 3
+    issue = _issue_obj(4)
+    issue.notes.create.return_value = note
+    mock_proj = MagicMock()
+    mock_proj.issues.get.return_value = issue
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_write"](
+            "owner/project", "add_comment", issue_iid=4, comment="ping"
+        )
+    assert result["comment_id"] == 3
+    issue.notes.create.assert_called_once_with({"body": "ping"})
+
+
+def test_gitlab_issue_write_create_requires_title(tools):
+    mock_gl = MagicMock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_write"]("owner/project", "create")
+    assert "error" in result
+    assert "title is required" in result["error"]

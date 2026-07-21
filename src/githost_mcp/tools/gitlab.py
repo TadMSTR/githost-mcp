@@ -290,3 +290,447 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
+
+    @mcp.tool
+    def gitlab_mr_review(project: str, mr_iid: int, method: str) -> dict:
+        """Review operations on a GitLab merge request (method-dispatch).
+
+        Methods:
+          - get_diffs: return per-file diffs for the MR.
+          - get_changed_files: list changed file paths with new/renamed/deleted flags.
+          - approve: approve the MR.
+          - unapprove: remove your approval from the MR.
+          - get_approval_state: return approvals required/left and approver usernames.
+
+        DESTRUCTIVE methods: approve and unapprove change MR approval state and must be
+        HITL gated at the (tool, method) level in scoped-mcp manifests. get_diffs,
+        get_changed_files, and get_approval_state are read-only.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            mr_iid: Merge request internal ID (iid), not the global id.
+            method: get_diffs | get_changed_files | approve | unapprove | get_approval_state.
+        """
+        if err := _bad_project(project):
+            return err
+        valid = {"get_diffs", "get_changed_files", "approve", "unapprove", "get_approval_state"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx(
+            "gitlab_mr_review",
+            "gitlab",
+            project,
+            {"project": project, "mr_iid": mr_iid, "method": method},
+        )
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+            mr = gitlab_call(proj.mergerequests.get, mr_iid)
+
+            if method in {"get_diffs", "get_changed_files"}:
+                changes = gitlab_call(mr.changes)
+                raw = changes.get("changes", []) if isinstance(changes, dict) else []
+                if method == "get_diffs":
+                    diffs = [
+                        {
+                            "old_path": c.get("old_path"),
+                            "new_path": c.get("new_path"),
+                            "diff": c.get("diff"),
+                            "new_file": c.get("new_file"),
+                            "renamed_file": c.get("renamed_file"),
+                            "deleted_file": c.get("deleted_file"),
+                        }
+                        for c in raw
+                    ]
+                    ac.finish("ok")
+                    return {"project": project, "mr_iid": mr_iid, "diffs": diffs}
+                files = [
+                    {
+                        "path": c.get("new_path"),
+                        "new_file": c.get("new_file"),
+                        "renamed_file": c.get("renamed_file"),
+                        "deleted_file": c.get("deleted_file"),
+                    }
+                    for c in raw
+                ]
+                ac.finish("ok")
+                return {"project": project, "mr_iid": mr_iid, "files": files}
+
+            if method == "approve":
+                gitlab_call(mr.approve)
+                ac.finish("ok")
+                return {"project": project, "mr_iid": mr_iid, "approved": True}
+
+            if method == "unapprove":
+                gitlab_call(mr.unapprove)
+                ac.finish("ok")
+                return {"project": project, "mr_iid": mr_iid, "approved": False}
+
+            # get_approval_state
+            approvals = gitlab_call(mr.approvals.get)
+            approved_by = [
+                a.get("user", {}).get("username")
+                for a in (getattr(approvals, "approved_by", None) or [])
+            ]
+            ac.finish("ok")
+            return {
+                "project": project,
+                "mr_iid": mr_iid,
+                "approvals_required": getattr(approvals, "approvals_required", None),
+                "approvals_left": getattr(approvals, "approvals_left", None),
+                "approved_by": approved_by,
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def gitlab_pipeline(
+        project: str,
+        method: str,
+        pipeline_id: int | None = None,
+        ref: str | None = None,
+        job_id: int | None = None,
+        limit: int = 20,
+    ) -> dict:
+        """Control GitLab CI pipelines (method-dispatch).
+
+        Methods:
+          - list: list recent pipelines (id, status, ref, sha, web_url).
+          - get: get a single pipeline by id. Requires `pipeline_id`.
+          - create: trigger a new pipeline on `ref`. Requires `ref`.
+          - retry: retry failed/cancelled jobs of a pipeline. Requires `pipeline_id`.
+          - cancel: cancel a running pipeline. Requires `pipeline_id`.
+          - get_job_log: return the raw trace log for a job. Requires `job_id`.
+
+        DESTRUCTIVE methods (create, retry, cancel) change CI state and must be HITL gated
+        at the (tool, method) level in scoped-mcp manifests. list/get/get_job_log are
+        read-only.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            method: list | get | create | retry | cancel | get_job_log.
+            pipeline_id: Pipeline ID (get, retry, cancel).
+            ref: Branch or tag to run against (create).
+            job_id: Job ID (get_job_log).
+            limit: Max pipelines to return for list (default 20).
+        """
+        if err := _bad_project(project):
+            return err
+        valid = {"list", "get", "create", "retry", "cancel", "get_job_log"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx("gitlab_pipeline", "gitlab", project, {"project": project, "method": method})
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+
+            if method == "list":
+                pipelines = [
+                    {
+                        "id": p.id,
+                        "status": p.status,
+                        "ref": p.ref,
+                        "sha": p.sha,
+                        "web_url": p.web_url,
+                    }
+                    for p in gitlab_call(proj.pipelines.list, get_all=False)[:limit]
+                ]
+                ac.finish("ok")
+                return {"project": project, "pipelines": pipelines}
+
+            if method == "create":
+                if not ref:
+                    raise ValueError("ref is required for create")
+                pipe = gitlab_call(proj.pipelines.create, {"ref": ref})
+                ac.finish("ok")
+                return {
+                    "project": project,
+                    "id": pipe.id,
+                    "status": pipe.status,
+                    "ref": pipe.ref,
+                    "web_url": pipe.web_url,
+                }
+
+            if method == "get_job_log":
+                if job_id is None:
+                    raise ValueError("job_id is required for get_job_log")
+                job = gitlab_call(proj.jobs.get, job_id)
+                trace = gitlab_call(job.trace)
+                if isinstance(trace, bytes):
+                    trace = trace.decode("utf-8", errors="replace")
+                ac.finish("ok")
+                return {"project": project, "job_id": job_id, "log": trace}
+
+            # get / retry / cancel all need a pipeline_id
+            if pipeline_id is None:
+                raise ValueError(f"pipeline_id is required for {method}")
+            pipe = gitlab_call(proj.pipelines.get, pipeline_id)
+
+            if method == "get":
+                ac.finish("ok")
+                return {
+                    "project": project,
+                    "id": pipe.id,
+                    "status": pipe.status,
+                    "ref": pipe.ref,
+                    "sha": pipe.sha,
+                    "web_url": pipe.web_url,
+                }
+            if method == "retry":
+                gitlab_call(pipe.retry)
+                ac.finish("ok")
+                return {"project": project, "id": pipeline_id, "retried": True}
+            # cancel
+            gitlab_call(pipe.cancel)
+            ac.finish("ok")
+            return {"project": project, "id": pipeline_id, "cancelled": True}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def gitlab_release_update(
+        project: str,
+        tag: str,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """Update an existing GitLab release identified by tag.
+
+        Only the fields you pass are changed; omitted fields keep their current values.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            tag: Tag name of the release to update.
+            name: New release name (unchanged if omitted).
+            description: New release notes markdown (unchanged if omitted).
+        """
+        if err := _bad_project(project):
+            return err
+        ac = AuditCtx("gitlab_release_update", "gitlab", project, {"project": project, "tag": tag})
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+            release = gitlab_call(proj.releases.get, tag)
+            if name is not None:
+                release.name = name
+            if description is not None:
+                release.description = description
+            gitlab_call(release.save)
+            ac.finish("ok")
+            return {
+                "tag": release.tag_name,
+                "name": release.name,
+                "description": release.description,
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def gitlab_release_delete(project: str, tag: str) -> dict:
+        """Delete a GitLab release by tag.
+
+        DESTRUCTIVE: permanently removes the release (the git tag itself is not deleted).
+        Must be HITL gated in scoped-mcp manifests.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            tag: Tag name of the release to delete.
+        """
+        if err := _bad_project(project):
+            return err
+        ac = AuditCtx("gitlab_release_delete", "gitlab", project, {"project": project, "tag": tag})
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+            gitlab_call(proj.releases.delete, tag)
+            ac.finish("ok")
+            return {"project": project, "tag": tag, "deleted": True}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def gitlab_issue_read(
+        project: str,
+        method: str,
+        issue_iid: int | None = None,
+        state: str = "opened",
+        limit: int = 20,
+    ) -> dict:
+        """Read GitLab issues (method-dispatch).
+
+        Methods:
+          - get: fetch a single issue by iid. Requires `issue_iid`.
+          - list: list issues by state.
+          - comments: list notes (comments) on an issue. Requires `issue_iid`.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            method: get | list | comments.
+            issue_iid: Issue internal ID (get, comments).
+            state: 'opened', 'closed', or 'all' for list (default: opened).
+            limit: Max issues to return for list (default 20).
+        """
+        if err := _bad_project(project):
+            return err
+        valid = {"get", "list", "comments"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx(
+            "gitlab_issue_read", "gitlab", project, {"project": project, "method": method}
+        )
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+
+            if method == "list":
+                issues = [
+                    {
+                        "iid": i.iid,
+                        "title": i.title,
+                        "state": i.state,
+                        "author": i.author.get("username") if i.author else None,
+                        "labels": i.labels,
+                        "created_at": i.created_at,
+                        "web_url": i.web_url,
+                    }
+                    for i in gitlab_call(proj.issues.list, state=state, get_all=False)[:limit]
+                ]
+                ac.finish("ok")
+                return {"project": project, "issues": issues}
+
+            if issue_iid is None:
+                raise ValueError(f"issue_iid is required for {method}")
+            issue = gitlab_call(proj.issues.get, issue_iid)
+
+            if method == "get":
+                ac.finish("ok")
+                return {
+                    "iid": issue.iid,
+                    "title": issue.title,
+                    "state": issue.state,
+                    "description": issue.description,
+                    "author": issue.author.get("username") if issue.author else None,
+                    "labels": issue.labels,
+                    "assignees": [a.get("username") for a in (issue.assignees or [])],
+                    "created_at": issue.created_at,
+                    "updated_at": issue.updated_at,
+                    "web_url": issue.web_url,
+                }
+
+            # comments
+            comments = [
+                {
+                    "id": n.id,
+                    "author": n.author.get("username") if n.author else None,
+                    "body": n.body,
+                    "created_at": n.created_at,
+                }
+                for n in gitlab_call(issue.notes.list, get_all=False)
+            ]
+            ac.finish("ok")
+            return {"project": project, "issue_iid": issue_iid, "comments": comments}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def gitlab_issue_write(
+        project: str,
+        method: str,
+        issue_iid: int | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        labels: list[str] | None = None,
+        comment: str | None = None,
+    ) -> dict:
+        """Create or modify GitLab issues (method-dispatch).
+
+        Methods:
+          - create: open a new issue. Requires `title`; optional description/labels.
+          - update: change title/description of an issue. Requires `issue_iid`.
+          - add_comment: post a note. Requires `issue_iid` and `comment`.
+          - close: close an issue. Requires `issue_iid`.
+          - reopen: reopen a closed issue. Requires `issue_iid`.
+
+        `close` is state-changing and should be HITL gated at the (tool, method) level in
+        scoped-mcp manifests. labels use GitLab label names.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            method: create | update | add_comment | close | reopen.
+            issue_iid: Issue internal ID (update, add_comment, close, reopen).
+            title: Issue title (create; optional for update).
+            description: Issue description markdown (create; optional for update).
+            labels: Label names to set at create time (optional).
+            comment: Comment body (add_comment).
+        """
+        if err := _bad_project(project):
+            return err
+        valid = {"create", "update", "add_comment", "close", "reopen"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx(
+            "gitlab_issue_write", "gitlab", project, {"project": project, "method": method}
+        )
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+
+            if method == "create":
+                if not title:
+                    raise ValueError("title is required for create")
+                data: dict = {"title": title}
+                if description is not None:
+                    data["description"] = description
+                if labels:
+                    data["labels"] = labels
+                issue = gitlab_call(proj.issues.create, data)
+                ac.finish("ok")
+                return {
+                    "iid": issue.iid,
+                    "title": issue.title,
+                    "state": issue.state,
+                    "web_url": issue.web_url,
+                }
+
+            if issue_iid is None:
+                raise ValueError(f"issue_iid is required for {method}")
+            issue = gitlab_call(proj.issues.get, issue_iid)
+
+            if method == "update":
+                changed = False
+                if title is not None:
+                    issue.title = title
+                    changed = True
+                if description is not None:
+                    issue.description = description
+                    changed = True
+                if not changed:
+                    raise ValueError("update requires at least one of title or description")
+                gitlab_call(issue.save)
+                ac.finish("ok")
+                return {"project": project, "iid": issue_iid, "updated": True}
+
+            if method == "add_comment":
+                if not comment:
+                    raise ValueError("comment is required for add_comment")
+                note = gitlab_call(issue.notes.create, {"body": comment})
+                ac.finish("ok")
+                return {"project": project, "issue_iid": issue_iid, "comment_id": note.id}
+
+            # close / reopen
+            issue.state_event = "close" if method == "close" else "reopen"
+            gitlab_call(issue.save)
+            ac.finish("ok")
+            return {
+                "project": project,
+                "iid": issue_iid,
+                "state": "closed" if method == "close" else "opened",
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)

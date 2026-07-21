@@ -52,22 +52,29 @@ flowchart TD
 | `poly-git-mcp` | GitHub + GitLab + Gitea | Wraps CLI tools — fragile, no audit, no agent ID |
 | Official GitHub MCP | GitHub only | No local git, no Gitea/GitLab |
 | Official Gitea MCP | Gitea only | No local git, no GitHub/GitLab |
+| `j04n-f/woodpecker-mcp` | Woodpecker (6 read-only tools) | No trigger/cancel — githost already exceeds it |
 
-**githost-mcp fills the gap:** local git + multi-provider remote via native APIs + per-agent structured audit trail.
+**githost-mcp fills the gap:** local git + multi-provider remote via native APIs + per-agent structured audit trail. As of the Tier-1 parity release it matches the single-provider servers on PR/MR review + diff, CI trigger/rerun/cancel, full release CRUD, and issues — across all three providers behind one audited server.
 
-## Tools (45 total)
+## Tools (63 total)
+
+Higher-verb-count capabilities (PR/MR review, CI control, issues) are exposed as
+**method-dispatch** tools — one tool takes a `method` argument and routes internally —
+mirroring how the official GitHub/Gitea servers structure theirs. This adds ~40
+operations without the tool count ballooning past what every agent pays for in context.
+Each `method` still writes its own per-operation audit entry.
 
 ### Local Git (11)
 `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`
 
-### GitHub (10)
-`github_create_release`, `github_get_release`, `github_list_releases`, `github_workflow_list`, `github_workflow_status`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_merge`
+### GitHub (16)
+`github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
 
-### Gitea (8)
-`gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`
+### Gitea (14)
+`gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_release_update`, `gitea_release_delete`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`, `gitea_pr_review` *(get_diff/get_files/submit_review/dismiss_review)*, `gitea_actions` *(list_runs/get_run/list_jobs/get_job_log/dispatch_workflow/rerun_run/rerun_failed_jobs)*, `gitea_issue_read` *(get/list/comments)*, `gitea_issue_write` *(create/update/add_comment/close/reopen)*
 
-### GitLab (7)
-`gitlab_create_release`, `gitlab_get_release`, `gitlab_list_releases`, `gitlab_mr_list`, `gitlab_mr_create`, `gitlab_mr_get`, `gitlab_mr_merge`
+### GitLab (13)
+`gitlab_create_release`, `gitlab_get_release`, `gitlab_list_releases`, `gitlab_release_update`, `gitlab_release_delete`, `gitlab_mr_list`, `gitlab_mr_create`, `gitlab_mr_get`, `gitlab_mr_merge`, `gitlab_mr_review` *(get_diffs/get_changed_files/approve/unapprove/get_approval_state)*, `gitlab_pipeline` *(list/get/create/retry/cancel/get_job_log)*, `gitlab_issue_read` *(get/list/comments)*, `gitlab_issue_write` *(create/update/add_comment/close/reopen)*
 
 ### Release Orchestration (1)
 `release` — coordinated multi-target release: git tag → GitHub/Gitea/GitLab release → PyPI → npm, with rollback on failure

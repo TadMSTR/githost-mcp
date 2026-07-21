@@ -54,6 +54,51 @@ async def gitea_post(path: str, data: dict) -> Any:
         raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
 
 
+async def gitea_get_text(path: str) -> str:
+    """GET a Gitea endpoint that returns text/plain (e.g. a `.diff` or `.patch`).
+
+    Unlike gitea_get, does not parse JSON — returns the raw response body. Used by
+    PR review tools to fetch unified diffs.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{_gitea_base()}{path}", headers=_get_gitea_headers())
+            _check_gitea_response(resp)
+            return resp.text
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
+
+
+async def gitea_patch(path: str, data: dict) -> Any:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.patch(
+                f"{_gitea_base()}{path}",
+                headers=_get_gitea_headers(),
+                json=data,
+            )
+            _check_gitea_response(resp)
+            return resp.json()
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
+
+
+async def gitea_delete(path: str) -> None:
+    """DELETE a Gitea resource. Accepts any 2xx as success; discards the body."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.delete(f"{_gitea_base()}{path}", headers=_get_gitea_headers())
+            _check_gitea_response(resp)
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
+
+
 async def gitea_post_void(path: str, data: dict) -> None:
     """POST to Gitea API and discard response body (for 204 No Content endpoints).
 

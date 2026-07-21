@@ -173,3 +173,476 @@ async def test_gitea_pr_merge_conflict(tools):
         result = await fns["gitea_pr_merge"]("testowner/repo", 3)
     assert "error" in result
     assert "merged" not in result
+
+
+# --------------------------------------------------------------------------
+# gitea_pr_review (method-dispatch)
+# --------------------------------------------------------------------------
+
+_GT_BASE = "https://gitea.example.com/api/v1/repos/testowner/repo/pulls/3"
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_get_diff(tools):
+    with respx.mock:
+        respx.get(f"{_GT_BASE}.diff").mock(
+            return_value=httpx.Response(200, text="diff --git a/f b/f\n+x\n")
+        )
+        result = await tools["gitea_pr_review"]("testowner/repo", 3, "get_diff")
+    assert result["diff"].startswith("diff --git")
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_get_files(tools):
+    mock_files = [
+        {"filename": "app.py", "status": "modified", "additions": 2, "deletions": 1, "changes": 3}
+    ]
+    with respx.mock:
+        respx.get(f"{_GT_BASE}/files").mock(return_value=httpx.Response(200, json=mock_files))
+        result = await tools["gitea_pr_review"]("testowner/repo", 3, "get_files")
+    assert result["files"][0]["filename"] == "app.py"
+    assert result["files"][0]["additions"] == 2
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_submit_approve_maps_event(tools):
+    captured = {}
+
+    def _capture(request):
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"id": 11, "state": "APPROVED"})
+
+    with respx.mock:
+        respx.post(f"{_GT_BASE}/reviews").mock(side_effect=_capture)
+        result = await tools["gitea_pr_review"](
+            "testowner/repo", 3, "submit_review", event="APPROVE"
+        )
+    assert result["review_id"] == 11
+    # APPROVE is translated to Gitea's APPROVED
+    assert captured["event"] == "APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_submit_requires_body_for_request_changes(tools):
+    result = await tools["gitea_pr_review"](
+        "testowner/repo", 3, "submit_review", event="REQUEST_CHANGES"
+    )
+    assert "error" in result
+    assert "body is required" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_dismiss(tools):
+    with respx.mock:
+        respx.post(f"{_GT_BASE}/reviews/5/dismissals").mock(
+            return_value=httpx.Response(200, json={"id": 5})
+        )
+        result = await tools["gitea_pr_review"](
+            "testowner/repo", 3, "dismiss_review", review_id=5, message="stale"
+        )
+    assert result["dismissed"] is True
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_rejects_bad_method(tools):
+    result = await tools["gitea_pr_review"]("testowner/repo", 3, "nuke")
+    assert "error" in result
+    assert "method must be one of" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_rejects_bad_repo(tools):
+    result = await tools["gitea_pr_review"]("bad-no-slash", 3, "get_diff")
+    assert "error" in result
+    assert "owner/repo" in result["error"]
+
+
+# --------------------------------------------------------------------------
+# gitea_actions (method-dispatch)
+# --------------------------------------------------------------------------
+
+_GA_BASE = "https://gitea.example.com/api/v1/repos/testowner/repo/actions"
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_list_runs(tools):
+    payload = {
+        "total_count": 1,
+        "workflow_runs": [
+            {
+                "id": 7,
+                "status": "success",
+                "conclusion": "success",
+                "event": "push",
+                "head_branch": "main",
+                "run_number": 12,
+                "display_title": "Fix bug",
+                "html_url": "https://gitea.example.com/testowner/repo/actions/runs/7",
+            }
+        ],
+    }
+    with respx.mock:
+        respx.get(url__startswith=f"{_GA_BASE}/runs").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        result = await tools["gitea_actions"]("testowner/repo", "list_runs")
+    assert result["runs"][0]["id"] == 7
+    assert result["runs"][0]["run_number"] == 12
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_get_run(tools):
+    run = {"id": 7, "status": "running", "conclusion": None, "event": "push"}
+    with respx.mock:
+        respx.get(f"{_GA_BASE}/runs/7").mock(return_value=httpx.Response(200, json=run))
+        result = await tools["gitea_actions"]("testowner/repo", "get_run", run_id=7)
+    assert result["id"] == 7
+    assert result["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_list_jobs(tools):
+    payload = {"total_count": 1, "jobs": [{"id": 1, "name": "build", "status": "success"}]}
+    with respx.mock:
+        respx.get(f"{_GA_BASE}/runs/7/jobs").mock(return_value=httpx.Response(200, json=payload))
+        result = await tools["gitea_actions"]("testowner/repo", "list_jobs", run_id=7)
+    assert result["jobs"][0]["name"] == "build"
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_get_job_log(tools):
+    with respx.mock:
+        respx.get(f"{_GA_BASE}/jobs/1/logs").mock(
+            return_value=httpx.Response(200, text="step 1\nstep 2\n")
+        )
+        result = await tools["gitea_actions"]("testowner/repo", "get_job_log", job_id=1)
+    assert "step 1" in result["log"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_dispatch_workflow(tools):
+    with respx.mock:
+        respx.post(f"{_GA_BASE}/workflows/ci.yml/dispatches").mock(return_value=httpx.Response(204))
+        result = await tools["gitea_actions"](
+            "testowner/repo", "dispatch_workflow", workflow="ci.yml", ref="main"
+        )
+    assert result["dispatched"] is True
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_rerun_run(tools):
+    with respx.mock:
+        respx.post(f"{_GA_BASE}/runs/7/rerun").mock(return_value=httpx.Response(201))
+        result = await tools["gitea_actions"]("testowner/repo", "rerun_run", run_id=7)
+    assert result["rerun_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_dispatch_requires_ref(tools):
+    result = await tools["gitea_actions"]("testowner/repo", "dispatch_workflow", workflow="ci.yml")
+    assert "error" in result
+    assert "workflow and ref are required" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_rejects_bad_method(tools):
+    result = await tools["gitea_actions"]("testowner/repo", "cancel_run")
+    assert "error" in result
+    assert "method must be one of" in result["error"]
+
+
+# --------------------------------------------------------------------------
+# gitea_release_update / gitea_release_delete
+# --------------------------------------------------------------------------
+
+_REL_BASE = "https://gitea.example.com/api/v1/repos/testowner/repo/releases"
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_update(tools):
+    captured = {}
+
+    def _capture(request):
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": 5,
+                "tag_name": "v1.0.0",
+                "name": "renamed",
+                "html_url": f"{_REL_BASE}/5",
+                "draft": False,
+                "prerelease": True,
+            },
+        )
+
+    with respx.mock:
+        respx.get(f"{_REL_BASE}/tags/v1.0.0").mock(
+            return_value=httpx.Response(200, json={"id": 5, "tag_name": "v1.0.0"})
+        )
+        respx.patch(f"{_REL_BASE}/5").mock(side_effect=_capture)
+        result = await tools["gitea_release_update"](
+            "testowner/repo", "v1.0.0", name="renamed", prerelease=True
+        )
+    assert result["name"] == "renamed"
+    assert result["prerelease"] is True
+    # only supplied fields are sent
+    assert captured == {"name": "renamed", "prerelease": True}
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_delete(tools):
+    with respx.mock:
+        respx.delete(f"{_REL_BASE}/tags/v1.0.0").mock(return_value=httpx.Response(204))
+        result = await tools["gitea_release_delete"]("testowner/repo", "v1.0.0")
+    assert result["deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_delete_not_found(tools):
+    with respx.mock:
+        respx.delete(f"{_REL_BASE}/tags/nope").mock(
+            return_value=httpx.Response(404, text="not found")
+        )
+        result = await tools["gitea_release_delete"]("testowner/repo", "nope")
+    assert "error" in result
+    assert "deleted" not in result
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_update_bad_repo(tools):
+    result = await tools["gitea_release_update"]("bad-no-slash", "v1")
+    assert "error" in result
+    assert "owner/repo" in result["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_tag", ["../../etc/passwd", "v1?admin=1", "v1 2", "..", "/abs"])
+async def test_gitea_release_delete_rejects_unsafe_tag(tools, bad_tag):
+    """IV-01: tag is interpolated into a raw httpx path — reject traversal/injection."""
+    result = await tools["gitea_release_delete"]("testowner/repo", bad_tag)
+    assert "error" in result
+    assert "path segment" in result["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_tag", ["../../etc/passwd", "v1?admin=1", "v1 2", "..", "/abs"])
+async def test_gitea_release_update_rejects_unsafe_tag(tools, bad_tag):
+    """IV-01: gitea_release_update shares the _bad_tag guard — same rejection coverage."""
+    result = await tools["gitea_release_update"]("testowner/repo", bad_tag, name="x")
+    assert "error" in result
+    assert "path segment" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_delete_allows_slashed_tag(tools):
+    """A legitimate slash-containing tag (release/1.2) is accepted."""
+    with respx.mock:
+        respx.delete(f"{_REL_BASE}/tags/release/1.2").mock(return_value=httpx.Response(204))
+        result = await tools["gitea_release_delete"]("testowner/repo", "release/1.2")
+    assert result["deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_dispatch_rejects_unsafe_workflow(tools):
+    """IV-01: workflow file name is interpolated into a raw httpx path."""
+    result = await tools["gitea_actions"](
+        "testowner/repo", "dispatch_workflow", workflow="../secrets", ref="main"
+    )
+    assert "error" in result
+    assert "path segment" in result["error"]
+
+
+# --------------------------------------------------------------------------
+# gitea_issue_read / gitea_issue_write (method-dispatch)
+# --------------------------------------------------------------------------
+
+_ISS_BASE = "https://gitea.example.com/api/v1/repos/testowner/repo/issues"
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_read_list(tools):
+    payload = [
+        {
+            "number": 1,
+            "title": "bug",
+            "state": "open",
+            "user": {"login": "a"},
+            "labels": [{"name": "bug"}],
+            "html_url": f"{_ISS_BASE}/1",
+        }
+    ]
+    with respx.mock:
+        respx.get(url__startswith=_ISS_BASE).mock(return_value=httpx.Response(200, json=payload))
+        result = await tools["gitea_issue_read"]("testowner/repo", "list")
+    assert result["issues"][0]["number"] == 1
+    assert result["issues"][0]["labels"] == ["bug"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_read_get(tools):
+    issue = {"number": 3, "title": "x", "state": "open", "body": "b", "user": {"login": "a"}}
+    with respx.mock:
+        respx.get(f"{_ISS_BASE}/3").mock(return_value=httpx.Response(200, json=issue))
+        result = await tools["gitea_issue_read"]("testowner/repo", "get", issue_number=3)
+    assert result["number"] == 3
+    assert result["author"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_write_create(tools):
+    captured = {}
+
+    def _capture(request):
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(201, json={"number": 9, "title": "New", "state": "open"})
+
+    with respx.mock:
+        respx.post(_ISS_BASE).mock(side_effect=_capture)
+        result = await tools["gitea_issue_write"](
+            "testowner/repo", "create", title="New", body="body", labels=[1, 2]
+        )
+    assert result["number"] == 9
+    assert captured["labels"] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_write_close(tools):
+    captured = {}
+
+    def _capture(request):
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"number": 3, "state": "closed"})
+
+    with respx.mock:
+        respx.patch(f"{_ISS_BASE}/3").mock(side_effect=_capture)
+        result = await tools["gitea_issue_write"]("testowner/repo", "close", issue_number=3)
+    assert result["state"] == "closed"
+    assert captured == {"state": "closed"}
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_write_add_comment(tools):
+    with respx.mock:
+        respx.post(f"{_ISS_BASE}/3/comments").mock(
+            return_value=httpx.Response(201, json={"id": 42, "html_url": f"{_ISS_BASE}/3"})
+        )
+        result = await tools["gitea_issue_write"](
+            "testowner/repo", "add_comment", issue_number=3, comment="ping"
+        )
+    assert result["comment_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_write_create_requires_title(tools):
+    result = await tools["gitea_issue_write"]("testowner/repo", "create")
+    assert "error" in result
+    assert "title is required" in result["error"]
+
+
+# --------------------------------------------------------------------------
+# Gitea method-dispatch validation + error branches (coverage)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_get_run_requires_run_id(tools):
+    result = await tools["gitea_actions"]("testowner/repo", "get_run")
+    assert "error" in result
+    assert "run_id is required" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_get_job_log_requires_job_id(tools):
+    result = await tools["gitea_actions"]("testowner/repo", "get_job_log")
+    assert "error" in result
+    assert "job_id is required" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_rerun_requires_run_id(tools):
+    result = await tools["gitea_actions"]("testowner/repo", "rerun_run")
+    assert "error" in result
+    assert "run_id is required" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_actions_error_path(tools):
+    with respx.mock:
+        respx.get(url__startswith=_GA_BASE).mock(return_value=httpx.Response(500, text="boom"))
+        result = await tools["gitea_actions"]("testowner/repo", "list_runs")
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_gitea_pr_review_error_path(tools):
+    with respx.mock:
+        respx.get(url__startswith=_GT_BASE).mock(return_value=httpx.Response(500, text="boom"))
+        result = await tools["gitea_pr_review"]("testowner/repo", 3, "get_files")
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_read_rejects_bad_method(tools):
+    result = await tools["gitea_issue_read"]("testowner/repo", "purge")
+    assert "error" in result
+    assert "method must be one of" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_read_get_requires_number(tools):
+    result = await tools["gitea_issue_read"]("testowner/repo", "get")
+    assert "error" in result
+    assert "issue_number is required" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_read_comments(tools):
+    payload = [{"id": 1, "user": {"login": "a"}, "body": "hi", "created_at": "2026-05-01"}]
+    with respx.mock:
+        respx.get(f"{_ISS_BASE}/3/comments").mock(return_value=httpx.Response(200, json=payload))
+        result = await tools["gitea_issue_read"]("testowner/repo", "comments", issue_number=3)
+    assert result["comments"][0]["author"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_write_update(tools):
+    with respx.mock:
+        respx.patch(f"{_ISS_BASE}/3").mock(return_value=httpx.Response(200, json={"number": 3}))
+        result = await tools["gitea_issue_write"](
+            "testowner/repo", "update", issue_number=3, title="new title"
+        )
+    assert result["updated"] is True
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_write_update_requires_field(tools):
+    result = await tools["gitea_issue_write"]("testowner/repo", "update", issue_number=3)
+    assert "error" in result
+    assert "at least one of title or body" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_issue_write_reopen(tools):
+    with respx.mock:
+        respx.patch(f"{_ISS_BASE}/3").mock(
+            return_value=httpx.Response(200, json={"number": 3, "state": "open"})
+        )
+        result = await tools["gitea_issue_write"]("testowner/repo", "reopen", issue_number=3)
+    assert result["state"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_gitea_release_update_error_path(tools):
+    with respx.mock:
+        respx.get(f"{_REL_BASE}/tags/v9").mock(return_value=httpx.Response(404, text="nope"))
+        result = await tools["gitea_release_update"]("testowner/repo", "v9", name="x")
+    assert "error" in result
