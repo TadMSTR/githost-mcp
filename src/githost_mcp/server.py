@@ -1,8 +1,9 @@
 """
 githost-mcp FastMCP server — tool registration and startup.
 
-45 tools across 8 categories: local git, GitHub, Gitea, GitLab, release,
-registry (PyPI/npm), Woodpecker CI, and audit query.
+63 tools across 8 categories: local git, GitHub, Gitea, GitLab, release,
+registry (PyPI/npm), Woodpecker CI, and audit query. Higher-verb-count
+capabilities (PR/MR review, CI control, issues) use method-dispatch tools.
 """
 
 from __future__ import annotations

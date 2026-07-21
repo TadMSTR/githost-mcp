@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.7.0] — 2026-07-21
+
+### Added — Tier 1 parity (GHOST-12, vikunja#40)
+
+Closes the four Tier-1 capability gaps vs the official single-provider MCP servers via
+consolidated **method-dispatch** tools (one tool + a `method` argument, per-operation
+audit). Tool count 45 → 63; ~40 new operations. No existing tool was renamed.
+
+- **PR/MR review + diff:**
+  - `github_pr_review` — `get_diff` (raw unified diff via the diff media type),
+    `get_files`, `get_reviews`, `submit_review` (APPROVE/REQUEST_CHANGES/COMMENT),
+    `dismiss_review`. Unblocks the CodeRabbit `/pr-review` pipeline.
+  - `gitea_pr_review` — `get_diff`, `get_files`, `submit_review` (APPROVE → Gitea
+    APPROVED), `dismiss_review`.
+  - `gitlab_mr_review` — `get_diffs`, `get_changed_files`, `approve`, `unapprove`,
+    `get_approval_state`.
+- **CI control:**
+  - `github_actions` — `run_workflow`, `rerun_workflow`, `rerun_failed_jobs`,
+    `cancel_run`, `get_run_logs` (job breakdown; GitHub raw logs are a zip archive).
+  - `gitea_actions` — `list_runs`, `get_run`, `list_jobs`, `get_job_log`,
+    `dispatch_workflow`, `rerun_run`, `rerun_failed_jobs`. Gitea 1.26 exposes no
+    cancel-run API (only rerun/delete), so cancel is intentionally not offered.
+  - `gitlab_pipeline` — `list`, `get`, `create`, `retry`, `cancel`, `get_job_log`.
+  - Read-only workflow listing/status stays in `github_workflow_list`/
+    `github_workflow_status`. CI secrets/variables endpoints deliberately excluded (risk).
+- **Release CRUD completion:** `github_release_update`/`github_release_delete`,
+  `gitea_release_update`/`gitea_release_delete`, `gitlab_release_update`/
+  `gitlab_release_delete` (previously create/get/list only). update tools are partial —
+  omitted fields keep current values.
+- **Issues:** `{github,gitea,gitlab}_issue_read` (`get`/`list`/`comments`) and
+  `{github,gitea,gitlab}_issue_write` (`create`/`update`/`add_comment`/`close`/`reopen`).
+  Discrete label add/remove methods omitted — label identifiers diverge per provider
+  (GitHub/GitLab names vs Gitea numeric IDs); labels are settable at create time only.
+  Milestones, time-tracking, and issue-links stay out of scope (Tier 3).
+
+### HITL gating required (companion scoped-mcp manifest change — NOT automatic)
+
+The following (tool, method) pairs are state-changing and must be gated at the method
+level in the per-agent scoped-mcp manifests, same treatment as `*_pr_merge` in v0.5.0.
+Method-level gating is tracked by the companion plan
+`scoped-mcp-hitl-method-aware-gating-2026-07`; until it lands, gate the whole tool.
+
+| Tool | Destructive methods |
+|------|---------------------|
+| `github_pr_review` / `gitea_pr_review` | `submit_review` (event=APPROVE or REQUEST_CHANGES), `dismiss_review` |
+| `gitlab_mr_review` | `approve`, `unapprove` |
+| `github_actions` | `run_workflow`, `rerun_workflow`, `rerun_failed_jobs`, `cancel_run` |
+| `gitea_actions` | `dispatch_workflow`, `rerun_run`, `rerun_failed_jobs` |
+| `gitlab_pipeline` | `create`, `retry`, `cancel` |
+| `github_release_delete` / `gitea_release_delete` / `gitlab_release_delete` | (whole tool) |
+| `github_issue_write` / `gitea_issue_write` / `gitlab_issue_write` | `close` (and `create`/`update`/`add_comment` at operator discretion) |
+
+### Fixed
+
+- `__init__.py` `__version__` was stuck at `0.5.0` while `pyproject.toml` had moved to
+  `0.6.0`; both now agree at `0.7.0`.
+
+### Notes
+
+- No Woodpecker work — githost already exceeds the only real Woodpecker MCP (6 read-only
+  tools) with its existing trigger + cancel.
+- No new required env vars. Existing per-provider tokens must carry the added scopes:
+  `GITHUB_TOKEN` (repo + workflow), `GITEA_TOKEN` (write:repository, write:issue),
+  `GITLAB_TOKEN` (api).
+- GitLab tools are unit-tested with mocks but not live-smoke-tested (forge runs no GitLab).
+
 ## [0.6.0] — 2026-07-16
 
 ### Added
