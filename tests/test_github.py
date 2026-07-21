@@ -658,3 +658,153 @@ def test_github_release_delete_error_path(tools):
     with patch("githost_mcp.tools.github.get_github", side_effect=ValueError("boom")):
         result = tools["github_release_delete"]("owner/repo", "v1")
     assert "error" in result
+
+
+# --------------------------------------------------------------------------
+# github_issue_read / github_issue_write (method-dispatch)
+# --------------------------------------------------------------------------
+
+
+def _issue_mock(number=1, is_pr=False):
+    i = MagicMock()
+    i.number = number
+    i.title = "An issue"
+    i.state = "open"
+    i.body = "details"
+    i.user.login = "author"
+    lbl = MagicMock()
+    lbl.name = "bug"
+    i.labels = [lbl]
+    a = MagicMock()
+    a.login = "assignee1"
+    i.assignees = [a]
+    i.created_at.isoformat.return_value = "2026-05-01T00:00:00"
+    i.updated_at.isoformat.return_value = "2026-05-02T00:00:00"
+    i.html_url = f"https://github.com/owner/repo/issues/{number}"
+    i.pull_request = MagicMock() if is_pr else None
+    return i
+
+
+def test_github_issue_read_list_excludes_prs(tools):
+    issue = _issue_mock(1, is_pr=False)
+    pr = _issue_mock(2, is_pr=True)
+    mock_repo = MagicMock()
+    mock_repo.get_issues.return_value = [issue, pr]
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_issue_read"]("owner/repo", "list")
+    assert len(result["issues"]) == 1
+    assert result["issues"][0]["number"] == 1
+    assert result["issues"][0]["labels"] == ["bug"]
+
+
+def test_github_issue_read_get(tools):
+    mock_repo = MagicMock()
+    mock_repo.get_issue.return_value = _issue_mock(3)
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_issue_read"]("owner/repo", "get", issue_number=3)
+    assert result["number"] == 3
+    assert result["assignees"] == ["assignee1"]
+
+
+def test_github_issue_read_get_requires_number(tools):
+    mock_gh = MagicMock()
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_issue_read"]("owner/repo", "get")
+    assert "error" in result
+    assert "issue_number is required" in result["error"]
+
+
+def test_github_issue_read_comments(tools):
+    c = MagicMock()
+    c.id = 8
+    c.user.login = "commenter"
+    c.body = "hi"
+    c.created_at.isoformat.return_value = "2026-05-01T00:00:00"
+    issue = _issue_mock(3)
+    issue.get_comments.return_value = [c]
+    mock_repo = MagicMock()
+    mock_repo.get_issue.return_value = issue
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_issue_read"]("owner/repo", "comments", issue_number=3)
+    assert result["comments"][0]["author"] == "commenter"
+
+
+def test_github_issue_write_create(tools):
+    created = _issue_mock(10)
+    mock_repo = MagicMock()
+    mock_repo.create_issue.return_value = created
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_issue_write"](
+            "owner/repo", "create", title="New bug", body="repro", labels=["bug"]
+        )
+    assert result["number"] == 10
+    assert mock_repo.create_issue.call_args.kwargs["labels"] == ["bug"]
+
+
+def test_github_issue_write_create_requires_title(tools):
+    mock_gh = MagicMock()
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_issue_write"]("owner/repo", "create")
+    assert "error" in result
+    assert "title is required" in result["error"]
+
+
+def test_github_issue_write_close_and_reopen(tools):
+    issue = _issue_mock(5)
+    mock_repo = MagicMock()
+    mock_repo.get_issue.return_value = issue
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        r1 = tools["github_issue_write"]("owner/repo", "close", issue_number=5)
+        r2 = tools["github_issue_write"]("owner/repo", "reopen", issue_number=5)
+    assert r1["state"] == "closed"
+    assert r2["state"] == "open"
+    assert issue.edit.call_args_list[0].kwargs["state"] == "closed"
+    assert issue.edit.call_args_list[1].kwargs["state"] == "open"
+
+
+def test_github_issue_write_add_comment(tools):
+    c = MagicMock()
+    c.id = 11
+    c.html_url = "https://github.com/owner/repo/issues/5#issuecomment-11"
+    issue = _issue_mock(5)
+    issue.create_comment.return_value = c
+    mock_repo = MagicMock()
+    mock_repo.get_issue.return_value = issue
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_issue_write"](
+            "owner/repo", "add_comment", issue_number=5, comment="LGTM"
+        )
+    assert result["comment_id"] == 11
+    issue.create_comment.assert_called_once_with("LGTM")
+
+
+def test_github_issue_write_rejects_bad_method(tools):
+    result = tools["github_issue_write"]("owner/repo", "explode")
+    assert "error" in result
+    assert "method must be one of" in result["error"]

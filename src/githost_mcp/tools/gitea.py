@@ -640,3 +640,188 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": str(e)}
+
+    @mcp.tool
+    async def gitea_issue_read(
+        repo: str,
+        method: str,
+        issue_number: int | None = None,
+        state: str = "open",
+        limit: int = 20,
+    ) -> dict:
+        """Read Gitea issues (method-dispatch).
+
+        Methods:
+          - get: fetch a single issue by index. Requires `issue_number`.
+          - list: list issues by state (pull requests are excluded via type=issues).
+          - comments: list comments on an issue. Requires `issue_number`.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            method: get | list | comments.
+            issue_number: Issue index (get, comments).
+            state: 'open', 'closed', or 'all' for list (default: open).
+            limit: Max issues to return for list (default 20, max 100).
+        """
+        if not _REPO_RE.match(repo):
+            return {"error": _REPO_FMT_ERR}
+        valid = {"get", "list", "comments"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        config = get_config()
+        owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
+        repo_name = repo.split("/")[-1]
+        base = f"/repos/{owner}/{repo_name}/issues"
+        ac = AuditCtx("gitea_issue_read", "gitea", repo, {"repo": repo, "method": method})
+        try:
+            if method == "list":
+                limit = min(limit, 100)
+                data = await gitea_get(f"{base}?state={state}&type=issues&limit={limit}")
+                issues = [
+                    {
+                        "number": i.get("number"),
+                        "title": i.get("title"),
+                        "state": i.get("state"),
+                        "author": i.get("user", {}).get("login") if i.get("user") else None,
+                        "labels": [lb.get("name") for lb in (i.get("labels") or [])],
+                        "created_at": i.get("created_at"),
+                        "url": i.get("html_url"),
+                    }
+                    for i in (data if isinstance(data, list) else [])
+                ]
+                ac.finish("ok")
+                return {"repo": repo, "issues": issues}
+
+            if issue_number is None:
+                raise ValueError(f"issue_number is required for {method}")
+
+            if method == "get":
+                i = await gitea_get(f"{base}/{issue_number}")
+                ac.finish("ok")
+                return {
+                    "number": i.get("number"),
+                    "title": i.get("title"),
+                    "state": i.get("state"),
+                    "body": i.get("body"),
+                    "author": i.get("user", {}).get("login") if i.get("user") else None,
+                    "labels": [lb.get("name") for lb in (i.get("labels") or [])],
+                    "assignees": [a.get("login") for a in (i.get("assignees") or []) if a],
+                    "created_at": i.get("created_at"),
+                    "updated_at": i.get("updated_at"),
+                    "url": i.get("html_url"),
+                }
+
+            # comments
+            data = await gitea_get(f"{base}/{issue_number}/comments")
+            comments = [
+                {
+                    "id": c.get("id"),
+                    "author": c.get("user", {}).get("login") if c.get("user") else None,
+                    "body": c.get("body"),
+                    "created_at": c.get("created_at"),
+                }
+                for c in (data if isinstance(data, list) else [])
+            ]
+            ac.finish("ok")
+            return {"repo": repo, "issue": issue_number, "comments": comments}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return {"error": str(e)}
+
+    @mcp.tool
+    async def gitea_issue_write(
+        repo: str,
+        method: str,
+        issue_number: int | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        labels: list[int] | None = None,
+        assignees: list[str] | None = None,
+        comment: str | None = None,
+    ) -> dict:
+        """Create or modify Gitea issues (method-dispatch).
+
+        Methods:
+          - create: open a new issue. Requires `title`; optional body/labels/assignees.
+          - update: change title/body of an issue. Requires `issue_number`.
+          - add_comment: post a comment. Requires `issue_number` and `comment`.
+          - close: close an issue. Requires `issue_number`.
+          - reopen: reopen a closed issue. Requires `issue_number`.
+
+        `close` is state-changing and should be HITL gated at the (tool, method) level in
+        scoped-mcp manifests. Gitea labels are numeric IDs (not names); assignees are
+        usernames.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            method: create | update | add_comment | close | reopen.
+            issue_number: Issue index (update, add_comment, close, reopen).
+            title: Issue title (create; optional for update).
+            body: Issue body markdown (create; optional for update).
+            labels: Label IDs to set at create time (optional).
+            assignees: Assignee usernames to set at create time (optional).
+            comment: Comment body (add_comment).
+        """
+        if not _REPO_RE.match(repo):
+            return {"error": _REPO_FMT_ERR}
+        valid = {"create", "update", "add_comment", "close", "reopen"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        config = get_config()
+        owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
+        repo_name = repo.split("/")[-1]
+        base = f"/repos/{owner}/{repo_name}/issues"
+        ac = AuditCtx("gitea_issue_write", "gitea", repo, {"repo": repo, "method": method})
+        try:
+            if method == "create":
+                if not title:
+                    raise ValueError("title is required for create")
+                data: dict = {"title": title, "body": body or ""}
+                if labels:
+                    data["labels"] = labels
+                if assignees:
+                    data["assignees"] = assignees
+                result = await gitea_post(base, data)
+                ac.finish("ok")
+                return {
+                    "number": result.get("number"),
+                    "title": result.get("title"),
+                    "state": result.get("state"),
+                    "url": result.get("html_url"),
+                }
+
+            if issue_number is None:
+                raise ValueError(f"issue_number is required for {method}")
+
+            if method == "update":
+                data = {}
+                if title is not None:
+                    data["title"] = title
+                if body is not None:
+                    data["body"] = body
+                if not data:
+                    raise ValueError("update requires at least one of title or body")
+                await gitea_patch(f"{base}/{issue_number}", data)
+                ac.finish("ok")
+                return {"repo": repo, "number": issue_number, "updated": True}
+
+            if method == "add_comment":
+                if not comment:
+                    raise ValueError("comment is required for add_comment")
+                result = await gitea_post(f"{base}/{issue_number}/comments", {"body": comment})
+                ac.finish("ok")
+                return {
+                    "repo": repo,
+                    "issue": issue_number,
+                    "comment_id": result.get("id"),
+                    "url": result.get("html_url"),
+                }
+
+            # close / reopen
+            new_state = "closed" if method == "close" else "open"
+            await gitea_patch(f"{base}/{issue_number}", {"state": new_state})
+            ac.finish("ok")
+            return {"repo": repo, "number": issue_number, "state": new_state}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return {"error": str(e)}

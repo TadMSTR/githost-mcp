@@ -686,3 +686,187 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
+
+    @mcp.tool
+    def github_issue_read(
+        repo: str,
+        method: str,
+        issue_number: int | None = None,
+        state: str = "open",
+        limit: int = 20,
+    ) -> dict:
+        """Read GitHub issues (method-dispatch).
+
+        Methods:
+          - get: fetch a single issue by number. Requires `issue_number`.
+          - list: list issues by state (pull requests are excluded).
+          - comments: list comments on an issue. Requires `issue_number`.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            method: get | list | comments.
+            issue_number: Issue number (get, comments).
+            state: 'open', 'closed', or 'all' for list (default: open).
+            limit: Max issues to return for list (default 20).
+        """
+        if err := _bad_repo(repo):
+            return err
+        valid = {"get", "list", "comments"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx("github_issue_read", "github", repo, {"repo": repo, "method": method})
+        try:
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+
+            if method == "list":
+                issues = []
+                for i in github_call(gh_repo.get_issues, state=state)[:limit]:
+                    if i.pull_request:  # get_issues includes PRs; skip them
+                        continue
+                    issues.append(
+                        {
+                            "number": i.number,
+                            "title": i.title,
+                            "state": i.state,
+                            "author": i.user.login if i.user else None,
+                            "labels": [lb.name for lb in i.labels],
+                            "created_at": i.created_at.isoformat() if i.created_at else None,
+                            "url": i.html_url,
+                        }
+                    )
+                ac.finish("ok")
+                return {"repo": repo, "issues": issues}
+
+            if issue_number is None:
+                raise ValueError(f"issue_number is required for {method}")
+            issue = github_call(gh_repo.get_issue, issue_number)
+
+            if method == "get":
+                ac.finish("ok")
+                return {
+                    "number": issue.number,
+                    "title": issue.title,
+                    "state": issue.state,
+                    "body": issue.body,
+                    "author": issue.user.login if issue.user else None,
+                    "labels": [lb.name for lb in issue.labels],
+                    "assignees": [a.login for a in issue.assignees],
+                    "created_at": issue.created_at.isoformat() if issue.created_at else None,
+                    "updated_at": issue.updated_at.isoformat() if issue.updated_at else None,
+                    "url": issue.html_url,
+                }
+
+            # comments
+            comments = [
+                {
+                    "id": c.id,
+                    "author": c.user.login if c.user else None,
+                    "body": c.body,
+                    "created_at": c.created_at.isoformat() if c.created_at else None,
+                }
+                for c in github_call(issue.get_comments)
+            ]
+            ac.finish("ok")
+            return {"repo": repo, "issue": issue_number, "comments": comments}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def github_issue_write(
+        repo: str,
+        method: str,
+        issue_number: int | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        labels: list[str] | None = None,
+        assignees: list[str] | None = None,
+        comment: str | None = None,
+    ) -> dict:
+        """Create or modify GitHub issues (method-dispatch).
+
+        Methods:
+          - create: open a new issue. Requires `title`; optional body/labels/assignees.
+          - update: change title/body of an issue. Requires `issue_number`.
+          - add_comment: post a comment. Requires `issue_number` and `comment`.
+          - close: close an issue. Requires `issue_number`.
+          - reopen: reopen a closed issue. Requires `issue_number`.
+
+        `close` is state-changing and should be HITL gated at the (tool, method) level in
+        scoped-mcp manifests. labels/assignees use GitHub names/logins.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            method: create | update | add_comment | close | reopen.
+            issue_number: Issue number (update, add_comment, close, reopen).
+            title: Issue title (create; optional for update).
+            body: Issue body markdown (create; optional for update).
+            labels: Label names to set at create time (optional).
+            assignees: Assignee logins to set at create time (optional).
+            comment: Comment body (add_comment).
+        """
+        if err := _bad_repo(repo):
+            return err
+        valid = {"create", "update", "add_comment", "close", "reopen"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx("github_issue_write", "github", repo, {"repo": repo, "method": method})
+        try:
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+
+            if method == "create":
+                if not title:
+                    raise ValueError("title is required for create")
+                kwargs: dict = {"title": title}
+                if body is not None:
+                    kwargs["body"] = body
+                if labels:
+                    kwargs["labels"] = labels
+                if assignees:
+                    kwargs["assignees"] = assignees
+                issue = github_call(gh_repo.create_issue, **kwargs)
+                ac.finish("ok")
+                return {
+                    "number": issue.number,
+                    "title": issue.title,
+                    "state": issue.state,
+                    "url": issue.html_url,
+                }
+
+            if issue_number is None:
+                raise ValueError(f"issue_number is required for {method}")
+            issue = github_call(gh_repo.get_issue, issue_number)
+
+            if method == "update":
+                kwargs = {}
+                if title is not None:
+                    kwargs["title"] = title
+                if body is not None:
+                    kwargs["body"] = body
+                if not kwargs:
+                    raise ValueError("update requires at least one of title or body")
+                github_call(issue.edit, **kwargs)
+                ac.finish("ok")
+                return {"repo": repo, "number": issue_number, "updated": True}
+
+            if method == "add_comment":
+                if not comment:
+                    raise ValueError("comment is required for add_comment")
+                c = github_call(issue.create_comment, comment)
+                ac.finish("ok")
+                return {"repo": repo, "issue": issue_number, "comment_id": c.id, "url": c.html_url}
+
+            if method == "close":
+                github_call(issue.edit, state="closed")
+                ac.finish("ok")
+                return {"repo": repo, "number": issue_number, "state": "closed"}
+
+            # reopen
+            github_call(issue.edit, state="open")
+            ac.finish("ok")
+            return {"repo": repo, "number": issue_number, "state": "open"}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)

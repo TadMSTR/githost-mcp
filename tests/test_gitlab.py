@@ -526,3 +526,121 @@ def test_gitlab_release_update_error_path(tools):
     with patch("githost_mcp.tools.gitlab.get_gitlab", side_effect=ValueError("boom")):
         result = tools["gitlab_release_update"]("owner/project", "v1")
     assert "error" in result
+
+
+# --------------------------------------------------------------------------
+# gitlab_issue_read / gitlab_issue_write (method-dispatch)
+# --------------------------------------------------------------------------
+
+
+def _issue_obj(iid=1):
+    i = MagicMock()
+    i.iid = iid
+    i.title = "bug"
+    i.state = "opened"
+    i.description = "details"
+    i.author = {"username": "author"}
+    i.labels = ["bug"]
+    i.assignees = [{"username": "dev"}]
+    i.created_at = "2026-05-01T00:00:00Z"
+    i.updated_at = "2026-05-02T00:00:00Z"
+    i.web_url = f"https://gitlab.com/owner/project/-/issues/{iid}"
+    return i
+
+
+def test_gitlab_issue_read_list(tools):
+    mock_proj = MagicMock()
+    mock_proj.issues.list.return_value = [_issue_obj(1)]
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_read"]("owner/project", "list")
+    assert result["issues"][0]["iid"] == 1
+    assert result["issues"][0]["labels"] == ["bug"]
+
+
+def test_gitlab_issue_read_get(tools):
+    mock_proj = MagicMock()
+    mock_proj.issues.get.return_value = _issue_obj(4)
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_read"]("owner/project", "get", issue_iid=4)
+    assert result["iid"] == 4
+    assert result["assignees"] == ["dev"]
+
+
+def test_gitlab_issue_read_comments(tools):
+    note = MagicMock()
+    note.id = 7
+    note.author = {"username": "commenter"}
+    note.body = "hi"
+    note.created_at = "2026-05-01T00:00:00Z"
+    issue = _issue_obj(4)
+    issue.notes.list.return_value = [note]
+    mock_proj = MagicMock()
+    mock_proj.issues.get.return_value = issue
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_read"]("owner/project", "comments", issue_iid=4)
+    assert result["comments"][0]["author"] == "commenter"
+
+
+def test_gitlab_issue_write_create(tools):
+    created = _issue_obj(9)
+    mock_proj = MagicMock()
+    mock_proj.issues.create.return_value = created
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_write"](
+            "owner/project", "create", title="New", description="d", labels=["bug"]
+        )
+    assert result["iid"] == 9
+    assert mock_proj.issues.create.call_args.args[0]["labels"] == ["bug"]
+
+
+def test_gitlab_issue_write_close(tools):
+    issue = _issue_obj(4)
+    mock_proj = MagicMock()
+    mock_proj.issues.get.return_value = issue
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_write"]("owner/project", "close", issue_iid=4)
+    assert result["state"] == "closed"
+    assert issue.state_event == "close"
+    issue.save.assert_called_once()
+
+
+def test_gitlab_issue_write_add_comment(tools):
+    note = MagicMock()
+    note.id = 3
+    issue = _issue_obj(4)
+    issue.notes.create.return_value = note
+    mock_proj = MagicMock()
+    mock_proj.issues.get.return_value = issue
+    mock_gl = MagicMock()
+    mock_gl.projects.get.return_value = mock_proj
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_write"](
+            "owner/project", "add_comment", issue_iid=4, comment="ping"
+        )
+    assert result["comment_id"] == 3
+    issue.notes.create.assert_called_once_with({"body": "ping"})
+
+
+def test_gitlab_issue_write_create_requires_title(tools):
+    mock_gl = MagicMock()
+    p1, p2 = _patch_gl(mock_gl)
+    with p1, p2:
+        result = tools["gitlab_issue_write"]("owner/project", "create")
+    assert "error" in result
+    assert "title is required" in result["error"]

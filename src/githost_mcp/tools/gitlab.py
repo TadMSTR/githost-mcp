@@ -551,3 +551,186 @@ def register(mcp) -> None:
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)
+
+    @mcp.tool
+    def gitlab_issue_read(
+        project: str,
+        method: str,
+        issue_iid: int | None = None,
+        state: str = "opened",
+        limit: int = 20,
+    ) -> dict:
+        """Read GitLab issues (method-dispatch).
+
+        Methods:
+          - get: fetch a single issue by iid. Requires `issue_iid`.
+          - list: list issues by state.
+          - comments: list notes (comments) on an issue. Requires `issue_iid`.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            method: get | list | comments.
+            issue_iid: Issue internal ID (get, comments).
+            state: 'opened', 'closed', or 'all' for list (default: opened).
+            limit: Max issues to return for list (default 20).
+        """
+        if err := _bad_project(project):
+            return err
+        valid = {"get", "list", "comments"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx(
+            "gitlab_issue_read", "gitlab", project, {"project": project, "method": method}
+        )
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+
+            if method == "list":
+                issues = [
+                    {
+                        "iid": i.iid,
+                        "title": i.title,
+                        "state": i.state,
+                        "author": i.author.get("username") if i.author else None,
+                        "labels": i.labels,
+                        "created_at": i.created_at,
+                        "web_url": i.web_url,
+                    }
+                    for i in gitlab_call(proj.issues.list, state=state, get_all=False)[:limit]
+                ]
+                ac.finish("ok")
+                return {"project": project, "issues": issues}
+
+            if issue_iid is None:
+                raise ValueError(f"issue_iid is required for {method}")
+            issue = gitlab_call(proj.issues.get, issue_iid)
+
+            if method == "get":
+                ac.finish("ok")
+                return {
+                    "iid": issue.iid,
+                    "title": issue.title,
+                    "state": issue.state,
+                    "description": issue.description,
+                    "author": issue.author.get("username") if issue.author else None,
+                    "labels": issue.labels,
+                    "assignees": [a.get("username") for a in (issue.assignees or [])],
+                    "created_at": issue.created_at,
+                    "updated_at": issue.updated_at,
+                    "web_url": issue.web_url,
+                }
+
+            # comments
+            comments = [
+                {
+                    "id": n.id,
+                    "author": n.author.get("username") if n.author else None,
+                    "body": n.body,
+                    "created_at": n.created_at,
+                }
+                for n in gitlab_call(issue.notes.list, get_all=False)
+            ]
+            ac.finish("ok")
+            return {"project": project, "issue_iid": issue_iid, "comments": comments}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def gitlab_issue_write(
+        project: str,
+        method: str,
+        issue_iid: int | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        labels: list[str] | None = None,
+        comment: str | None = None,
+    ) -> dict:
+        """Create or modify GitLab issues (method-dispatch).
+
+        Methods:
+          - create: open a new issue. Requires `title`; optional description/labels.
+          - update: change title/description of an issue. Requires `issue_iid`.
+          - add_comment: post a note. Requires `issue_iid` and `comment`.
+          - close: close an issue. Requires `issue_iid`.
+          - reopen: reopen a closed issue. Requires `issue_iid`.
+
+        `close` is state-changing and should be HITL gated at the (tool, method) level in
+        scoped-mcp manifests. labels use GitLab label names.
+
+        Args:
+            project: Project in 'namespace/project' format (or numeric ID).
+            method: create | update | add_comment | close | reopen.
+            issue_iid: Issue internal ID (update, add_comment, close, reopen).
+            title: Issue title (create; optional for update).
+            description: Issue description markdown (create; optional for update).
+            labels: Label names to set at create time (optional).
+            comment: Comment body (add_comment).
+        """
+        if err := _bad_project(project):
+            return err
+        valid = {"create", "update", "add_comment", "close", "reopen"}
+        if method not in valid:
+            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+        ac = AuditCtx(
+            "gitlab_issue_write", "gitlab", project, {"project": project, "method": method}
+        )
+        try:
+            gl = get_gitlab()
+            proj = gitlab_call(gl.projects.get, project)
+
+            if method == "create":
+                if not title:
+                    raise ValueError("title is required for create")
+                data: dict = {"title": title}
+                if description is not None:
+                    data["description"] = description
+                if labels:
+                    data["labels"] = labels
+                issue = gitlab_call(proj.issues.create, data)
+                ac.finish("ok")
+                return {
+                    "iid": issue.iid,
+                    "title": issue.title,
+                    "state": issue.state,
+                    "web_url": issue.web_url,
+                }
+
+            if issue_iid is None:
+                raise ValueError(f"issue_iid is required for {method}")
+            issue = gitlab_call(proj.issues.get, issue_iid)
+
+            if method == "update":
+                changed = False
+                if title is not None:
+                    issue.title = title
+                    changed = True
+                if description is not None:
+                    issue.description = description
+                    changed = True
+                if not changed:
+                    raise ValueError("update requires at least one of title or description")
+                gitlab_call(issue.save)
+                ac.finish("ok")
+                return {"project": project, "iid": issue_iid, "updated": True}
+
+            if method == "add_comment":
+                if not comment:
+                    raise ValueError("comment is required for add_comment")
+                note = gitlab_call(issue.notes.create, {"body": comment})
+                ac.finish("ok")
+                return {"project": project, "issue_iid": issue_iid, "comment_id": note.id}
+
+            # close / reopen
+            issue.state_event = "close" if method == "close" else "reopen"
+            gitlab_call(issue.save)
+            ac.finish("ok")
+            return {
+                "project": project,
+                "iid": issue_iid,
+                "state": "closed" if method == "close" else "opened",
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
