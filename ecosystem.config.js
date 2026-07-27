@@ -62,6 +62,29 @@ function buildApp(agentId, ports) {
   env.TRANSPORT = "http";
   env.HTTP_HOST = "127.0.0.1";
   env.HTTP_PORT = String(ports.httpPort);
+
+  // Read the manifest allowlist from the deployed, root-owned copy rather than
+  // config.py's default of ~/.claude/manifests/<agent>-agent.yml — which is a
+  // symlink into the host-forge-scripts *working tree* that five agents hold
+  // readwrite, git_backed access to. Without this, a routine `git checkout` in
+  // that shared tree silently changes five agents' effective allowlist on their
+  // next restart, and an uncommitted edit bypasses PR review entirely.
+  //
+  // Published by host-forge-scripts/scripts/agent-manifests-deploy.sh, which
+  // reads origin/main as git objects and installs root:root 0644 under /etc —
+  // root-owned and not ted-writable, so the file cannot be renamed out from
+  // under us the way it could beneath /opt/appdata.
+  //
+  // Set for every agent, including harlock, so no process retains the
+  // working-tree fallback path. This does NOT cut an agent over on its own:
+  // ALLOWED_REPO_ROOTS still wins wherever it is set (_resolve_allowed_roots
+  // returns early on an explicit value), and harlock deliberately keeps its env
+  // because its manifest has zero git_backed readwrite entries (vikunja #270,
+  // id 281). If the file is missing or unparseable the allowlist resolves empty
+  // — fail closed, not fall back.
+  //
+  // vikunja #271 (id 282); closes #47 (id 55) and accepted risk M-2.
+  env.AGENT_MANIFEST_PATH = `/etc/forge/manifests/${agentId}-agent.yml`;
   // Re-enabled 2026-07-27 (vikunja #272, id 283). The 2026-07-16 stopgap left this
   // unset because observability.py called start_http_server() without addr= and so
   // bound 0.0.0.0; it now passes addr="127.0.0.1" unconditionally. Verify with
