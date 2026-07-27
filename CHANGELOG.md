@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### Security — the manifest allowlist is read from a deployed copy, not a git working tree (vikunja #271, id 282)
+
+**Deployment change only — no source change, so the installed package is byte-identical to
+0.9.0 and this is deliberately not tagged as a release.** It still needs saying, because it
+changes where githost-mcp reads its security configuration from, and a deployment that misses
+the new step behaves differently from one that does not.
+
+When `ALLOWED_REPO_ROOTS` is unset, `_resolve_allowed_roots()` falls back to the agent
+manifest. `config.py`'s default for that path is `~/.claude/manifests/<agent>-agent.yml`,
+which on forge is a symlink into the `host-forge-scripts` git working tree — a tree five
+agents hold `readwrite`, `git_backed` access to at the repo root. The effective allowlist was
+therefore a function of whichever branch happened to be checked out: a routine `git checkout`
+silently re-authorized five agents on their next restart, and any of the five could widen its
+own or another agent's allowlist with an uncommitted edit no PR ever saw.
+
+`ecosystem.config.js` now sets `AGENT_MANIFEST_PATH=/etc/forge/manifests/<agent>-agent.yml`
+for every agent, pointing at a root-owned `0644` copy published from `origin/main` by
+`host-forge-scripts/scripts/agent-manifests-deploy.sh`. The parent directory matters as much
+as the file mode — directory write permission governs `rename` and `unlink` regardless of who
+owns the file — so the target lives under `/etc` (root-owned) rather than `/opt/appdata`
+(`ted`-owned).
+
+No loader change was required: `config.py` already read `AGENT_MANIFEST_PATH` and already
+overrode the default. Two regression tests were added because that guarantee rests on a single
+`or` short-circuit at `config.py:157`, and the plausible refactor — treating the default as a
+fallback when the explicit path is unreadable — would undo the decoupling with no visible
+symptom, since the allowlist would still be populated, just from the agent-writable file again.
+
+**Deployers must create and populate `/etc/forge/manifests` before unsetting
+`ALLOWED_REPO_ROOTS` for any agent.** If the file is absent the allowlist resolves empty
+(fail-closed) rather than falling back, so the agent loses all repo access.
+
 ## [0.9.0] — 2026-07-27
 
 ### Security — credential scrubbing applied to every caller-facing error return (SC-14, vikunja #36 / id 44)
