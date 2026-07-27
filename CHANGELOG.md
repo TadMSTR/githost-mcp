@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.8.0] — 2026-07-27
+
+### Fixed — manifest-fallback allowlist ignored `access:` (M-2, vikunja#47)
+
+`config.py:_load_manifest_roots()` selected `workspace_access` entries on
+`git_backed: true` alone and never read the `access:` field, so a `readonly` entry
+would have granted **full write**. Recorded as accepted risk M-2 in
+`host-forge/security/accepted-risks.md` and dormant only because every agent still
+has an explicit `ALLOWED_REPO_ROOTS` env var set, which takes precedence.
+
+An entry is now included only when it is `git_backed: true` **and**
+`access: readwrite`. Any other value — including a missing `access:` key, or a
+near-miss like `read-only`, `rw`, or `READWRITE` — is treated as not readwrite and
+fails closed, consistent with the rest of the module.
+
+**Behavioural change, hence the minor bump:** an agent relying on the manifest
+fallback with entries that lack `access: readwrite` will see a narrower allowlist
+than under 0.7.0. No production agent is affected today (all six are on the env
+path), but reconcile manifests before removing any `ALLOWED_REPO_ROOTS`.
+
+`readonly` means **no githost-mcp access at all**, not read-only access:
+`allowed_repo_roots` is a single list consulted by both `validate_read_path()` and
+`validate_write_path()`. Splitting it into separate read and write allowlists is a
+larger change that needs its own security review, and is deliberately not done here.
+
+Skipped entries emit a `manifest_allowlist_entry_skipped` warning (path, entry path,
+access value, reason) so a narrowed allowlist is diagnosable rather than mysterious.
+
+Tests cover all four `access:`/`git_backed:` combinations, near-miss `access:` values,
+mixed manifests, and — the case M-2 describes — that a `readonly` + `git_backed: true`
+root is rejected by `validate_write_path()` and `validate_read_path()` both when it is
+the only entry and when other readwrite roots are present.
+
 ## [0.7.0] — 2026-07-21
 
 ### Added — Tier 1 parity (GHOST-12, vikunja#40)
