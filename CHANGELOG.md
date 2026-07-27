@@ -43,6 +43,24 @@ repo default applies server-side rather than sending `null`. The existing unit t
 asserted `request.url.params["branch"]` and had locked the wrong form in; it now asserts
 the request body, the absence of the query param, and the content type.
 
+Verified live against Woodpecker 3.x on `127.0.0.1:8100`: HTTP 200, pipeline created,
+pipeline ran to `success`.
+
+### Fixed — `woodpecker_trigger` returned an unusable pipeline handle
+
+Found while live-verifying the above, per the plan's "check sibling calls" step.
+`woodpecker_trigger` returned the pipeline's **global `id`**, but `woodpecker_status`,
+`woodpecker_get_logs` and `woodpecker_pipeline_cancel` all interpolate their
+`pipeline_id` argument into a path segment that Woodpecker resolves as the **per-repo
+`number`**. `GET /repos/2/pipelines/26` 404s where `.../18` succeeds — so chaining
+`trigger` into `status` never worked. The confusion was visible in the code: one docstring
+already read "Pipeline ID or number from woodpecker_trigger".
+
+`trigger` now returns the `number` as `pipeline_id` (the chainable handle) and keeps the
+global id as `internal_id`. Sibling docstrings say "Pipeline number" explicitly. No
+back-compat concern: `trigger` returned HTTP 400 for its entire life, so nothing can have
+depended on its output.
+
 ### Fixed — Prometheus metrics endpoint bound `0.0.0.0` (vikunja #272, id 283)
 
 `observability.py` called `start_http_server(config.metrics_port)` with no `addr=`.

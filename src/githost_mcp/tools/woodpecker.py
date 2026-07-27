@@ -94,7 +94,13 @@ def register(mcp) -> None:
                 data = resp.json()
             ac.finish("ok")
             return {
-                "pipeline_id": data.get("id") or data.get("number"),
+                # Woodpecker resolves the {pipeline} path segment in status/logs/cancel
+                # as the per-repo pipeline *number*, not the global id — GET
+                # /repos/<id>/pipelines/<global-id> 404s. Return the number as the
+                # chainable handle so trigger -> status actually works; the global id
+                # is kept separately for reference. (vikunja #269, id 280)
+                "pipeline_id": data.get("number") or data.get("id"),
+                "internal_id": data.get("id"),
                 "status": data.get("status"),
                 "branch": data.get("branch"),
             }
@@ -172,7 +178,7 @@ def register(mcp) -> None:
 
         Args:
             repo: Repository in 'owner/repo' format.
-            pipeline_id: Pipeline ID to fetch logs from.
+            pipeline_id: Pipeline number (as returned by woodpecker_trigger).
             step_name: Step name to fetch (default: first step).
         """
         if not _REPO_RE.match(repo):
@@ -250,7 +256,7 @@ def register(mcp) -> None:
 
         Args:
             repo: Repository in 'owner/repo' format.
-            pipeline_id: Pipeline ID to cancel.
+            pipeline_id: Pipeline number (as returned by woodpecker_trigger).
         """
         if not _REPO_RE.match(repo):
             return {"error": _REPO_FMT_ERR}
@@ -286,7 +292,7 @@ def register(mcp) -> None:
 
         Args:
             repo: Repository in 'owner/repo' format.
-            pipeline_id: Pipeline ID or number from woodpecker_trigger.
+            pipeline_id: Pipeline number (as returned by woodpecker_trigger).
         """
         if not _REPO_RE.match(repo):
             return {"error": _REPO_FMT_ERR}

@@ -193,10 +193,15 @@ async def test_woodpecker_trigger_with_branch(tools):
     with respx.mock:
         _lookup_mock()
         route = respx.post(f"{REPO_URL}/pipelines").mock(
-            return_value=httpx.Response(200, json={"id": 88, "status": "pending", "branch": "dev"})
+            return_value=httpx.Response(
+                200, json={"id": 88, "number": 12, "status": "pending", "branch": "dev"}
+            )
         )
         result = await tools["woodpecker_trigger"]("owner/repo", branch="dev")
-    assert result["pipeline_id"] == 88
+    # The chainable handle is the per-repo `number`; feeding the global `id` back into
+    # status/logs/cancel 404s, so trigger -> status never worked (vikunja #269, id 280).
+    assert result["pipeline_id"] == 12
+    assert result["internal_id"] == 88
     assert result["branch"] == "dev"
     # Woodpecker 3.x wants a JSON body; a query param gets HTTP 400 (vikunja #269,
     # id 280). Assert the wire form, not just the parsed result — the previous
