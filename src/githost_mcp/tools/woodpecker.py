@@ -9,6 +9,7 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
+from ..security import scrub
 
 _REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
@@ -106,7 +107,7 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     async def woodpecker_list_pipelines(
@@ -162,7 +163,7 @@ def register(mcp) -> None:
             return {"repo": repo, "pipelines": pipelines}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     async def woodpecker_get_logs(
@@ -245,7 +246,7 @@ def register(mcp) -> None:
             return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     async def woodpecker_pipeline_cancel(repo: str, pipeline_id: int) -> dict:
@@ -284,7 +285,7 @@ def register(mcp) -> None:
             return {"cancelled": True, "id": pipeline_id}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     async def woodpecker_status(repo: str, pipeline_id: int) -> dict:
@@ -321,4 +322,4 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}

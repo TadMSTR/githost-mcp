@@ -267,6 +267,44 @@ def test_git_push_rejection_surfaces_reason(tools, bare_remote):
     assert result.get("summary"), "PushInfo.summary must be surfaced, not discarded"
 
 
+def test_git_push_failure_does_not_leak_remote_url_credentials(tools, bare_remote, monkeypatch):
+    """SC-14: PushInfo.summary is the remote's raw text. If the remote URL carries a
+    credential, it must not reach the caller. Audit finding, MEDIUM."""
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+
+    other = git.Repo.clone_from(bare.git_dir, str(path.parent / "other3"))
+    other.config_writer().set_value("user", "name", "Other").release()
+    other.config_writer().set_value("user", "email", "o@test.com").release()
+    _commit_file(other, "theirs.txt", "remote work")
+    other.remotes.origin.push(branch)
+
+    _commit_file(local, "ours.txt", "local work")
+
+    # Simulate the remote's rejection text naming a credential-bearing URL.
+    import githost_mcp.tools.git_local as gl
+
+    real_scrub = gl.scrub
+    leaked = "https://ted:ghp_LEAKED_TOKEN@github.com/o/r.git"
+
+    class FakeInfo:
+        flags = git.remote.PushInfo.REJECTED | git.remote.PushInfo.ERROR
+        summary = f"[rejected] main -> main (non-fast-forward) to {leaked}"
+
+    monkeypatch.setattr(
+        type(local.remotes[0]), "push", lambda self, *a, **kw: [FakeInfo()], raising=False
+    )
+    monkeypatch.setattr(gl, "scrub", real_scrub)
+
+    result = fns["git_push"](str(path), branch=branch)
+
+    assert "error" in result
+    blob = repr(result)
+    assert "ghp_LEAKED_TOKEN" not in blob, f"credential reached the caller: {blob}"
+    assert "***@github.com" in blob, f"expected redacted userinfo, got: {blob}"
+
+
 def test_git_push_sets_upstream(tools, bare_remote):
     """A push that leaves no upstream makes `git rev-list @{u}..HEAD` error rather
     than confirm. Either set upstream or say it wasn't set."""

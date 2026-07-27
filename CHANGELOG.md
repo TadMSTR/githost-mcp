@@ -2,6 +2,37 @@
 
 ## [0.9.0] — 2026-07-27
 
+### Security — credential scrubbing applied to every caller-facing error return (SC-14, vikunja #36 / id 44)
+
+Audit finding (MEDIUM) on this batch: `git_push`'s new failure return surfaced
+`PushInfo.summary`, which is the remote's raw text. If a git remote carried a credential
+(`https://user:token@host`), it reached the calling agent verbatim. Neither existing scrub
+layer covered it — `audit.py`'s structlog `_credential_filter` and `write_audit_entry`
+both operate on log/audit-JSONL output, not on a tool's return dict.
+
+This was the **third** audit to catch this gap class, crossing the recurrence-3 threshold
+into a `security-baseline` universal check, so it is closed module-wide here rather than
+deferred a fourth time.
+
+**New `security.scrub()`** = `redact_url_credentials(mask_credentials(text))`.
+
+`mask_credentials()` alone was insufficient: it only replaces githost-mcp's *own
+configured* token values, so a PAT a human embedded in a remote by hand survived it
+entirely. `redact_url_credentials()` strips the userinfo component from any
+scheme-qualified URL by shape. scp-style remotes (`git@github.com:owner/repo.git`) have no
+scheme and stay readable — that is the form every forge remote actually uses.
+
+Applied to all 27 caller-facing sites: `git_local.py` (12), `release.py` (5),
+`woodpecker.py` (5), `registry.py` (2), `gitea.py`/`github.py`/`gitlab.py` (1 each —
+upgraded from `mask_credentials` to `scrub`). `release.py`'s four `log.warning(stderr=...)`
+sites, which pass twine/npm output through, are scrubbed too. No
+`return {"error": str(e)}` remains anywhere in the package.
+
+The end-to-end regression test was proven red before the fix: without the scrub, a
+credential in the remote's rejection text reaches both the tool's return value **and** the
+warning log — the latter confirming that the structlog filter does not catch an
+unconfigured token.
+
 ### Fixed — `git_push` reported success on a rejected push (vikunja #265, id 276)
 
 `tools/git_local.py` stringified `PushInfo.flags` (`[str(p.flags) for p in push_info]`)

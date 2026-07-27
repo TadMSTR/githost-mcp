@@ -8,7 +8,7 @@ import structlog
 
 from .._providers.github_client import get_github, github_call
 from ..audit import AuditCtx
-from ..security import mask_credentials
+from ..security import scrub
 
 log = structlog.get_logger(__name__)
 
@@ -18,7 +18,7 @@ _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, und
 
 
 def _err(e: Exception) -> dict:
-    return {"error": mask_credentials(str(e))}
+    return {"error": scrub(str(e))}
 
 
 def _bad_repo(repo: str) -> dict | None:

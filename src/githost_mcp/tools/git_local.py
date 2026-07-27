@@ -7,7 +7,7 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
-from ..security import validate_read_path, validate_write_path
+from ..security import scrub, validate_read_path, validate_write_path
 
 log = structlog.get_logger(__name__)
 
@@ -84,7 +84,7 @@ def register(mcp) -> None:
             return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_diff(repo_path: str, staged: bool = False, file_path: str | None = None) -> dict:
@@ -129,7 +129,7 @@ def register(mcp) -> None:
             return {"repo": repo_path, "staged": staged, "patches": patches}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_log(repo_path: str, limit: int = 20, branch: str | None = None) -> dict:
@@ -160,7 +160,7 @@ def register(mcp) -> None:
             return {"repo": repo_path, "branch": ref, "commits": commits}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_show(repo_path: str, ref: str) -> dict:
@@ -189,7 +189,7 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_branch(
@@ -232,7 +232,7 @@ def register(mcp) -> None:
                 raise ValueError(f"Unknown action '{action}'; use list, create, or delete")
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_checkout(repo_path: str, ref: str) -> dict:
@@ -251,7 +251,7 @@ def register(mcp) -> None:
             return {"checked_out": ref, "detached": repo.head.is_detached}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_add(repo_path: str, paths: list[str]) -> dict:
@@ -275,7 +275,7 @@ def register(mcp) -> None:
             return {"staged": staged}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_commit(repo_path: str, message: str) -> dict:
@@ -315,7 +315,7 @@ def register(mcp) -> None:
             return {"sha": commit.hexsha[:12], "message": message}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_push(
@@ -356,7 +356,9 @@ def register(mcp) -> None:
                 summaries.append("remote reported no ref updates")
 
             if failed:
-                reason = "; ".join(summaries) or "push rejected by remote"
+                # PushInfo.summary is the remote's raw text and can carry a
+                # credential-bearing remote URL straight to the caller (SC-14).
+                reason = scrub("; ".join(summaries)) or "push rejected by remote"
                 log.warning(
                     "push_failed", remote=remote, branch=branch_name, flags=decoded, summary=reason
                 )
@@ -391,7 +393,7 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_pull(repo_path: str, remote: str = "origin") -> dict:
@@ -410,7 +412,7 @@ def register(mcp) -> None:
             return {"remote": remote, "flags": [str(p.flags) for p in pull_info]}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_tag(
@@ -444,4 +446,4 @@ def register(mcp) -> None:
             return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}

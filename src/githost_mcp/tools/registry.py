@@ -9,7 +9,7 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
-from ..security import clean_env, validate_write_path
+from ..security import clean_env, scrub, validate_write_path
 
 log = structlog.get_logger(__name__)
 
@@ -105,7 +105,7 @@ def register(mcp) -> None:
             return {"target": target, "dist_dir": dist_path, "stdout": upload_result.stdout[:500]}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def npm_publish(
@@ -164,4 +164,4 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}

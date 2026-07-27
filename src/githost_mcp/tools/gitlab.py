@@ -8,7 +8,7 @@ import structlog
 
 from .._providers.gitlab_client import get_gitlab, gitlab_call
 from ..audit import AuditCtx
-from ..security import mask_credentials
+from ..security import scrub
 
 log = structlog.get_logger(__name__)
 
@@ -21,7 +21,7 @@ _PROJECT_FMT_ERR = (
 
 
 def _err(e: Exception) -> dict:
-    return {"error": mask_credentials(str(e))}
+    return {"error": scrub(str(e))}
 
 
 def _bad_project(project: str) -> dict | None:
