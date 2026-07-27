@@ -366,3 +366,71 @@ def test_default_manifest_path_derived_from_agent_id(tmp_path, monkeypatch):
     config = get_config()
     assert config.allowed_repo_roots == [git_root]
     assert config.allowlist_source == f"manifest:{manifest_file}"
+
+
+def test_explicit_manifest_path_never_falls_back_to_default(tmp_path, monkeypatch):
+    """An explicit AGENT_MANIFEST_PATH suppresses the ~/.claude default entirely.
+
+    This is the property the whole allowlist cutover rests on (vikunja #271, id
+    282). The default path is a symlink into a git working tree that five agents
+    hold readwrite access to; production points AGENT_MANIFEST_PATH at a deployed,
+    root-owned copy instead. If a refactor ever made the default a *fallback* for
+    an unreadable explicit path, every agent would silently resume reading the
+    agent-writable file and the decoupling would be undone with no visible symptom
+    — the allowlist would still be populated, just from the wrong place.
+
+    So: make the default path exist and grant something, point AGENT_MANIFEST_PATH
+    at a file that does not exist, and assert the result is empty rather than the
+    default's roots. Hermetic — it does not depend on a real manifest being present
+    on the host, which is what makes it meaningful on a CI runner too.
+    """
+    fake_home = tmp_path / "home"
+    manifests_dir = fake_home / ".claude" / "manifests"
+    manifests_dir.mkdir(parents=True)
+    default_root = str(tmp_path / "repos" / "should-not-be-read")
+    _write_manifest(
+        str(manifests_dir / "developer-agent.yml"),
+        [{"path": default_root, "git_backed": True, "access": "readwrite"}],
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", str(tmp_path / "deployed" / "nope.yml"))
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_repo_roots == []
+    assert config.allowlist_source == "none"
+    assert default_root not in config.allowed_repo_roots
+
+
+def test_explicit_manifest_path_wins_over_readable_default(tmp_path, monkeypatch):
+    """Both paths readable — the explicit one is authoritative, not merged."""
+    fake_home = tmp_path / "home"
+    manifests_dir = fake_home / ".claude" / "manifests"
+    manifests_dir.mkdir(parents=True)
+    default_root = str(tmp_path / "repos" / "working-tree")
+    _write_manifest(
+        str(manifests_dir / "developer-agent.yml"),
+        [{"path": default_root, "git_backed": True, "access": "readwrite"}],
+    )
+
+    deployed = tmp_path / "deployed"
+    deployed.mkdir()
+    deployed_file = deployed / "developer-agent.yml"
+    deployed_root = str(tmp_path / "repos" / "deployed-copy")
+    _write_manifest(
+        str(deployed_file), [{"path": deployed_root, "git_backed": True, "access": "readwrite"}]
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", str(deployed_file))
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_repo_roots == [deployed_root]
+    assert default_root not in config.allowed_repo_roots
+    assert config.allowlist_source == f"manifest:{deployed_file}"
