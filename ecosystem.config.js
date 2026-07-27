@@ -62,11 +62,12 @@ function buildApp(agentId, ports) {
   env.TRANSPORT = "http";
   env.HTTP_HOST = "127.0.0.1";
   env.HTTP_PORT = String(ports.httpPort);
-  // METRICS_PORT intentionally NOT set (stopgap 2026-07-16): observability.py's
-  // start_http_server(config.metrics_port) has no addr= argument, so
-  // prometheus_client defaults to binding 0.0.0.0 — LAN-reachable, violates the
-  // loopback-only requirement in the migration build plan. Re-enable once
-  // observability.py passes addr="127.0.0.1". See Plane GHOST-13 follow-up.
+  // Re-enabled 2026-07-27 (vikunja #272, id 283). The 2026-07-16 stopgap left this
+  // unset because observability.py called start_http_server() without addr= and so
+  // bound 0.0.0.0; it now passes addr="127.0.0.1" unconditionally. Verify with
+  // `ss -tlnp` — a metrics endpoint answering on localhost proves nothing about
+  // which interface it is on, and that confusion is how the 0.0.0.0 bind shipped.
+  env.METRICS_PORT = String(ports.metricsPort);
 
   return {
     name: `githost-mcp-${agentId}`,

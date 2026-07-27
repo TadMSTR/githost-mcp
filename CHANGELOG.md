@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.9.0] — 2026-07-27
+
+### Fixed — `git_push` reported success on a rejected push (vikunja #265, id 276)
+
+`tools/git_local.py` stringified `PushInfo.flags` (`[str(p.flags) for p in push_info]`)
+and returned `{"pushed": <branch>}` unconditionally. Nothing tested the error bits, so a
+non-fast-forward rejection came back as `{"pushed": "main", "flags": ["1032"]}` — where
+`1032` is `ERROR (1024) | REJECTED (8)`. sysadmin only caught a live instance by
+independently running `git rev-list --count @{u}..HEAD`.
+
+**Blast radius: any past build report asserting a push landed is unverified.** This is a
+correctness problem in the audit trail, not a cosmetic one.
+
+Now:
+
+- `PushInfo.flags` is checked against `ERROR | REJECTED | REMOTE_REJECTED | REMOTE_FAILURE`.
+  Any bit set returns `{"error": ...}` — matching the module's existing failure idiom — and
+  the result carries **no** `pushed` key. A result holding both would be the same bug in a
+  new shape.
+- Flags are decoded to names (`["REJECTED", "ERROR"]`) rather than an opaque integer, so a
+  failure is diagnosable from the audit log without a bitmask lookup.
+- `PushInfo.summary` — the human-readable reason, previously discarded — is surfaced in
+  both `error` and `summary`.
+- An empty `push_info` (remote acknowledged no ref updates) is treated as a failure.
+- Upstream is set when missing, and reported as `upstream_set`. Without it a genuine
+  success left the caller unable to verify: `git rev-list @{u}..HEAD` *errors* rather than
+  confirming when there is no tracking branch.
+
+Tested against a real local bare remote — asserting both that a rejection reports failure
+and that a genuine push still reports success, since a filter that failed everything would
+pass a one-sided test.
+
+### Fixed — `woodpecker_trigger` returned HTTP 400 (vikunja #269, id 280)
+
+`tools/woodpecker.py` sent `branch` as a **query parameter**; Woodpecker 3.x requires a
+JSON body. The POST returned HTTP 400 with an empty body, so the tool never worked and
+pipelines had to be triggered by hand.
+
+`branch` is now sent as `json={"branch": ...}`, and omitted entirely when unset so the
+repo default applies server-side rather than sending `null`. The existing unit test
+asserted `request.url.params["branch"]` and had locked the wrong form in; it now asserts
+the request body, the absence of the query param, and the content type.
+
+### Fixed — Prometheus metrics endpoint bound `0.0.0.0` (vikunja #272, id 283)
+
+`observability.py` called `start_http_server(config.metrics_port)` with no `addr=`.
+`prometheus_client` defaults to `0.0.0.0`, making the endpoint LAN-reachable while every
+other githost-mcp listener is loopback-only by design.
+
+The 2026-07-16 stopgap was to leave `METRICS_PORT` unset fleet-wide, which left
+githost-mcp with **no metrics for 11 days** — the exact capability the HTTP/PM2 migration
+existed to enable.
+
+`addr` is now `127.0.0.1`, hardcoded via `observability.METRICS_BIND_ADDR` rather than
+made configurable — no deployment wants otherwise, and an env knob is how this regresses.
+`ecosystem.config.js` re-enables `METRICS_PORT` from the per-agent `metricsPort` values
+already declared in its `AGENTS` map (9620-9625, mirroring the 8620-8625 HTTP block).
+
+Acceptance is `ss -tlnp` showing `127.0.0.1`, not a successful `curl` to localhost — that
+confusion is how the `0.0.0.0` bind shipped in the first place.
+
 ## [0.8.0] — 2026-07-27
 
 ### Fixed — manifest-fallback allowlist ignored `access:` (M-2, vikunja#47)

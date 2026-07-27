@@ -74,9 +74,13 @@ def register(mcp) -> None:
         ac = AuditCtx("woodpecker_trigger", "woodpecker", repo, {"repo": repo, "branch": branch})
         try:
             owner, name = repo.split("/", 1)
-            params = {}
+            # Woodpecker 3.x expects a JSON body here, not query params — a
+            # query-param POST returns HTTP 400 with an empty body (vikunja #269,
+            # id 280). Omit `branch` entirely when unset so the repo default applies
+            # server-side; sending null is not the same thing.
+            payload: dict[str, str] = {}
             if branch:
-                params["branch"] = branch
+                payload["branch"] = branch
             base = _woodpecker_base()
             headers = _woodpecker_headers()
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -84,7 +88,7 @@ def register(mcp) -> None:
                 resp = await client.post(
                     f"{base}/repos/{repo_id}/pipelines",
                     headers=headers,
-                    params=params,
+                    json=payload,
                 )
                 _check_response(resp)
                 data = resp.json()

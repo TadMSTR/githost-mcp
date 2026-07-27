@@ -70,6 +70,31 @@ def test_init_prometheus_missing_dep_is_swallowed(monkeypatch):
     assert obs._prom_tool_calls is None
 
 
+def test_init_prometheus_binds_loopback_only(monkeypatch):
+    """prometheus_client defaults to 0.0.0.0 when addr is omitted, which is how the
+    LAN-reachable metrics endpoint shipped (vikunja #272, id 283). This pins the
+    call; `ss -tlnp` on a running process is the real acceptance test, since a mock
+    cannot prove what interface was actually bound.
+    """
+    import sys
+    import types
+
+    calls = []
+
+    stub = types.ModuleType("prometheus_client")
+    stub.Counter = lambda *a, **kw: MagicMock()
+    stub.Histogram = lambda *a, **kw: MagicMock()
+    stub.start_http_server = lambda port, addr=None, **kw: calls.append((port, addr))
+    monkeypatch.setitem(sys.modules, "prometheus_client", stub)
+
+    monkeypatch.setenv("METRICS_PORT", "9620")
+    reset_config()
+    obs._init_prometheus()
+
+    assert calls == [(9620, "127.0.0.1")], f"expected a loopback bind, got {calls}"
+    assert obs.METRICS_BIND_ADDR == "127.0.0.1"
+
+
 @pytest.mark.asyncio
 async def test_init_nats_missing_dep_is_swallowed(monkeypatch):
     monkeypatch.setenv("NATS_URL", "nats://localhost:4222")

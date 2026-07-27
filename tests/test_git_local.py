@@ -1,5 +1,7 @@
 """Tests for local git tools using real temporary repositories."""
 
+import pathlib
+
 import git
 import pytest
 
@@ -178,3 +180,106 @@ def test_git_commit_agent_id_default_identity(tools, tmp_path, monkeypatch):
     commit = repo.head.commit
     assert commit.author.name == "developer-agent"
     assert commit.author.email == "developer@forge"
+
+
+# ---------------------------------------------------------------------------
+# git_push result integrity (vikunja #265, id 276)
+#
+# These run against a real local bare remote — a mocked PushInfo would happily
+# accept whatever shape the code produces, which is how the bug shipped.
+# ---------------------------------------------------------------------------
+
+
+def _commit_file(repo: git.Repo, name: str, content: str) -> None:
+    (pathlib.Path(repo.working_tree_dir) / name).write_text(content)
+    repo.index.add([name])
+    repo.index.commit(f"Add {name}")
+
+
+@pytest.fixture()
+def bare_remote(tmp_path, repo_path):
+    """A bare repo wired up as `origin` for repo_path, with the branch already pushed."""
+    bare = git.Repo.init(tmp_path / "remote.git", bare=True)
+    local = git.Repo(str(repo_path))
+    origin = local.create_remote("origin", str(tmp_path / "remote.git"))
+    branch = local.active_branch.name
+    origin.push(branch)
+    return bare, branch
+
+
+def test_git_push_success_reports_pushed(tools, bare_remote):
+    """A genuine push must still report success — guards against a filter that
+    reports failure for everything and passes a one-sided rejection test."""
+    fns, path = tools
+    _bare, branch = bare_remote
+    local = git.Repo(str(path))
+    _commit_file(local, "pushed.txt", "new work")
+
+    result = fns["git_push"](str(path), branch=branch)
+
+    assert "error" not in result, f"genuine push reported failure: {result}"
+    assert result["pushed"] == branch
+
+
+def test_git_push_rejected_reports_failure(tools, bare_remote):
+    """A non-fast-forward rejection must report failure, not {'pushed': ...}."""
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+
+    # Advance the remote out of band via a second clone, then diverge locally.
+    other = git.Repo.clone_from(bare.git_dir, str(path.parent / "other"))
+    other.config_writer().set_value("user", "name", "Other").release()
+    other.config_writer().set_value("user", "email", "o@test.com").release()
+    _commit_file(other, "theirs.txt", "remote work")
+    other.remotes.origin.push(branch)
+
+    _commit_file(local, "ours.txt", "local work")
+
+    result = fns["git_push"](str(path), branch=branch)
+
+    assert "error" in result, f"rejected push reported success: {result}"
+    assert "pushed" not in result, "failure result must not also claim a push landed"
+    # The remote must genuinely not have moved to our commit.
+    assert bare.refs[branch].commit.hexsha != local.head.commit.hexsha
+
+
+def test_git_push_rejection_surfaces_reason(tools, bare_remote):
+    """PushInfo.summary holds the human-readable reason; losing it is why the
+    current failure mode is undiagnosable. Decoded flags must be present too."""
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+
+    other = git.Repo.clone_from(bare.git_dir, str(path.parent / "other2"))
+    other.config_writer().set_value("user", "name", "Other").release()
+    other.config_writer().set_value("user", "email", "o@test.com").release()
+    _commit_file(other, "theirs.txt", "remote work")
+    other.remotes.origin.push(branch)
+
+    _commit_file(local, "ours.txt", "local work")
+
+    result = fns["git_push"](str(path), branch=branch)
+
+    assert "REJECTED" in result.get("flags", []), (
+        f"decoded flags must name REJECTED, got {result.get('flags')}"
+    )
+    assert result.get("summary"), "PushInfo.summary must be surfaced, not discarded"
+
+
+def test_git_push_sets_upstream(tools, bare_remote):
+    """A push that leaves no upstream makes `git rev-list @{u}..HEAD` error rather
+    than confirm. Either set upstream or say it wasn't set."""
+    fns, path = tools
+    _bare, _branch = bare_remote
+    local = git.Repo(str(path))
+    local.create_head("feature-upstream").checkout()
+    _commit_file(local, "feature.txt", "feature work")
+
+    result = fns["git_push"](str(path), branch="feature-upstream")
+
+    assert "error" not in result, f"push failed: {result}"
+    assert result.get("upstream_set") is True, f"upstream not reported as set: {result}"
+    assert local.active_branch.tracking_branch() is not None, (
+        "tracking branch not configured — downstream `@{u}` verification will error"
+    )
