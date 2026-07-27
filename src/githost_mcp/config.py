@@ -74,7 +74,17 @@ def _default_manifest_path(agent_id: str) -> str:
 
 
 def _load_manifest_roots(manifest_path: str) -> list[str]:
-    """Parse git_backed workspace_access entries from an agent manifest.
+    """Parse writable git_backed workspace_access entries from an agent manifest.
+
+    An entry is included only when it is both ``git_backed: true`` and
+    ``access: readwrite``. ``allowed_repo_roots`` is a single list consulted by
+    both validate_read_path() and validate_write_path(), so an entry that is not
+    readwrite grants no githost-mcp access at all rather than read-only access —
+    splitting the list into separate read and write allowlists is a larger change
+    that needs its own security review.
+
+    Any other ``access:`` value, including a missing one, is treated as not
+    readwrite. That fails closed, consistent with the rest of this module.
 
     Returns an empty list on any parse failure so callers fail closed the same
     way an unset ALLOWED_REPO_ROOTS does, instead of raising.
@@ -95,8 +105,21 @@ def _load_manifest_roots(manifest_path: str) -> list[str]:
 
     roots = []
     for entry in entries:
-        if isinstance(entry, dict) and entry.get("git_backed") is True and entry.get("path"):
-            roots.append(os.path.expanduser(str(entry["path"])))
+        if not (isinstance(entry, dict) and entry.get("git_backed") is True and entry.get("path")):
+            continue
+        access = entry.get("access")
+        if access != "readwrite":
+            # Skipping here narrows the allowlist. Log it so a mysteriously
+            # missing root is diagnosable rather than silent.
+            log.warning(
+                "manifest_allowlist_entry_skipped",
+                path=manifest_path,
+                entry_path=str(entry["path"]),
+                access=access,
+                reason="access is not readwrite",
+            )
+            continue
+        roots.append(os.path.expanduser(str(entry["path"])))
     return roots
 
 

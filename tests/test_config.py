@@ -20,7 +20,11 @@ def manifest_path(tmp_path):
 def test_explicit_env_wins_over_manifest(tmp_path, manifest_path, monkeypatch):
     env_root = str(tmp_path / "env-repos")
     manifest_root = str(tmp_path / "manifest-repos")
-    _write_manifest(manifest_path, [{"path": manifest_root, "git_backed": True}])
+    # access: readwrite so this test proves env precedence, rather than passing
+    # because the access filter dropped the manifest entry anyway.
+    _write_manifest(
+        manifest_path, [{"path": manifest_root, "git_backed": True, "access": "readwrite"}]
+    )
 
     monkeypatch.setenv("ALLOWED_REPO_ROOTS", env_root)
     monkeypatch.setenv("AGENT_ID", "developer")
@@ -56,7 +60,7 @@ def test_manifest_fallback_when_env_unset(tmp_path, manifest_path, monkeypatch):
 def test_manifest_fallback_empty_env_var(tmp_path, manifest_path, monkeypatch):
     """An explicitly-empty ALLOWED_REPO_ROOTS is treated the same as unset."""
     git_root = str(tmp_path / "repos" / "personal")
-    _write_manifest(manifest_path, [{"path": git_root, "git_backed": True}])
+    _write_manifest(manifest_path, [{"path": git_root, "git_backed": True, "access": "readwrite"}])
 
     monkeypatch.setenv("ALLOWED_REPO_ROOTS", "")
     monkeypatch.setenv("AGENT_ID", "developer")
@@ -128,6 +132,181 @@ def test_manifest_with_no_workspace_access_key_fails_closed(tmp_path, manifest_p
     assert config.allowlist_source == "none"
 
 
+# --- access: filter on the manifest fallback (M-2) ----------------------------
+#
+# allowed_repo_roots is one list consulted by both validate_read_path() and
+# validate_write_path(), so "not readwrite" means no githost-mcp access at all.
+
+
+@pytest.mark.parametrize(
+    "access",
+    ["readonly", "read-only", "rw", "READWRITE", "", None],
+)
+def test_manifest_entry_excluded_unless_access_is_readwrite(
+    tmp_path, manifest_path, monkeypatch, access
+):
+    """Anything that is not exactly `readwrite` fails closed, including absent."""
+    git_root = str(tmp_path / "repos" / "personal")
+    entry = {"path": git_root, "git_backed": True}
+    if access is not None:
+        entry["access"] = access
+    _write_manifest(manifest_path, [entry])
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_repo_roots == []
+    assert config.allowlist_source == "none"
+
+
+def test_manifest_readwrite_entry_included(tmp_path, manifest_path, monkeypatch):
+    git_root = str(tmp_path / "repos" / "personal")
+    _write_manifest(manifest_path, [{"path": git_root, "git_backed": True, "access": "readwrite"}])
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    reset_config()
+
+    assert get_config().allowed_repo_roots == [git_root]
+
+
+def test_readonly_entry_dropped_from_mixed_manifest(tmp_path, manifest_path, monkeypatch):
+    """A readonly entry alongside readwrite ones is the realistic shape."""
+    rw_root = str(tmp_path / "repos" / "personal")
+    ro_root = str(tmp_path / "appdata")
+    _write_manifest(
+        manifest_path,
+        [
+            {"path": rw_root, "git_backed": True, "access": "readwrite"},
+            {"path": ro_root, "git_backed": True, "access": "readonly"},
+        ],
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_repo_roots == [rw_root]
+    assert ro_root not in config.allowed_repo_roots
+
+
+def test_readonly_git_backed_entry_rejects_writes_and_reads(tmp_path, manifest_path, monkeypatch):
+    """The negative test M-2 describes: readonly + git_backed must not grant write.
+
+    Exercises the validators rather than just the parsed list, so a future change
+    that reintroduces the entry downstream still fails here.
+    """
+    import os
+
+    ro_root = tmp_path / "appdata"
+    repo_under_ro = ro_root / "somerepo"
+    repo_under_ro.mkdir(parents=True)
+    _write_manifest(
+        manifest_path, [{"path": str(ro_root), "git_backed": True, "access": "readonly"}]
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    reset_config()
+
+    from githost_mcp.security import validate_read_path, validate_write_path
+
+    # No readwrite entries at all -> allowlist is empty -> fail closed.
+    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
+        validate_write_path(str(repo_under_ro))
+    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
+        validate_read_path(str(repo_under_ro))
+
+    assert os.path.isdir(repo_under_ro)  # the path exists; access is what's denied
+
+
+def test_readonly_entry_blocked_when_other_roots_are_allowed(tmp_path, manifest_path, monkeypatch):
+    """Same as above but with a non-empty allowlist, so the error path differs."""
+    rw_root = tmp_path / "repos"
+    ro_root = tmp_path / "appdata"
+    (rw_root / "ok").mkdir(parents=True)
+    (ro_root / "denied").mkdir(parents=True)
+    _write_manifest(
+        manifest_path,
+        [
+            {"path": str(rw_root), "git_backed": True, "access": "readwrite"},
+            {"path": str(ro_root), "git_backed": True, "access": "readonly"},
+        ],
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    reset_config()
+
+    from githost_mcp.security import validate_read_path, validate_write_path
+
+    validate_write_path(str(rw_root / "ok"))  # should not raise
+
+    with pytest.raises(ValueError, match="not under any allowed root"):
+        validate_write_path(str(ro_root / "denied"))
+    with pytest.raises(ValueError, match="not under any allowed root"):
+        validate_read_path(str(ro_root / "denied"))
+
+
+def test_non_git_backed_readwrite_entry_still_excluded(tmp_path, manifest_path, monkeypatch):
+    """git_backed remains an independent condition — access alone isn't enough."""
+    _write_manifest(
+        manifest_path,
+        [{"path": str(tmp_path / "memory"), "git_backed": False, "access": "readwrite"}],
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    reset_config()
+
+    assert get_config().allowed_repo_roots == []
+
+
+def test_skipped_entry_is_logged(tmp_path, manifest_path, monkeypatch):
+    """A narrowed allowlist must be diagnosable, not silent.
+
+    Stubs the module-level logger rather than reconfiguring structlog globally:
+    audit.py configures structlog with cache_logger_on_first_use=True, so by the
+    time this test runs in a full-suite pass config.py's bound logger is already
+    cached and a late structlog.configure() would not reach it.
+    """
+    import githost_mcp.config as config_mod
+
+    captured = []
+
+    class _RecordingLogger:
+        def warning(self, event, **kw):
+            captured.append((event, kw))
+
+        def info(self, event, **kw):
+            pass
+
+    ro_root = str(tmp_path / "appdata")
+    _write_manifest(manifest_path, [{"path": ro_root, "git_backed": True, "access": "readonly"}])
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(config_mod, "log", _RecordingLogger())
+
+    reset_config()
+    get_config()
+
+    skipped = [kw for event, kw in captured if event == "manifest_allowlist_entry_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["entry_path"] == ro_root
+    assert skipped[0]["access"] == "readonly"
+
+
 def test_transport_defaults_to_stdio_loopback_no_auth(monkeypatch):
     monkeypatch.delenv("TRANSPORT", raising=False)
     monkeypatch.delenv("HTTP_PORT", raising=False)
@@ -174,7 +353,9 @@ def test_default_manifest_path_derived_from_agent_id(tmp_path, monkeypatch):
     manifests_dir.mkdir(parents=True)
     git_root = str(tmp_path / "repos" / "personal")
     manifest_file = manifests_dir / "developer-agent.yml"
-    _write_manifest(str(manifest_file), [{"path": git_root, "git_backed": True}])
+    _write_manifest(
+        str(manifest_file), [{"path": git_root, "git_backed": True, "access": "readwrite"}]
+    )
 
     monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
     monkeypatch.delenv("AGENT_MANIFEST_PATH", raising=False)

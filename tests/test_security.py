@@ -107,7 +107,10 @@ def manifest_allowed_env(tmp_path, monkeypatch):
     os.makedirs(allowed, exist_ok=True)
     manifest_path = tmp_path / "developer-agent.yml"
     with open(manifest_path, "w") as f:
-        yaml.safe_dump({"workspace_access": [{"path": allowed, "git_backed": True}]}, f)
+        yaml.safe_dump(
+            {"workspace_access": [{"path": allowed, "git_backed": True, "access": "readwrite"}]},
+            f,
+        )
 
     monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
     monkeypatch.setenv("AGENT_ID", "developer")
