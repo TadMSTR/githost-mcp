@@ -9,7 +9,7 @@ import structlog
 from ..audit import AuditCtx
 from ..config import get_config
 from ..observability import emit_release_target
-from ..security import validate_write_path
+from ..security import scrub, validate_write_path
 
 log = structlog.get_logger(__name__)
 
@@ -55,7 +55,7 @@ def register(mcp) -> None:
             validate_write_path(repo_path)
         except ValueError as e:
             ac.finish("error:ValueError")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
         # Resolve targets
         effective_targets = targets or []
@@ -193,10 +193,10 @@ def register(mcp) -> None:
                     emit_release_target("pypi", "ok")
                 else:
                     emit_release_target("pypi", "error")
-                    log.warning("pypi_publish_failed", stderr=result.stderr[:200])
+                    log.warning("pypi_publish_failed", stderr=scrub(result.stderr[:200]))
             except Exception as e:
                 emit_release_target("pypi", "error")
-                log.warning("pypi_publish_exception", error=str(e))
+                log.warning("pypi_publish_exception", error=scrub(str(e)))
 
         # Step 6: npm (immutable — no rollback)
         if "npm" in effective_targets:
@@ -220,10 +220,10 @@ def register(mcp) -> None:
                     emit_release_target("npm", "ok")
                 else:
                     emit_release_target("npm", "error")
-                    log.warning("npm_publish_failed", stderr=result.stderr[:200])
+                    log.warning("npm_publish_failed", stderr=scrub(result.stderr[:200]))
             except Exception as e:
                 emit_release_target("npm", "error")
-                log.warning("npm_publish_exception", error=str(e))
+                log.warning("npm_publish_exception", error=scrub(str(e)))
 
         ac.finish("ok")
         return {

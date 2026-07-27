@@ -7,9 +7,41 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
-from ..security import validate_read_path, validate_write_path
+from ..security import scrub, validate_read_path, validate_write_path
 
 log = structlog.get_logger(__name__)
+
+
+# PushInfo.flags is a bitmask. Stringifying it (the pre-0.9.0 behaviour) meant a
+# rejected push reported {"pushed": ...} with an opaque "1032" — see vikunja #265
+# (id 276). Decode it, and treat the error bits as a failed call.
+_PUSH_FLAG_NAMES: tuple[tuple[int, str], ...] = (
+    (git.remote.PushInfo.NEW_TAG, "NEW_TAG"),
+    (git.remote.PushInfo.NEW_HEAD, "NEW_HEAD"),
+    (git.remote.PushInfo.NO_MATCH, "NO_MATCH"),
+    (git.remote.PushInfo.REJECTED, "REJECTED"),
+    (git.remote.PushInfo.REMOTE_REJECTED, "REMOTE_REJECTED"),
+    (git.remote.PushInfo.REMOTE_FAILURE, "REMOTE_FAILURE"),
+    (git.remote.PushInfo.DELETED, "DELETED"),
+    (git.remote.PushInfo.FORCED_UPDATE, "FORCED_UPDATE"),
+    (git.remote.PushInfo.FAST_FORWARD, "FAST_FORWARD"),
+    (git.remote.PushInfo.UP_TO_DATE, "UP_TO_DATE"),
+    (git.remote.PushInfo.ERROR, "ERROR"),
+)
+
+_PUSH_ERROR_MASK = (
+    git.remote.PushInfo.ERROR
+    | git.remote.PushInfo.REJECTED
+    | git.remote.PushInfo.REMOTE_REJECTED
+    | git.remote.PushInfo.REMOTE_FAILURE
+)
+
+
+def _decode_push_flags(flags: int) -> list[str]:
+    """Decode a PushInfo bitmask to flag names, so a failure is diagnosable from
+    the audit log without a bitmask lookup."""
+    names = [name for bit, name in _PUSH_FLAG_NAMES if flags & bit]
+    return names or [str(flags)]
 
 
 def _open_repo(repo_path: str) -> git.Repo:
@@ -52,7 +84,7 @@ def register(mcp) -> None:
             return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_diff(repo_path: str, staged: bool = False, file_path: str | None = None) -> dict:
@@ -97,7 +129,7 @@ def register(mcp) -> None:
             return {"repo": repo_path, "staged": staged, "patches": patches}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_log(repo_path: str, limit: int = 20, branch: str | None = None) -> dict:
@@ -128,7 +160,7 @@ def register(mcp) -> None:
             return {"repo": repo_path, "branch": ref, "commits": commits}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_show(repo_path: str, ref: str) -> dict:
@@ -157,7 +189,7 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_branch(
@@ -200,7 +232,7 @@ def register(mcp) -> None:
                 raise ValueError(f"Unknown action '{action}'; use list, create, or delete")
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_checkout(repo_path: str, ref: str) -> dict:
@@ -219,7 +251,7 @@ def register(mcp) -> None:
             return {"checked_out": ref, "detached": repo.head.is_detached}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_add(repo_path: str, paths: list[str]) -> dict:
@@ -243,7 +275,7 @@ def register(mcp) -> None:
             return {"staged": staged}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_commit(repo_path: str, message: str) -> dict:
@@ -283,7 +315,7 @@ def register(mcp) -> None:
             return {"sha": commit.hexsha[:12], "message": message}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_push(
@@ -305,12 +337,63 @@ def register(mcp) -> None:
             repo = _open_repo(repo_path)
             branch_name = branch or repo.active_branch.name
             push_info = repo.remotes[remote].push(branch_name)
-            flags = [str(p.flags) for p in push_info]
+
+            decoded: list[str] = []
+            summaries: list[str] = []
+            failed = False
+            for p in push_info:
+                decoded.extend(_decode_push_flags(p.flags))
+                summary = (p.summary or "").strip()
+                if summary:
+                    summaries.append(summary)
+                if p.flags & _PUSH_ERROR_MASK:
+                    failed = True
+
+            # An empty result means the remote acknowledged nothing at all — the
+            # branch did not move, so it is not a success.
+            if not push_info:
+                failed = True
+                summaries.append("remote reported no ref updates")
+
+            if failed:
+                # PushInfo.summary is the remote's raw text and can carry a
+                # credential-bearing remote URL straight to the caller (SC-14).
+                reason = scrub("; ".join(summaries)) or "push rejected by remote"
+                log.warning(
+                    "push_failed", remote=remote, branch=branch_name, flags=decoded, summary=reason
+                )
+                ac.finish("error:PushRejected")
+                # No "pushed" key on failure — a result carrying both would be the
+                # same bug in a new shape.
+                return {
+                    "error": f"push to {remote}/{branch_name} failed: {reason}",
+                    "remote": remote,
+                    "branch": branch_name,
+                    "flags": decoded,
+                    "summary": reason,
+                }
+
+            # Set upstream when it is missing: without it, the caller's natural
+            # verification (`git rev-list @{u}..HEAD`) errors instead of confirming.
+            upstream_set = False
+            try:
+                head = repo.heads[branch_name]
+                if head.tracking_branch() is None:
+                    head.set_tracking_branch(repo.remotes[remote].refs[branch_name])
+                upstream_set = head.tracking_branch() is not None
+            except Exception as e:  # never fail a good push over upstream bookkeeping
+                log.warning("push_upstream_not_set", branch=branch_name, error=str(e))
+
             ac.finish("ok")
-            return {"pushed": branch_name, "remote": remote, "flags": flags}
+            return {
+                "pushed": branch_name,
+                "remote": remote,
+                "flags": decoded,
+                "upstream_set": upstream_set,
+            }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_pull(repo_path: str, remote: str = "origin") -> dict:
@@ -329,7 +412,7 @@ def register(mcp) -> None:
             return {"remote": remote, "flags": [str(p.flags) for p in pull_info]}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     def git_tag(
@@ -363,4 +446,4 @@ def register(mcp) -> None:
             return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}

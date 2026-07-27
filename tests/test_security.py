@@ -151,3 +151,50 @@ def test_clean_env_strips_pm2_vars(monkeypatch):
     for var in _PM2_IPC_ENV_VARS:
         assert var not in env
     assert env["KEEP_ME"] == "yes"
+
+
+# ---------------------------------------------------------------------------
+# SC-14 — credential scrubbing of caller-facing strings
+# (githost-mcp-reliability-batch-2026-07 audit, MEDIUM)
+# ---------------------------------------------------------------------------
+
+
+def test_redact_url_credentials_strips_userinfo():
+    from githost_mcp.security import redact_url_credentials
+
+    assert (
+        redact_url_credentials("failed to push to https://ted:ghp_SECRET123@github.com/o/r.git")
+        == "failed to push to https://***@github.com/o/r.git"
+    )
+    # Token-as-username (no colon) is the common GitHub PAT remote form.
+    assert (
+        redact_url_credentials("https://ghp_SECRET123@github.com/o/r.git")
+        == "https://***@github.com/o/r.git"
+    )
+
+
+def test_redact_url_credentials_leaves_scp_style_remotes_readable():
+    """Every forge remote is scp-style and carries no credential — keep it diagnosable."""
+    from githost_mcp.security import redact_url_credentials
+
+    text = "failed to push to git@gitea.tadmstr.me:host-forge/stacks.git"
+    assert redact_url_credentials(text) == text
+
+
+def test_scrub_catches_unconfigured_credential_that_mask_alone_misses(monkeypatch):
+    """The audit's nuance: mask_credentials() only replaces *known configured* tokens,
+    so a hand-added PAT in a remote survives it. scrub() must catch it by shape."""
+    from githost_mcp.config import reset_config
+    from githost_mcp.security import mask_credentials, scrub
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_CONFIGURED")
+    monkeypatch.setenv("AUDIT_SIGNING_KEY", "testsecret1234567890abcdef12345678")
+    reset_config()
+
+    text = "remote: https://ted:ghp_HANDADDED_NOT_IN_CONFIG@github.com/o/r.git rejected"
+
+    assert "ghp_HANDADDED_NOT_IN_CONFIG" in mask_credentials(text), (
+        "precondition: mask_credentials alone does not catch an unconfigured token"
+    )
+    assert "ghp_HANDADDED_NOT_IN_CONFIG" not in scrub(text)
+    assert "***@github.com" in scrub(text)

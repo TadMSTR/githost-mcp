@@ -16,7 +16,7 @@ from .._providers.gitea_client import (
 )
 from ..audit import AuditCtx
 from ..config import get_config
-from ..security import mask_credentials
+from ..security import scrub
 
 
 def _err(e: Exception) -> dict:
@@ -26,7 +26,7 @@ def _err(e: Exception) -> dict:
     tools too (SC-14 / GHOST-8): the audit log is scrubbed independently, but the direct
     tool-return value must not carry a credential-shaped substring either.
     """
-    return {"error": mask_credentials(str(e))}
+    return {"error": scrub(str(e))}
 
 
 _REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")

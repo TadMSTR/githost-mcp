@@ -17,6 +17,9 @@ from .config import get_config
 
 log = structlog.get_logger(__name__)
 
+# Loopback-only, deliberately not configurable. See _init_prometheus.
+METRICS_BIND_ADDR = "127.0.0.1"
+
 # ---------------------------------------------------------------------------
 # OTEL (opentelemetry-sdk + exporter)
 # ---------------------------------------------------------------------------
@@ -125,8 +128,13 @@ def _init_prometheus() -> None:
             "Total release target publishes",
             ["target", "result"],
         )
-        start_http_server(config.metrics_port)
-        log.info("prometheus_started", port=config.metrics_port)
+        # addr is NOT optional here: prometheus_client defaults to 0.0.0.0, which
+        # made the metrics endpoint LAN-reachable while every other githost-mcp
+        # listener is loopback-only by design (vikunja #272, id 283). Hardcoded
+        # rather than configurable — there is no deployment that wants otherwise,
+        # and an env knob is how this regresses.
+        start_http_server(config.metrics_port, addr=METRICS_BIND_ADDR)
+        log.info("prometheus_started", port=config.metrics_port, addr=METRICS_BIND_ADDR)
     except Exception as exc:
         log.warning("prometheus_init_failed", error=str(exc))
 

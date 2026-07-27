@@ -1,5 +1,7 @@
 """Tests for Woodpecker tools with respx HTTP mocks (Woodpecker 3.x API)."""
 
+import json
+
 import httpx
 import pytest
 import respx
@@ -191,24 +193,37 @@ async def test_woodpecker_trigger_with_branch(tools):
     with respx.mock:
         _lookup_mock()
         route = respx.post(f"{REPO_URL}/pipelines").mock(
-            return_value=httpx.Response(200, json={"id": 88, "status": "pending", "branch": "dev"})
+            return_value=httpx.Response(
+                200, json={"id": 88, "number": 12, "status": "pending", "branch": "dev"}
+            )
         )
         result = await tools["woodpecker_trigger"]("owner/repo", branch="dev")
-    assert result["pipeline_id"] == 88
+    # The chainable handle is the per-repo `number`; feeding the global `id` back into
+    # status/logs/cancel 404s, so trigger -> status never worked (vikunja #269, id 280).
+    assert result["pipeline_id"] == 12
+    assert result["internal_id"] == 88
     assert result["branch"] == "dev"
-    assert route.calls.last.request.url.params["branch"] == "dev"
+    # Woodpecker 3.x wants a JSON body; a query param gets HTTP 400 (vikunja #269,
+    # id 280). Assert the wire form, not just the parsed result — the previous
+    # version of this test asserted url.params and so locked the bug in.
+    request = route.calls.last.request
+    assert json.loads(request.content) == {"branch": "dev"}
+    assert "branch" not in request.url.params
+    assert request.headers["content-type"] == "application/json"
 
 
 @pytest.mark.asyncio
 async def test_woodpecker_trigger_default_branch(tools):
     with respx.mock:
         _lookup_mock()
-        respx.post(f"{REPO_URL}/pipelines").mock(
+        route = respx.post(f"{REPO_URL}/pipelines").mock(
             return_value=httpx.Response(200, json={"number": 3, "status": "pending"})
         )
         result = await tools["woodpecker_trigger"]("owner/repo")
     assert result["pipeline_id"] == 3
     assert result["status"] == "pending"
+    # Omitted entirely rather than sent as null, so the repo default applies.
+    assert json.loads(route.calls.last.request.content) == {}
 
 
 @pytest.mark.asyncio

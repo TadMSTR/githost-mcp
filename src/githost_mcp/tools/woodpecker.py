@@ -9,6 +9,7 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
+from ..security import scrub
 
 _REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
@@ -74,9 +75,13 @@ def register(mcp) -> None:
         ac = AuditCtx("woodpecker_trigger", "woodpecker", repo, {"repo": repo, "branch": branch})
         try:
             owner, name = repo.split("/", 1)
-            params = {}
+            # Woodpecker 3.x expects a JSON body here, not query params — a
+            # query-param POST returns HTTP 400 with an empty body (vikunja #269,
+            # id 280). Omit `branch` entirely when unset so the repo default applies
+            # server-side; sending null is not the same thing.
+            payload: dict[str, str] = {}
             if branch:
-                params["branch"] = branch
+                payload["branch"] = branch
             base = _woodpecker_base()
             headers = _woodpecker_headers()
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -84,19 +89,25 @@ def register(mcp) -> None:
                 resp = await client.post(
                     f"{base}/repos/{repo_id}/pipelines",
                     headers=headers,
-                    params=params,
+                    json=payload,
                 )
                 _check_response(resp)
                 data = resp.json()
             ac.finish("ok")
             return {
-                "pipeline_id": data.get("id") or data.get("number"),
+                # Woodpecker resolves the {pipeline} path segment in status/logs/cancel
+                # as the per-repo pipeline *number*, not the global id — GET
+                # /repos/<id>/pipelines/<global-id> 404s. Return the number as the
+                # chainable handle so trigger -> status actually works; the global id
+                # is kept separately for reference. (vikunja #269, id 280)
+                "pipeline_id": data.get("number") or data.get("id"),
+                "internal_id": data.get("id"),
                 "status": data.get("status"),
                 "branch": data.get("branch"),
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     async def woodpecker_list_pipelines(
@@ -152,7 +163,7 @@ def register(mcp) -> None:
             return {"repo": repo, "pipelines": pipelines}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     async def woodpecker_get_logs(
@@ -168,7 +179,7 @@ def register(mcp) -> None:
 
         Args:
             repo: Repository in 'owner/repo' format.
-            pipeline_id: Pipeline ID to fetch logs from.
+            pipeline_id: Pipeline number (as returned by woodpecker_trigger).
             step_name: Step name to fetch (default: first step).
         """
         if not _REPO_RE.match(repo):
@@ -235,7 +246,7 @@ def register(mcp) -> None:
             return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     async def woodpecker_pipeline_cancel(repo: str, pipeline_id: int) -> dict:
@@ -246,7 +257,7 @@ def register(mcp) -> None:
 
         Args:
             repo: Repository in 'owner/repo' format.
-            pipeline_id: Pipeline ID to cancel.
+            pipeline_id: Pipeline number (as returned by woodpecker_trigger).
         """
         if not _REPO_RE.match(repo):
             return {"error": _REPO_FMT_ERR}
@@ -274,7 +285,7 @@ def register(mcp) -> None:
             return {"cancelled": True, "id": pipeline_id}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}
 
     @mcp.tool
     async def woodpecker_status(repo: str, pipeline_id: int) -> dict:
@@ -282,7 +293,7 @@ def register(mcp) -> None:
 
         Args:
             repo: Repository in 'owner/repo' format.
-            pipeline_id: Pipeline ID or number from woodpecker_trigger.
+            pipeline_id: Pipeline number (as returned by woodpecker_trigger).
         """
         if not _REPO_RE.match(repo):
             return {"error": _REPO_FMT_ERR}
@@ -311,4 +322,4 @@ def register(mcp) -> None:
             }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
-            return {"error": str(e)}
+            return {"error": scrub(str(e))}

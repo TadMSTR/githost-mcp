@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from .config import get_config
+
+# Any URL userinfo component (`scheme://user:token@host`). mask_credentials() only
+# replaces githost-mcp's *own configured* token values, so a credential a human
+# embedded in a git remote by hand — a one-off PAT, say — survives that pass
+# entirely. Remote URLs reach callers through GitPython's PushInfo.summary and
+# exception text, so the userinfo is redacted by shape rather than by value.
+# (SC-14, third recurrence; see githost-mcp-reliability-batch-2026-07 audit.)
+#
+# scp-style remotes (`git@github.com:owner/repo.git`) have no scheme and are left
+# readable — that is the form every forge remote actually uses.
+_URL_USERINFO_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s]+@")
 
 # PM2 sets these variables in the process environment for its own IPC channel.
 # If they leak into spawned children, any Node.js child (npm, twine's helper
@@ -94,3 +106,17 @@ def mask_credentials(text: str) -> str:
         if token and len(token) > 4:
             result = result.replace(token, "***")
     return result
+
+
+def redact_url_credentials(text: str) -> str:
+    """Strip the userinfo component from any scheme-qualified URL in text.
+
+    Complements mask_credentials(), which can only redact tokens it already knows
+    about from config. Use both on anything derived from git remote output.
+    """
+    return _URL_USERINFO_RE.sub(lambda m: f"{m.group('scheme')}***@", text)
+
+
+def scrub(text: str) -> str:
+    """Full credential scrub for caller-facing strings: known tokens + URL userinfo."""
+    return redact_url_credentials(mask_credentials(text))
