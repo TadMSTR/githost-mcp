@@ -67,6 +67,15 @@ Each `method` still writes its own per-operation audit entry.
 ### Local Git (11)
 `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`
 
+`git_push` reports failure explicitly (as of 0.9.0): if any of `ERROR` / `REJECTED` /
+`REMOTE_REJECTED` / `REMOTE_FAILURE` is set on the push result — including an empty
+ref-update ack — it returns `{"error": ..., "summary": ..., "flags": [...]}` with **no**
+`pushed` key. A caller that only checks for `pushed` will no longer silently treat a
+rejected push as a success. `flags` are decoded to reason names (e.g. `["REJECTED",
+"ERROR"]`), not a raw integer bitmask. `summary` is the remote's human-readable reason,
+credential-scrubbed (see Credential isolation below). On success, a missing upstream is
+set automatically and reported as `upstream_set: true`.
+
 ### GitHub (16)
 `github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
 
@@ -84,6 +93,14 @@ Each `method` still writes its own per-operation audit entry.
 
 ### Woodpecker CI (5)
 `woodpecker_trigger`, `woodpecker_list_pipelines`, `woodpecker_get_logs`, `woodpecker_pipeline_cancel`, `woodpecker_status`
+
+`woodpecker_trigger` returns the per-repo pipeline **number** as `pipeline_id` (as of
+0.9.0) — this is the value to pass straight into `woodpecker_status`,
+`woodpecker_get_logs`, and `woodpecker_pipeline_cancel`, which all resolve `pipeline_id`
+as a per-repo number, not Woodpecker's global id. The global id is still returned, as
+`internal_id`, for reference only. Previously `trigger` returned the global id, which the
+other three tools 404 on — chaining `trigger` into `status`/`get_logs`/`cancel` never
+worked prior to this fix.
 
 ### Audit (1)
 `audit_log_query` — query the JSONL audit log by agent, tool, repo, or time range
@@ -137,8 +154,20 @@ All local git operations use **gitpython** (Python library), not subprocess. Thi
 Token values never appear in:
 - JSONL audit entries (credential filter applied before write)
 - structlog output (processor filter bound to logger)
-- tool return values (masked before return)
+- tool return values (scrubbed before return)
 - exception messages (caught at provider layer and re-raised without token value)
+
+As of 0.9.0, every caller-facing error return across all 27 sites (`git_local.py`,
+`release.py`, `woodpecker.py`, `registry.py`, `gitea.py`/`github.py`/`gitlab.py`) is
+scrubbed via **`security.scrub()`** — `redact_url_credentials(mask_credentials(text))` —
+rather than `mask_credentials()` alone. `mask_credentials()` only replaces githost-mcp's
+own *configured* token values, so a credential a human embedded in a remote by hand
+(`https://user:token@host/...`) previously survived it. `redact_url_credentials()` strips
+the userinfo component from any scheme-qualified URL by shape, independent of whether
+githost-mcp knows the token. scp-style remotes (`git@github.com:owner/repo.git`) have no
+scheme and are left readable — that's the form every forge remote actually uses. This
+closes the gap where `git_push`'s new `summary` field (the remote's raw rejection text)
+could otherwise have surfaced a credential verbatim.
 
 Each provider has its own env vars — a compromised GitHub token does not expose Gitea or GitLab credentials.
 
@@ -183,6 +212,8 @@ of the two must yield at least one root, or every path-taking tool is denied.
 ```env
 AGENT_MANIFEST_PATH=/home/user/.claude/manifests/dev-agent.yml  # optional — allowlist fallback
 # Default: ~/.claude/manifests/{AGENT_ID}-agent.yml (only when AGENT_ID is set to a real identity)
+# On forge, ecosystem.config.js overrides this per-process to
+# /etc/forge/manifests/<agent>-agent.yml — see Deploy > Manifest allowlist path.
 ```
 
 ### Agent Identity (optional)
@@ -244,13 +275,13 @@ METRICS_PORT=9185
 NATS_URL=nats://localhost:4222
 ```
 
-> **`METRICS_PORT` is currently disabled on the forge PM2 deploy.**
-> `start_http_server(config.metrics_port)` in `observability.py` doesn't pass an
-> `addr=` argument, so `prometheus_client` defaults to binding `0.0.0.0` — a
-> LAN-reachable metrics endpoint, which violates the loopback-only requirement
-> for this migration. `ecosystem.config.js` intentionally leaves `METRICS_PORT`
-> unset for all 6 agent processes until `observability.py` passes
-> `addr="127.0.0.1"`. Track re-enablement under Plane GHOST-13.
+> **`METRICS_PORT` is re-enabled on the forge PM2 deploy (0.9.0+), loopback-only.**
+> `start_http_server()` in `observability.py` now binds `addr=127.0.0.1` explicitly, via
+> a hardcoded `observability.METRICS_BIND_ADDR` (not itself configurable — no deployment
+> wants a LAN-reachable metrics endpoint, and an env knob is how the previous `0.0.0.0`
+> bind regressed). `ecosystem.config.js` sets one port per agent, 9620-9625, mirroring
+> the 8620-8625 HTTP block. Verify with `ss -tlnp` showing `127.0.0.1` — a successful
+> `curl` to localhost alone doesn't distinguish a loopback bind from a `0.0.0.0` one.
 
 ### Transport (optional — default stdio)
 
@@ -325,3 +356,21 @@ Each service comes up with `TRANSPORT=http`, `HTTP_HOST=127.0.0.1`, its own `HTT
 scoped-mcp's manifest at the corresponding `http://127.0.0.1:<port>/mcp/` URL with the token in
 an `Authorization: Bearer` header (requires `type: http` on the manifest block — a bare
 `{url, headers}` entry is silently skipped).
+
+### Manifest allowlist path
+
+When `ALLOWED_REPO_ROOTS` is unset for an agent, `AGENT_MANIFEST_PATH` (default
+`~/.claude/manifests/{AGENT_ID}-agent.yml`) is the allowlist's only other source. On forge,
+`ecosystem.config.js` overrides that default to `/etc/forge/manifests/<agent>-agent.yml` for
+every agent process — a root-owned, `0644` copy published from `origin/main` by
+`host-forge-scripts/scripts/agent-manifests-deploy.sh`, not a symlink into a live git working
+tree. The target directory matters as much as the file mode: directory *write* permission
+governs `rename`/`unlink` regardless of who owns the file inside it, so a root-owned file
+under a `ted`-writable parent (e.g. `/opt/appdata`) isn't actually protected — anyone who can
+write the directory can swap the file out from under its own permissions. `/etc` is root-owned
+end to end, which is why the deployed copy lives there instead.
+
+**Deployers must create and populate `/etc/forge/manifests` before unsetting
+`ALLOWED_REPO_ROOTS` for any agent.** `config.py` does not fall back further if the target file
+is missing or unreadable — the allowlist resolves empty (fail closed), and the agent loses all
+repo access, rather than silently reusing the old default path.
