@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-01
+
 ### Fixed — reliability batch 2: unchecked pushes, empty-result crash, audit log rotation (vikunja id 311)
 
 Second batch of the defect class v0.9.0 started and did not finish: **a tool reports success,
@@ -63,10 +65,32 @@ Five tickets closed by this batch (ids 285, 288, 189, 300, 290) plus seven findi
 prior ticket. Four further tickets (ids 36, 38, 41, 43) were verified already fixed and closed
 without work.
 
+#### Security audit
+
+Audited 2026-08-01 — no Critical, one High, one Low, three Info.
+
+The **Low was fixed before merge**: `_rotate_if_needed` suppressed `OSError` at each rename
+with no log line, making two failure modes invisible — an inconsistent backup chain, and (the
+one that matters) a failed final rename leaving the live file to grow past
+`audit_log_max_bytes` indefinitely while every subsequent write re-failed identically. Rotation
+failures now log, with the persistent case at `error` rather than `warning`. Failures are still
+tolerated, so a rotation problem never costs an audit entry.
+
+The **High is not in this release** — it is a live deployment gap rather than a code defect:
+the `writer` agent's audit trail is unsigned, because `~/.secrets/githost-mcp-writer.env` lacks
+the `AUDIT_SIGNING_KEY` its five siblings all carry. `verify_entry_hmac` returns `True` when no
+key is configured, so `audit_log_query` reports `tamper_detected: false` for entries that were
+never signed — tamper detection failing open. Tracked as vikunja #301 (id 312); fix is a
+one-line env addition plus a restart, owned by sysadmin.
+
+Confirmed and not overruled: the Phase 4 Woodpecker error widening (`gitea_client.py` was
+already the precedent, not the exception). Retention bounding was accepted at the defaults.
+
 ### Security — the manifest allowlist is read from a deployed copy, not a git working tree (vikunja #271, id 282)
 
-**Deployment change only — no source change, so the installed package is byte-identical to
-0.9.0 and this is deliberately not tagged as a release.** It still needs saying, because it
+**Deployment change only — no Python source change.** It was deliberately left untagged at the
+time, since the installed package was then byte-identical to 0.9.0; it ships under 0.10.0
+because that is the first release cut after it landed. It still needs saying, because it
 changes where githost-mcp reads its security configuration from, and a deployment that misses
 the new step behaves differently from one that does not.
 
