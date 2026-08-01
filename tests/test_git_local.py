@@ -306,6 +306,77 @@ def test_git_push_failure_does_not_leak_remote_url_credentials(tools, bare_remot
 
 
 # ---------------------------------------------------------------------------
+# git_branch / git_push result honesty (vikunja #289, id 300)
+#
+# Two defects that compounded into "work silently did not land while every tool
+# call reported success" during venv-install-standardization-2026-07.
+# ---------------------------------------------------------------------------
+
+
+def test_git_branch_create_reports_unchanged_active_branch(tools):
+    """create does not check out. Nothing in the old return value said so, and a
+    following git_commit therefore landed on the wrong branch."""
+    fns, path = tools
+    local = git.Repo(str(path))
+    before = local.active_branch.name
+
+    result = fns["git_branch"](str(path), action="create", branch_name="feature-x")
+
+    assert result["created"] == "feature-x"
+    assert result["active_branch"] == before, (
+        "create must report the branch the repo is actually on"
+    )
+    assert local.active_branch.name == before, "create must not silently check out"
+
+
+def test_git_branch_list_still_reports_active(tools):
+    fns, path = tools
+    result = fns["git_branch"](str(path), action="list")
+    assert result["active"] == git.Repo(str(path)).active_branch.name
+
+
+def test_git_push_returns_pushed_sha(tools, bare_remote):
+    """A caller could not distinguish "pushed your work" from "pushed a branch that
+    does not contain your work"."""
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+    _commit_file(local, "work.txt", "real work")
+
+    result = fns["git_push"](str(path), branch=branch)
+
+    assert "error" not in result
+    assert result["pushed_sha"] == local.head.commit.hexsha
+    assert bare.refs[branch].commit.hexsha == result["pushed_sha"], (
+        "pushed_sha must match what the remote actually now holds"
+    )
+
+
+def test_git_push_sha_exposes_a_push_that_omits_your_commit(tools, bare_remote):
+    """The id 300 scenario exactly: the push succeeds, but the branch pushed sits at
+    an older tip than HEAD. pushed_sha != HEAD is the caller's only signal."""
+    fns, path = tools
+    _bare, branch = bare_remote
+    local = git.Repo(str(path))
+
+    # A feature branch is created at the current tip but never checked out...
+    stale_tip = local.head.commit.hexsha
+    local.create_head("feature-stale")
+    # ...and the real work lands on the original branch instead.
+    _commit_file(local, "elsewhere.txt", "the commit that matters")
+    assert local.active_branch.name == branch
+    assert local.head.commit.hexsha != stale_tip
+
+    result = fns["git_push"](str(path), branch="feature-stale")
+
+    assert "error" not in result, f"push genuinely succeeded, should not error: {result}"
+    assert result["pushed_sha"] == stale_tip
+    assert result["pushed_sha"] != local.head.commit.hexsha, (
+        "the caller must be able to see the pushed branch omits the new commit"
+    )
+
+
+# ---------------------------------------------------------------------------
 # git_pull result integrity (vikunja #274, id 285)
 #
 # git_pull returned {"flags": ["4"]} — a stringified bitmask, no error check, and

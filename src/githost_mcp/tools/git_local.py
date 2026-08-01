@@ -168,6 +168,11 @@ def register(mcp) -> None:
     ) -> dict:
         """List, create, or delete branches.
 
+        'create' does not check the new branch out — it is `git branch`, not
+        `git checkout -b`. The result carries `active_branch` so the caller can see
+        which branch a following commit would land on; pair with git_checkout to
+        switch.
+
         Args:
             repo_path: Absolute path to the local git repository.
             action: 'list', 'create', or 'delete'.
@@ -190,7 +195,17 @@ def register(mcp) -> None:
                     raise ValueError("branch_name required for create")
                 repo.create_head(branch_name)
                 ac.finish("ok")
-                return {"created": branch_name}
+                # `create` deliberately does NOT check out — `git branch` and
+                # `git checkout -b` are different operations, and switching would
+                # break callers that already pair this with git_checkout. Report
+                # the branch the repo is actually on so the caller can see that a
+                # following git_commit would land there, not on the new branch.
+                return {
+                    "created": branch_name,
+                    "active_branch": repo.active_branch.name
+                    if not repo.head.is_detached
+                    else "HEAD (detached)",
+                }
             elif action == "delete":
                 if not branch_name:
                     raise ValueError("branch_name required for delete")
@@ -294,6 +309,10 @@ def register(mcp) -> None:
     ) -> dict:
         """Push branch to remote.
 
+        Returns `pushed_sha`, the full sha of the ref that was pushed. A push can
+        succeed while carrying a branch that does not contain your latest commit —
+        compare `pushed_sha` against local HEAD to confirm your work landed.
+
         Args:
             repo_path: Absolute path to the local git repository.
             remote: Remote name (default: origin).
@@ -305,6 +324,12 @@ def register(mcp) -> None:
             validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             branch_name = branch or repo.active_branch.name
+            # Captured before the push so the reported sha is the one that was
+            # actually sent, not whatever the ref moved to afterwards.
+            try:
+                pushed_sha = repo.heads[branch_name].commit.hexsha
+            except (IndexError, KeyError):
+                pushed_sha = None
             push_info = repo.remotes[remote].push(branch_name)
 
             outcome = evaluate_push(push_info)
@@ -340,8 +365,13 @@ def register(mcp) -> None:
                 log.warning("push_upstream_not_set", branch=branch_name, error=str(e))
 
             ac.finish("ok")
+            # pushed_sha is the full sha of the ref that was pushed. A push can
+            # genuinely succeed while carrying a branch that does not contain the
+            # caller's latest commit (vikunja #289, id 300) — comparing this against
+            # local HEAD is the only way to tell. Full sha, to match `git ls-remote`.
             return {
                 "pushed": branch_name,
+                "pushed_sha": pushed_sha,
                 "remote": remote,
                 "flags": decoded,
                 "upstream_set": upstream_set,
