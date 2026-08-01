@@ -8,6 +8,7 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
+from ..gitflags import evaluate_push
 from ..observability import emit_release_target
 from ..security import scrub, validate_write_path
 
@@ -101,15 +102,34 @@ def register(mcp) -> None:
         created: list[str] = []
 
         # Step 1: git tag + push
+        #
+        # The push result used to be discarded, so a rejected tag push let every
+        # provider step below run and create releases pointing at a tag the remote
+        # never received. Check it before anything else is created.
         try:
             repo.create_tag(tag, message=f"Release {tag}")
-            repo.remotes["origin"].push(tag)
             created.append("git_tag")
+            outcome = evaluate_push(repo.remotes["origin"].push(tag))
+            if not outcome.failed:
+                # Tracked separately from the local tag: rollback must not delete a
+                # remote tag this release never managed to create.
+                created.append("git_tag_pushed")
+            if outcome.failed:
+                reason = outcome.summary or "tag push rejected by remote"
+                log.warning("release_tag_push_failed", tag=tag, flags=outcome.flags, summary=reason)
+                _rollback(repo, tag, created, urls)
+                ac.finish("error:git_tag_push")
+                return {
+                    "error": f"Failed to push tag {tag}: {reason}",
+                    "tag": tag,
+                    "flags": outcome.flags,
+                    "rolled_back": True,
+                }
             log.info("release_tag_created", tag=tag)
         except Exception as e:
             _rollback(repo, tag, created, urls)
             ac.finish("error:git_tag")
-            return {"error": f"Failed to create/push tag: {e}"}
+            return {"error": f"Failed to create/push tag: {scrub(str(e))}"}
 
         # Step 2: GitHub release
         if "github" in effective_targets and github_repo:
@@ -283,10 +303,12 @@ def _rollback(
             note="Gitea release delete not implemented; manual cleanup required",
         )
 
-    # Delete local and remote git tag
+    # Delete local and remote git tag. Best-effort cleanup — a failure here must not
+    # mask the original error, so the suppression is deliberate.
     if "git_tag" in created:
         with contextlib.suppress(Exception):
             repo.delete_tag(tag)
+    if "git_tag_pushed" in created:
         with contextlib.suppress(Exception):
             repo.remotes["origin"].push(f":refs/tags/{tag}")
 

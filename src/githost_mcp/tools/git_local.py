@@ -7,41 +7,10 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
+from ..gitflags import evaluate_push
 from ..security import scrub, validate_read_path, validate_write_path
 
 log = structlog.get_logger(__name__)
-
-
-# PushInfo.flags is a bitmask. Stringifying it (the pre-0.9.0 behaviour) meant a
-# rejected push reported {"pushed": ...} with an opaque "1032" — see vikunja #265
-# (id 276). Decode it, and treat the error bits as a failed call.
-_PUSH_FLAG_NAMES: tuple[tuple[int, str], ...] = (
-    (git.remote.PushInfo.NEW_TAG, "NEW_TAG"),
-    (git.remote.PushInfo.NEW_HEAD, "NEW_HEAD"),
-    (git.remote.PushInfo.NO_MATCH, "NO_MATCH"),
-    (git.remote.PushInfo.REJECTED, "REJECTED"),
-    (git.remote.PushInfo.REMOTE_REJECTED, "REMOTE_REJECTED"),
-    (git.remote.PushInfo.REMOTE_FAILURE, "REMOTE_FAILURE"),
-    (git.remote.PushInfo.DELETED, "DELETED"),
-    (git.remote.PushInfo.FORCED_UPDATE, "FORCED_UPDATE"),
-    (git.remote.PushInfo.FAST_FORWARD, "FAST_FORWARD"),
-    (git.remote.PushInfo.UP_TO_DATE, "UP_TO_DATE"),
-    (git.remote.PushInfo.ERROR, "ERROR"),
-)
-
-_PUSH_ERROR_MASK = (
-    git.remote.PushInfo.ERROR
-    | git.remote.PushInfo.REJECTED
-    | git.remote.PushInfo.REMOTE_REJECTED
-    | git.remote.PushInfo.REMOTE_FAILURE
-)
-
-
-def _decode_push_flags(flags: int) -> list[str]:
-    """Decode a PushInfo bitmask to flag names, so a failure is diagnosable from
-    the audit log without a bitmask lookup."""
-    names = [name for bit, name in _PUSH_FLAG_NAMES if flags & bit]
-    return names or [str(flags)]
 
 
 def _open_repo(repo_path: str) -> git.Repo:
@@ -338,27 +307,13 @@ def register(mcp) -> None:
             branch_name = branch or repo.active_branch.name
             push_info = repo.remotes[remote].push(branch_name)
 
-            decoded: list[str] = []
-            summaries: list[str] = []
-            failed = False
-            for p in push_info:
-                decoded.extend(_decode_push_flags(p.flags))
-                summary = (p.summary or "").strip()
-                if summary:
-                    summaries.append(summary)
-                if p.flags & _PUSH_ERROR_MASK:
-                    failed = True
+            outcome = evaluate_push(push_info)
+            decoded = outcome.flags
 
-            # An empty result means the remote acknowledged nothing at all — the
-            # branch did not move, so it is not a success.
-            if not push_info:
-                failed = True
-                summaries.append("remote reported no ref updates")
-
-            if failed:
+            if outcome.failed:
                 # PushInfo.summary is the remote's raw text and can carry a
                 # credential-bearing remote URL straight to the caller (SC-14).
-                reason = scrub("; ".join(summaries)) or "push rejected by remote"
+                reason = outcome.summary or "push rejected by remote"
                 log.warning(
                     "push_failed", remote=remote, branch=branch_name, flags=decoded, summary=reason
                 )
@@ -440,8 +395,34 @@ def register(mcp) -> None:
             tag = repo.create_tag(tag_name, message=tag_msg)
             result = {"tag": tag_name, "sha": tag.commit.hexsha[:12]}
             if push:
-                repo.remotes[remote].push(tag_name)
+                outcome = evaluate_push(repo.remotes[remote].push(tag_name))
+                if outcome.failed:
+                    reason = outcome.summary or "tag push rejected by remote"
+                    log.warning(
+                        "tag_push_failed",
+                        remote=remote,
+                        tag=tag_name,
+                        flags=outcome.flags,
+                        summary=reason,
+                    )
+                    ac.finish("error:PushRejected")
+                    # No "pushed" key on failure. The local tag exists by now, so
+                    # the caller is left holding state the remote does not have —
+                    # say so rather than making it infer that.
+                    return {
+                        "error": (
+                            f"tag {tag_name} push to {remote} failed: {reason}. "
+                            "The local tag was created and needs cleanup."
+                        ),
+                        "tag": tag_name,
+                        "sha": tag.commit.hexsha[:12],
+                        "remote": remote,
+                        "flags": outcome.flags,
+                        "summary": reason,
+                        "local_tag_created": True,
+                    }
                 result["pushed"] = True
+                result["flags"] = outcome.flags
             ac.finish("ok")
             return result
         except Exception as e:

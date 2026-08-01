@@ -239,6 +239,66 @@ async def test_pypi_release_strips_pm2_ipc_vars(tools, clean_repo, monkeypatch):
         assert var not in upload_env
 
 
+# --- tag push result integrity (fourth instance of the id 276 family) --------
+
+
+@pytest.mark.asyncio
+async def test_tag_push_rejection_aborts_before_any_provider_release(tools, clean_repo):
+    """release.py discarded the tag-push result, then created GitHub/Gitea/GitLab
+    releases pointing at a tag the remote may never have received."""
+    repo = git.Repo(str(clean_repo))
+    origin_path = clean_repo.parent / "origin.git"
+    repo.remotes.origin.push(repo.active_branch.name)
+
+    # Remote gets v1.0.0 at the initial commit, out of band.
+    other = git.Repo.clone_from(str(origin_path), str(clean_repo.parent / "other"))
+    other.create_tag("v1.0.0")
+    other.remotes.origin.push("v1.0.0")
+
+    # Local diverges, so its v1.0.0 would point somewhere else — a rejected push.
+    (clean_repo / "more.txt").write_text("more")
+    repo.index.add(["more.txt"])
+    repo.index.commit("More work")
+
+    with patch("githost_mcp.tools.release._create_release_sync") as create_release:
+        result = await tools["release"](
+            str(clean_repo), "1.0.0", targets=["github"], github_repo="owner/repo"
+        )
+
+    assert "error" in result, f"rejected tag push let the release proceed: {result}"
+    assert "success" not in result, "failure result must not also claim success"
+    create_release.assert_not_called()
+
+    # The local tag must be rolled back. The remote tag must NOT be — this release
+    # never pushed it, and deleting someone else's tag is the failure mode the whole
+    # check exists to prevent.
+    assert "v1.0.0" not in [t.name for t in repo.tags]
+    origin_repo = git.Repo(str(origin_path))
+    assert "v1.0.0" in [t.name for t in origin_repo.tags], (
+        "rollback deleted a remote tag this release never created"
+    )
+    assert origin_repo.tags["v1.0.0"].commit.hexsha != repo.head.commit.hexsha
+
+
+@pytest.mark.asyncio
+async def test_tag_push_success_still_proceeds(tools, clean_repo):
+    """Guards against an over-broad check that aborts every release."""
+    repo = git.Repo(str(clean_repo))
+    repo.remotes.origin.push(repo.active_branch.name)
+
+    with patch(
+        "githost_mcp.tools.release._create_release_sync",
+        return_value="https://github.com/owner/repo/releases/tag/v1.0.0",
+    ):
+        result = await tools["release"](
+            str(clean_repo), "1.0.0", targets=["github"], github_repo="owner/repo"
+        )
+
+    assert result.get("success") is True, f"genuine release reported failure: {result}"
+    origin_repo = git.Repo(str(clean_repo.parent / "origin.git"))
+    assert "v1.0.0" in [t.name for t in origin_repo.tags]
+
+
 @pytest.mark.asyncio
 async def test_gitlab_failure_rolls_back_tag_only_when_nothing_else_created(tools, clean_repo):
     with patch(

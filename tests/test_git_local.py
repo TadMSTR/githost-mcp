@@ -305,6 +305,86 @@ def test_git_push_failure_does_not_leak_remote_url_credentials(tools, bare_remot
     assert "***@github.com" in blob, f"expected redacted userinfo, got: {blob}"
 
 
+# ---------------------------------------------------------------------------
+# git_tag push result integrity — third instance of the id 276 family.
+#
+# git_tag(push=True) discarded the PushInfo entirely and set "pushed": True
+# unconditionally. Same real-bare-remote treatment as git_push above.
+# ---------------------------------------------------------------------------
+
+
+def _tag_remote_out_of_band(bare, path, clone_name: str, tag_name: str) -> None:
+    """Put `tag_name` on the bare remote from a separate clone, so a local tag of
+    the same name at a different commit will be rejected."""
+    other = git.Repo.clone_from(bare.git_dir, str(path.parent / clone_name))
+    other.config_writer().set_value("user", "name", "Other").release()
+    other.config_writer().set_value("user", "email", "o@test.com").release()
+    other.create_tag(tag_name)
+    other.remotes.origin.push(tag_name)
+
+
+def test_git_tag_push_success_reports_pushed(tools, bare_remote):
+    """A genuine tag push must still report success — guards against a check that
+    fails everything and passes a one-sided rejection test."""
+    fns, path = tools
+    bare, _branch = bare_remote
+
+    result = fns["git_tag"](str(path), "v1.0.0", message="Release", push=True)
+
+    assert "error" not in result, f"genuine tag push reported failure: {result}"
+    assert result["pushed"] is True
+    assert "v1.0.0" in [t.name for t in bare.tags], "tag did not reach the remote"
+
+
+def test_git_tag_push_rejected_reports_failure(tools, bare_remote):
+    """A tag the remote already holds at a different sha is rejected. The tool must
+    not claim {"pushed": True}."""
+    fns, path = tools
+    bare, _branch = bare_remote
+    local = git.Repo(str(path))
+
+    _tag_remote_out_of_band(bare, path, "tagother", "v1.0.0")
+    _commit_file(local, "ours.txt", "local work")
+
+    result = fns["git_tag"](str(path), "v1.0.0", push=True)
+
+    assert "error" in result, f"rejected tag push reported success: {result}"
+    assert "pushed" not in result, "failure result must not also claim a push landed"
+    # The remote genuinely still points at the old commit.
+    assert bare.tags["v1.0.0"].commit.hexsha != local.head.commit.hexsha
+
+
+def test_git_tag_push_failure_reports_local_tag_needs_cleanup(tools, bare_remote):
+    """The local tag is already created when the push fails. The caller has to know
+    that, or it is left with local state the remote does not have."""
+    fns, path = tools
+    bare, _branch = bare_remote
+    local = git.Repo(str(path))
+
+    _tag_remote_out_of_band(bare, path, "tagother2", "v2.0.0")
+    _commit_file(local, "ours.txt", "local work")
+
+    result = fns["git_tag"](str(path), "v2.0.0", push=True)
+
+    assert "error" in result
+    assert "v2.0.0" in [t.name for t in local.tags], "precondition: local tag was created"
+    assert result.get("local_tag_created") is True, (
+        f"caller cannot know the local tag needs cleanup: {result}"
+    )
+    assert "REJECTED" in result.get("flags", []), (
+        f"decoded flags must name REJECTED, got {result.get('flags')}"
+    )
+
+
+def test_git_tag_without_push_unchanged(tools):
+    """push=False must keep its existing shape — no pushed key, no error."""
+    fns, path = tools
+    result = fns["git_tag"](str(path), "v0.9.9", message="Local only")
+    assert result["tag"] == "v0.9.9"
+    assert "pushed" not in result
+    assert "error" not in result
+
+
 def test_git_push_sets_upstream(tools, bare_remote):
     """A push that leaves no upstream makes `git rev-list @{u}..HEAD` error rather
     than confirm. Either set upstream or say it wasn't set."""
