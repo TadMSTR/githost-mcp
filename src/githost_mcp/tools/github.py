@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from itertools import islice
 
 import structlog
 
@@ -11,6 +12,12 @@ from ..audit import AuditCtx
 from ..security import scrub
 
 log = structlog.get_logger(__name__)
+
+# PyGithub's PaginatedList must be capped with islice, never `[:limit]`. Slicing
+# returns a _Slice whose __iter__ indexes into the first page, so a zero-result
+# query raises IndexError — "no open PRs" became indistinguishable from a real API
+# failure (vikunja #178, id 189). PaginatedListBase.__iter__ only yields and grows,
+# so it is safe on an empty list, and unlike totalCount it costs no extra API call.
 
 # GitHub full names are always exactly 'owner/repo' (one slash, no numeric-ID form).
 _REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
@@ -155,7 +162,7 @@ def register(mcp) -> None:
             if ref:
                 kwargs["branch"] = ref
             runs = []
-            for run in github_call(gh_repo.get_workflow_runs, **kwargs)[:limit]:
+            for run in islice(github_call(gh_repo.get_workflow_runs, **kwargs), limit):
                 runs.append(
                     {
                         "id": run.id,
@@ -218,7 +225,7 @@ def register(mcp) -> None:
             gh = get_github()
             gh_repo = github_call(gh.get_repo, repo)
             prs = []
-            for pr in github_call(gh_repo.get_pulls, state=state)[:limit]:
+            for pr in islice(github_call(gh_repo.get_pulls, state=state), limit):
                 prs.append(
                     {
                         "number": pr.number,
@@ -721,7 +728,7 @@ def register(mcp) -> None:
 
             if method == "list":
                 issues = []
-                for i in github_call(gh_repo.get_issues, state=state)[:limit]:
+                for i in islice(github_call(gh_repo.get_issues, state=state), limit):
                     if i.pull_request:  # get_issues includes PRs; skip them
                         continue
                     issues.append(
