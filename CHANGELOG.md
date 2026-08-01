@@ -2,6 +2,67 @@
 
 ## [Unreleased]
 
+### Fixed — reliability batch 2: unchecked pushes, empty-result crash, audit log rotation (vikunja id 311)
+
+Second batch of the defect class v0.9.0 started and did not finish: **a tool reports success,
+or drops the information needed to diagnose failure.**
+
+**Tag pushes were never checked (highest severity).** `git_tag(push=True)` discarded the
+`PushInfo` and set `"pushed": True` unconditionally. Worse, `release()` did the same and then
+proceeded through every provider step, creating GitHub/Gitea/GitLab releases pointing at a tag
+the remote may never have received. Both now decode the push result and fail loudly; `release()`
+aborts into `_rollback` before any provider step runs. Two further defects surfaced while
+testing that rollback: the local tag was only marked for rollback *after* the push returned
+(so a create-succeeds/push-raises path orphaned it), and `_rollback` deleted the **remote** tag
+whenever the local one existed — so a rejected push followed by a rollback destroyed a
+pre-existing remote tag the release never pushed. Local and remote tag creation are now tracked
+separately.
+
+**`github_pr_list` crashed on zero results** (vikunja #178, id 189), returning
+`{"error": "list index out of range"}` and making "no open PRs" indistinguishable from a real
+API failure. Root cause is PyGithub's `PaginatedList._Slice.__iter__`, so it hit
+`github_workflow_list` and `github_issue_read` too — wider than filed. Fixed with
+`itertools.islice`. Gitea and GitLab were verified unaffected.
+
+**The audit JSONL never rotated.** `audit_log_max_bytes` / `audit_log_backup_count` were
+consumed by the *application* log's handler instead — named for a file they did not govern.
+The audit log now rotates as those settings promise, under a lock (the HTTP transport writes
+from a threadpool), and `audit_log_query` streams the file in reverse rather than pulling it
+entirely into memory, searching rotated backups as well as the live file.
+
+Also: `git_pull` decodes `FetchInfo` flags and surfaces `note` instead of returning a
+stringified bitmask; Woodpecker API errors carry a bounded, scrubbed response body;
+`git_branch(create)` reports the unchanged `active_branch` and `git_push` reports `pushed_sha`;
+the Gitea rollback branch actually deletes the release now that a delete client exists.
+
+#### Result-shape changes
+
+Additive except where noted — no key was removed from a success path.
+
+| Tool | Change |
+|---|---|
+| `git_tag(push=True)` | success gains `flags`; **failure now returns `error` with no `pushed` key**, plus `local_tag_created` so the caller knows to clean up |
+| `git_push` | gains `pushed_sha` (full sha of the pushed ref — compare against local HEAD) |
+| `git_pull` | `flags` are now decoded names, not a stringified bitmask; gains `note`; **failure returns `error` with no success-shaped key** |
+| `git_branch(action="create")` | gains `active_branch`. `create` still does not check out — it is `git branch`, not `git checkout -b` |
+| `release` | tag-push failure returns `error` + `rolled_back` instead of proceeding |
+| `audit_log_query` | gains `sources_searched` |
+
+#### New configuration
+
+`LOG_MAX_BYTES` / `LOG_BACKUP_COUNT` split the application log's rotation from the audit log's.
+Both default to the `AUDIT_LOG_*` values, so **no deployed env file needs to change.**
+
+#### Operational note
+
+Existing audit files are untouched — rotation applies going forward. Retention is now bounded
+where it previously was not: at the deployed defaults (10 MB × 5) that is roughly 11 years at
+the observed ~15 KB/day/agent, so it is a ceiling rather than a practical retention limit.
+
+Five tickets closed by this batch (ids 285, 288, 189, 300, 290) plus seven findings with no
+prior ticket. Four further tickets (ids 36, 38, 41, 43) were verified already fixed and closed
+without work.
+
 ### Security — the manifest allowlist is read from a deployed copy, not a git working tree (vikunja #271, id 282)
 
 **Deployment change only — no source change, so the installed package is byte-identical to

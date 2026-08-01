@@ -257,7 +257,20 @@ NPM_TOKEN=<automation token>
 ```env
 LOG_FILE=/opt/appdata/githost-mcp/logs/githost-mcp.log
 AUDIT_LOG_FILE=/opt/appdata/githost-mcp/audit/githost.jsonl
+
+# Audit JSONL rotation
+AUDIT_LOG_MAX_BYTES=10485760     # default 10 MB; 0 disables rotation
+AUDIT_LOG_BACKUP_COUNT=5         # default 5; .jsonl.1 is newest
+
+# Application log rotation — defaults to the AUDIT_LOG_* values above
+LOG_MAX_BYTES=10485760
+LOG_BACKUP_COUNT=5
 ```
+
+Both files rotate by rename (`.1` newest); entries are never truncated or rewritten. Audit
+HMACs are per-entry rather than a chain, so a rotated entry verifies exactly as it did before
+the rename, and `audit_log_query` searches the rotated backups as well as the live file —
+its `sources_searched` field reports which files a given result actually covered.
 
 ### Observability (all opt-in)
 
