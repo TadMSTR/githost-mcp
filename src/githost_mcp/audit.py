@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac as _hmac
 import json
 import logging
 import os
 import sys
+import threading
 import time
 from logging.handlers import RotatingFileHandler
 from typing import Any
@@ -88,8 +90,8 @@ def init_logging() -> None:
         handlers.append(
             RotatingFileHandler(
                 config.log_file,
-                maxBytes=config.audit_log_max_bytes,
-                backupCount=config.audit_log_backup_count,
+                maxBytes=config.log_max_bytes,
+                backupCount=config.log_backup_count,
             )
         )
 
@@ -144,6 +146,56 @@ def verify_entry_hmac(entry: dict) -> bool:
 # ---------------------------------------------------------------------------
 # JSONL writer
 # ---------------------------------------------------------------------------
+
+_write_lock = threading.Lock()
+
+
+def audit_backup_paths(path: str, backup_count: int) -> list[str]:
+    """Rotated backups for `path`, newest first. Shared with audit_log_query so the
+    two agree on the naming scheme."""
+    return [f"{path}.{i}" for i in range(1, backup_count + 1)]
+
+
+def _rotate_if_needed(incoming_bytes: int) -> None:
+    """Roll the audit JSONL when the next line would exceed audit_log_max_bytes.
+
+    Matches RotatingFileHandler's scheme (`.jsonl.1` is newest) so the layout is
+    the familiar one, but done inline: write_audit_entry appends directly rather
+    than going through the logging stack.
+
+    Existing entries are only ever renamed, never truncated or rewritten — the
+    audit trail is the tamper-evident record. HMACs are per-entry rather than a
+    chain, so a rotated entry verifies exactly as it did before the rename.
+
+    Callers must hold _write_lock.
+    """
+    config = get_config()
+    max_bytes = config.audit_log_max_bytes
+    backup_count = config.audit_log_backup_count
+    if max_bytes <= 0 or backup_count <= 0:
+        return  # rotation disabled
+
+    try:
+        current = os.path.getsize(_audit_log_path)
+    except OSError:
+        return  # no file yet, or unreadable — the append below will report it
+
+    if current == 0 or current + incoming_bytes <= max_bytes:
+        return
+
+    # Drop the oldest, then shift each backup down one. The final rename moves the
+    # live file aside; the next append recreates it.
+    oldest = f"{_audit_log_path}.{backup_count}"
+    with contextlib.suppress(OSError):
+        os.remove(oldest)
+    for i in range(backup_count - 1, 0, -1):
+        src, dst = f"{_audit_log_path}.{i}", f"{_audit_log_path}.{i + 1}"
+        if os.path.exists(src):
+            with contextlib.suppress(OSError):
+                os.replace(src, dst)
+    with contextlib.suppress(OSError):
+        os.replace(_audit_log_path, f"{_audit_log_path}.1")
+    log.info("audit_log_rotated", path=_audit_log_path, size_bytes=current)
 
 
 def _scrub_dict(d: dict) -> dict:
@@ -241,9 +293,15 @@ def write_audit_entry(
     if audit_dir:
         os.makedirs(audit_dir, exist_ok=True)
 
+    line = json.dumps(entry) + "\n"
     try:
-        with open(_audit_log_path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+        # One lock for check-and-rotate plus write. Under the HTTP transport this
+        # runs on a threadpool, so an unguarded rotate would race a concurrent
+        # append and lose entries.
+        with _write_lock:
+            _rotate_if_needed(len(line.encode()))
+            with open(_audit_log_path, "a") as f:
+                f.write(line)
     except OSError as e:
         log.warning("audit_write_failed", error=str(e))
 

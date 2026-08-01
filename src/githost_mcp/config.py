@@ -17,8 +17,14 @@ class Config:
     log_level: str = "INFO"
     log_file: str = "/opt/appdata/githost-mcp/logs/githost-mcp.log"
     audit_log_file: str = "/opt/appdata/githost-mcp/audit/githost.jsonl"
+    # These govern the audit JSONL. They used to be consumed by the *application*
+    # log's handler instead, so the audit log itself never rotated at all.
     audit_log_max_bytes: int = 10_485_760
     audit_log_backup_count: int = 5
+    # The application log's own knobs, defaulted to the audit values so no
+    # deployed env file has to change.
+    log_max_bytes: int = 10_485_760
+    log_backup_count: int = 5
     audit_signing_key: str = ""
     allowed_repo_roots: list[str] = field(default_factory=list)
     allowlist_source: str = "none"
@@ -160,13 +166,20 @@ def load_config() -> Config:
         os.getenv("ALLOWED_REPO_ROOTS", ""), _manifest_path
     )
 
+    # The application log defaults to the audit log's sizing so that splitting the
+    # two settings apart needs no change to any deployed env file.
+    _audit_max_bytes_raw = os.getenv("AUDIT_LOG_MAX_BYTES", "10485760")
+    _audit_backup_raw = os.getenv("AUDIT_LOG_BACKUP_COUNT", "5")
+
     return Config(
         agent_id=_agent_id,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         log_file=os.getenv("LOG_FILE", "/opt/appdata/githost-mcp/logs/githost-mcp.log"),
         audit_log_file=os.getenv("AUDIT_LOG_FILE", "/opt/appdata/githost-mcp/audit/githost.jsonl"),
-        audit_log_max_bytes=int(os.getenv("AUDIT_LOG_MAX_BYTES", "10485760")),
-        audit_log_backup_count=int(os.getenv("AUDIT_LOG_BACKUP_COUNT", "5")),
+        audit_log_max_bytes=int(_audit_max_bytes_raw),
+        audit_log_backup_count=int(_audit_backup_raw),
+        log_max_bytes=int(os.getenv("LOG_MAX_BYTES", _audit_max_bytes_raw)),
+        log_backup_count=int(os.getenv("LOG_BACKUP_COUNT", _audit_backup_raw)),
         audit_signing_key=os.getenv("AUDIT_SIGNING_KEY", ""),
         allowed_repo_roots=_allowed_roots,
         allowlist_source=_allowlist_source,

@@ -114,3 +114,105 @@ def test_audit_ctx(audit_env):
     entries = _read_entries(os.environ["AUDIT_LOG_FILE"])
     assert entries[0]["tool"] == "git_commit"
     assert entries[0]["result"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Audit log rotation
+#
+# audit.py wrote the JSONL with a plain open(path, "a") and never rotated it.
+# audit_log_max_bytes / audit_log_backup_count were consumed by the APPLICATION
+# log's RotatingFileHandler instead — named for a file they did not govern.
+# Live at the time of the fix: githost-developer.jsonl 942 KB since 2026-06-02,
+# growing ~15 KB/day/agent with no bound.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def rotating_audit_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUDIT_SIGNING_KEY", "testsecret1234567890abcdef12345678")
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "app.log"))
+    monkeypatch.setenv("AGENT_ID", "test-agent")
+    monkeypatch.setenv("AUDIT_LOG_MAX_BYTES", "1024")
+    monkeypatch.setenv("AUDIT_LOG_BACKUP_COUNT", "2")
+    reset_config()
+    init_logging()
+    yield tmp_path
+    reset_config()
+
+
+def _write_n(n, tool="git_status"):
+    for i in range(n):
+        write_audit_entry(tool, "local", f"/tmp/repo{i}", {"repo_path": f"/tmp/repo{i}"}, "ok", i)
+
+
+def test_audit_log_rotates_at_configured_size(rotating_audit_env):
+    path = rotating_audit_env / "audit.jsonl"
+    _write_n(40)
+
+    assert (rotating_audit_env / "audit.jsonl.1").exists(), "audit log never rotated"
+    assert path.stat().st_size <= 1024, "live audit file exceeded audit_log_max_bytes"
+
+
+def test_audit_rotation_honours_backup_count(rotating_audit_env):
+    _write_n(300)
+    assert (rotating_audit_env / "audit.jsonl.1").exists()
+    assert (rotating_audit_env / "audit.jsonl.2").exists()
+    assert not (rotating_audit_env / "audit.jsonl.3").exists(), (
+        "backup_count=2 must not keep a third backup"
+    )
+
+
+def test_rotated_entries_still_verify(rotating_audit_env):
+    """Per-entry HMAC is per-entry, not a chain, so renaming the file cannot
+    invalidate a signature. This asserts that rather than assuming it."""
+    _write_n(40)
+    rotated = _read_entries(rotating_audit_env / "audit.jsonl.1")
+    assert rotated, "precondition: rotated file has entries"
+    for entry in rotated:
+        assert verify_entry_hmac(entry), "rotation broke an existing HMAC"
+
+
+def test_rotation_never_truncates_within_the_backup_window(tmp_path, monkeypatch):
+    """Rotation renames — it must never truncate or rewrite the tamper-evident
+    record. With enough backup slots to hold everything, no entry goes missing."""
+    monkeypatch.setenv("AUDIT_SIGNING_KEY", "testsecret1234567890abcdef12345678")
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "app.log"))
+    monkeypatch.setenv("AGENT_ID", "test-agent")
+    monkeypatch.setenv("AUDIT_LOG_MAX_BYTES", "1024")
+    monkeypatch.setenv("AUDIT_LOG_BACKUP_COUNT", "50")
+    reset_config()
+    init_logging()
+    try:
+        _write_n(40)
+        total = len(_read_entries(tmp_path / "audit.jsonl"))
+        for i in range(1, 51):
+            p = tmp_path / f"audit.jsonl.{i}"
+            if p.exists():
+                total += len(_read_entries(p))
+        assert total == 40, f"entries lost across rotation: {total}"
+    finally:
+        reset_config()
+
+
+def test_backups_beyond_backup_count_are_aged_out(rotating_audit_env):
+    """Retention is bounded by design — this is the trade for an unbounded log.
+    At the deployed defaults (10 MB x 5) that is ~11 years at the observed
+    ~15 KB/day/agent, so it is a ceiling rather than a real retention limit."""
+    _write_n(300)
+    assert not (rotating_audit_env / "audit.jsonl.3").exists()
+
+
+def test_rotation_disabled_when_max_bytes_is_zero(rotating_audit_env, monkeypatch):
+    monkeypatch.setenv("AUDIT_LOG_MAX_BYTES", "0")
+    reset_config()
+    _write_n(40)
+    assert not (rotating_audit_env / "audit.jsonl.1").exists()
+
+
+def test_oversized_single_entry_still_written(rotating_audit_env):
+    """An entry larger than max_bytes must not be silently dropped."""
+    write_audit_entry("git_status", "local", "/tmp/r", {"blob": "x" * 4000}, "ok", 1)
+    entries = _read_entries(rotating_audit_env / "audit.jsonl")
+    assert len(entries) == 1
