@@ -259,3 +259,31 @@ def test_credential_filter_noop_without_tokens(audit_env, monkeypatch):
 
     event = {"event": "call", "value": "nothing to scrub"}
     assert _credential_filter(None, "info", event)["value"] == "nothing to scrub"
+
+
+def test_concurrent_writes_do_not_lose_entries_across_rotation(rotating_audit_env):
+    """The HTTP transport writes from a threadpool. An unguarded check-and-rotate
+    would race an append and drop entries."""
+    import threading
+
+    def worker(n):
+        for i in range(20):
+            write_audit_entry("git_status", "local", f"/repo/{n}-{i}", {}, "ok", i)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    seen = set()
+    for name in ["audit.jsonl"] + [f"audit.jsonl.{i}" for i in range(1, 3)]:
+        p = rotating_audit_env / name
+        if p.exists():
+            for entry in _read_entries(p):
+                seen.add(entry["repo"])
+
+    # Entries aged past backup_count are legitimately gone; what must NOT happen is
+    # a corrupt/interleaved line, which would fail json.loads in _read_entries above.
+    assert seen, "no entries survived at all"
+    assert all(r.startswith("/repo/") for r in seen), "interleaved write corrupted a line"
