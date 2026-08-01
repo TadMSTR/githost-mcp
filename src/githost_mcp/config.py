@@ -143,6 +143,19 @@ def _resolve_allowed_roots(env_raw: str, manifest_path: str) -> tuple[list[str],
     return [], "none"
 
 
+def _env_int(name: str, raw: str) -> int:
+    """Parse an integer env var, naming the variable and the bad value on failure.
+
+    get_config() runs at import time (server.py), so a malformed METRICS_PORT used
+    to kill the process with a bare `invalid literal for int()` traceback that did
+    not say which variable was at fault.
+    """
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from None
+
+
 def load_config() -> Config:
     metrics_raw = os.getenv("METRICS_PORT", "")
     http_port_raw = os.getenv("HTTP_PORT", "")
@@ -176,10 +189,12 @@ def load_config() -> Config:
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         log_file=os.getenv("LOG_FILE", "/opt/appdata/githost-mcp/logs/githost-mcp.log"),
         audit_log_file=os.getenv("AUDIT_LOG_FILE", "/opt/appdata/githost-mcp/audit/githost.jsonl"),
-        audit_log_max_bytes=int(_audit_max_bytes_raw),
-        audit_log_backup_count=int(_audit_backup_raw),
-        log_max_bytes=int(os.getenv("LOG_MAX_BYTES", _audit_max_bytes_raw)),
-        log_backup_count=int(os.getenv("LOG_BACKUP_COUNT", _audit_backup_raw)),
+        audit_log_max_bytes=_env_int("AUDIT_LOG_MAX_BYTES", _audit_max_bytes_raw),
+        audit_log_backup_count=_env_int("AUDIT_LOG_BACKUP_COUNT", _audit_backup_raw),
+        log_max_bytes=_env_int("LOG_MAX_BYTES", os.getenv("LOG_MAX_BYTES", _audit_max_bytes_raw)),
+        log_backup_count=_env_int(
+            "LOG_BACKUP_COUNT", os.getenv("LOG_BACKUP_COUNT", _audit_backup_raw)
+        ),
         audit_signing_key=os.getenv("AUDIT_SIGNING_KEY", ""),
         allowed_repo_roots=_allowed_roots,
         allowlist_source=_allowlist_source,
@@ -191,7 +206,7 @@ def load_config() -> Config:
         otel_service_name=os.getenv("OTEL_SERVICE_NAME", "githost-mcp"),
         loki_url=os.getenv("LOKI_URL", ""),
         loki_labels=os.getenv("LOKI_LABELS", "app=githost-mcp"),
-        metrics_port=int(metrics_raw) if metrics_raw else None,
+        metrics_port=_env_int("METRICS_PORT", metrics_raw) if metrics_raw else None,
         nats_url=os.getenv("NATS_URL", ""),
         nats_subject_prefix=os.getenv("NATS_SUBJECT_PREFIX", "githost"),
         github_token=os.getenv("GITHUB_TOKEN", ""),
@@ -208,7 +223,7 @@ def load_config() -> Config:
         woodpecker_token=os.getenv("WOODPECKER_TOKEN", ""),
         transport=os.getenv("TRANSPORT", "stdio"),
         http_host=os.getenv("HTTP_HOST", "127.0.0.1"),
-        http_port=int(http_port_raw) if http_port_raw else None,
+        http_port=_env_int("HTTP_PORT", http_port_raw) if http_port_raw else None,
         allow_nonloopback=os.getenv("GITHOST_MCP_ALLOW_NONLOOPBACK", "") == "1",
         auth_token=os.getenv("GITHOST_MCP_AUTH_TOKEN", ""),
     )

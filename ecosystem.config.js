@@ -12,8 +12,19 @@
 // Secrets are NOT hardcoded here: each app reuses the same two files the
 // stdio launchers already read — ~/.secrets/forge.env (shared GITHUB_TOKEN /
 // GITEA_TOKEN / GITLAB_TOKEN / GITHOST_MCP_AUTH_TOKEN) and
-// ~/.secrets/githost-mcp-<agent>.env (AGENT_ID, ALLOWED_REPO_ROOTS, and any
-// agent-specific token overrides).
+// ~/.secrets/githost-mcp-<agent>.env (GITEA_URL / GITHUB_URL, GIT_AGENT_NAME /
+// GIT_AGENT_EMAIL, AUDIT_SIGNING_KEY, LOG_FILE / AUDIT_LOG_FILE /
+// AUDIT_LOG_MAX_BYTES / AUDIT_LOG_BACKUP_COUNT / LOG_LEVEL, WOODPECKER_URL and
+// any agent-specific token overrides; ALLOWED_REPO_ROOTS only where an agent
+// still overrides the manifest allowlist).
+//
+// AGENT_ID does NOT come from that file and never has — buildApp() below injects
+// it, along with TRANSPORT, HTTP_HOST, HTTP_PORT, AGENT_MANIFEST_PATH and
+// METRICS_PORT. Taking the old wording at face value cost a cutover: an
+// audit-LOW sanity check in agent-allowlist-cutover.sh asserted the rewritten
+// env file still carried AGENT_ID, an invariant that had never been true, and
+// the cutover failed closed for every agent on its first real run (fixed in
+// host-forge/scripts 01ae354; vikunja #279, id 290).
 "use strict";
 
 const fs = require("fs");

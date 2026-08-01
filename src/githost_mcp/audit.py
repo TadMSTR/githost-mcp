@@ -31,9 +31,10 @@ log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _credential_filter(logger: Any, method: str, event_dict: dict) -> dict:
+def _config_tokens() -> list[str]:
+    """Every configured secret, long enough to be worth matching on."""
     config = get_config()
-    tokens = [
+    return [
         t
         for t in [
             config.github_token,
@@ -48,13 +49,32 @@ def _credential_filter(logger: Any, method: str, event_dict: dict) -> dict:
         ]
         if t and len(t) > 4
     ]
+
+
+def _scrub_value(val: Any, tokens: list[str]) -> Any:
+    """Replace every configured token anywhere in a nested structure."""
+    if isinstance(val, str):
+        for tok in tokens:
+            val = val.replace(tok, "***")
+        return val
+    if isinstance(val, dict):
+        return {k: _scrub_value(v, tokens) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_scrub_value(i, tokens) for i in val]
+    if isinstance(val, tuple):
+        return tuple(_scrub_value(i, tokens) for i in val)
+    return val
+
+
+def _credential_filter(logger: Any, method: str, event_dict: dict) -> dict:
+    tokens = _config_tokens()
     if not tokens:
         return event_dict
+    # Recurses. This used to scrub top-level strings only, so a token inside a
+    # dict or list passed to a log call went to the log verbatim — while the
+    # audit writer alongside it recursed correctly.
     for key, val in list(event_dict.items()):
-        if isinstance(val, str):
-            for tok in tokens:
-                if tok in val:
-                    event_dict[key] = val.replace(tok, "***")
+        event_dict[key] = _scrub_value(val, tokens)
     return event_dict
 
 
@@ -198,41 +218,6 @@ def _rotate_if_needed(incoming_bytes: int) -> None:
     log.info("audit_log_rotated", path=_audit_log_path, size_bytes=current)
 
 
-def _scrub_dict(d: dict) -> dict:
-    """Recursively replace credential values in a dict."""
-    config = get_config()
-    tokens = [
-        t
-        for t in [
-            config.github_token,
-            config.gitea_token,
-            config.gitlab_token,
-            config.woodpecker_token,
-            config.pypi_token,
-            config.pypi_test_token,
-            config.npm_token,
-            config.audit_signing_key,
-            config.auth_token,
-        ]
-        if t and len(t) > 4
-    ]
-    if not tokens:
-        return d
-
-    def _scrub_val(val):
-        if isinstance(val, str):
-            for tok in tokens:
-                val = val.replace(tok, "***")
-            return val
-        if isinstance(val, dict):
-            return {k: _scrub_val(v) for k, v in val.items()}
-        if isinstance(val, list):
-            return [_scrub_val(i) for i in val]
-        return val
-
-    return {k: _scrub_val(v) for k, v in d.items()}
-
-
 def write_audit_entry(
     tool: str,
     provider: str,
@@ -242,39 +227,9 @@ def write_audit_entry(
     duration_ms: int,
 ) -> None:
     # Scrub credentials from params and result before writing
-    config = get_config()
-    tokens = [
-        t
-        for t in [
-            config.github_token,
-            config.gitea_token,
-            config.gitlab_token,
-            config.woodpecker_token,
-            config.pypi_token,
-            config.pypi_test_token,
-            config.npm_token,
-            config.audit_signing_key,
-            config.auth_token,
-        ]
-        if t and len(t) > 4
-    ]
-
-    def _scrub_str(s: str) -> str:
-        for tok in tokens:
-            s = s.replace(tok, "***")
-        return s
-
-    def _scrub_val(val):
-        if isinstance(val, str):
-            return _scrub_str(val)
-        if isinstance(val, dict):
-            return {k: _scrub_val(v) for k, v in val.items()}
-        if isinstance(val, list):
-            return [_scrub_val(i) for i in val]
-        return val
-
-    safe_params = {k: _scrub_val(v) for k, v in params.items()}
-    safe_result = _scrub_str(result)
+    tokens = _config_tokens()
+    safe_params = {k: _scrub_value(v, tokens) for k, v in params.items()}
+    safe_result = _scrub_value(result, tokens)
 
     entry: dict = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),

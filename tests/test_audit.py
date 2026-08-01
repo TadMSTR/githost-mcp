@@ -216,3 +216,46 @@ def test_oversized_single_entry_still_written(rotating_audit_env):
     write_audit_entry("git_status", "local", "/tmp/r", {"blob": "x" * 4000}, "ok", 1)
     entries = _read_entries(rotating_audit_env / "audit.jsonl")
     assert len(entries) == 1
+
+
+# ---------------------------------------------------------------------------
+# Credential filter recursion
+#
+# _credential_filter scrubbed top-level strings only, while write_audit_entry's
+# scrubber alongside it recursed. A token inside a dict or list passed to a log
+# call therefore reached the log verbatim.
+# ---------------------------------------------------------------------------
+
+
+def test_credential_filter_scrubs_nested_structures(audit_env, monkeypatch):
+    from githost_mcp.audit import _credential_filter
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_supersecrettoken1234567890")
+    reset_config()
+
+    event = {
+        "event": "call",
+        "top": "token ghp_supersecrettoken1234567890 here",
+        "nested": {"inner": {"deep": "ghp_supersecrettoken1234567890"}},
+        "listed": ["ghp_supersecrettoken1234567890", {"k": "ghp_supersecrettoken1234567890"}],
+        "untouched": 42,
+    }
+    filtered = _credential_filter(None, "info", event)
+
+    assert "ghp_supersecrettoken1234567890" not in repr(filtered)
+    assert filtered["nested"]["inner"]["deep"] == "***"
+    assert filtered["listed"][0] == "***"
+    assert filtered["listed"][1]["k"] == "***"
+    assert filtered["untouched"] == 42
+
+
+def test_credential_filter_noop_without_tokens(audit_env, monkeypatch):
+    from githost_mcp.audit import _credential_filter
+
+    for var in ("GITHUB_TOKEN", "GITEA_TOKEN", "GITLAB_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("AUDIT_SIGNING_KEY", raising=False)
+    reset_config()
+
+    event = {"event": "call", "value": "nothing to scrub"}
+    assert _credential_filter(None, "info", event)["value"] == "nothing to scrub"

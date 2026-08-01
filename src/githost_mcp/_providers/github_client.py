@@ -22,9 +22,11 @@ def get_github():
     if not config.github_token:
         raise ValueError("GITHUB_TOKEN is not set")
     try:
-        from github import Github  # type: ignore
+        from github import Auth, Github  # type: ignore
 
-        _client = Github(config.github_token)
+        # The positional form emits a DeprecationWarning on every call and is
+        # removed in PyGithub 3.x.
+        _client = Github(auth=Auth.Token(config.github_token))
         return _client
     except Exception as e:
         raise ValueError(f"GitHub client init failed: {type(e).__name__}") from None
