@@ -7,41 +7,10 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
+from ..gitflags import evaluate_fetch, evaluate_push
 from ..security import scrub, validate_read_path, validate_write_path
 
 log = structlog.get_logger(__name__)
-
-
-# PushInfo.flags is a bitmask. Stringifying it (the pre-0.9.0 behaviour) meant a
-# rejected push reported {"pushed": ...} with an opaque "1032" — see vikunja #265
-# (id 276). Decode it, and treat the error bits as a failed call.
-_PUSH_FLAG_NAMES: tuple[tuple[int, str], ...] = (
-    (git.remote.PushInfo.NEW_TAG, "NEW_TAG"),
-    (git.remote.PushInfo.NEW_HEAD, "NEW_HEAD"),
-    (git.remote.PushInfo.NO_MATCH, "NO_MATCH"),
-    (git.remote.PushInfo.REJECTED, "REJECTED"),
-    (git.remote.PushInfo.REMOTE_REJECTED, "REMOTE_REJECTED"),
-    (git.remote.PushInfo.REMOTE_FAILURE, "REMOTE_FAILURE"),
-    (git.remote.PushInfo.DELETED, "DELETED"),
-    (git.remote.PushInfo.FORCED_UPDATE, "FORCED_UPDATE"),
-    (git.remote.PushInfo.FAST_FORWARD, "FAST_FORWARD"),
-    (git.remote.PushInfo.UP_TO_DATE, "UP_TO_DATE"),
-    (git.remote.PushInfo.ERROR, "ERROR"),
-)
-
-_PUSH_ERROR_MASK = (
-    git.remote.PushInfo.ERROR
-    | git.remote.PushInfo.REJECTED
-    | git.remote.PushInfo.REMOTE_REJECTED
-    | git.remote.PushInfo.REMOTE_FAILURE
-)
-
-
-def _decode_push_flags(flags: int) -> list[str]:
-    """Decode a PushInfo bitmask to flag names, so a failure is diagnosable from
-    the audit log without a bitmask lookup."""
-    names = [name for bit, name in _PUSH_FLAG_NAMES if flags & bit]
-    return names or [str(flags)]
 
 
 def _open_repo(repo_path: str) -> git.Repo:
@@ -199,6 +168,11 @@ def register(mcp) -> None:
     ) -> dict:
         """List, create, or delete branches.
 
+        'create' does not check the new branch out — it is `git branch`, not
+        `git checkout -b`. The result carries `active_branch` so the caller can see
+        which branch a following commit would land on; pair with git_checkout to
+        switch.
+
         Args:
             repo_path: Absolute path to the local git repository.
             action: 'list', 'create', or 'delete'.
@@ -221,7 +195,17 @@ def register(mcp) -> None:
                     raise ValueError("branch_name required for create")
                 repo.create_head(branch_name)
                 ac.finish("ok")
-                return {"created": branch_name}
+                # `create` deliberately does NOT check out — `git branch` and
+                # `git checkout -b` are different operations, and switching would
+                # break callers that already pair this with git_checkout. Report
+                # the branch the repo is actually on so the caller can see that a
+                # following git_commit would land there, not on the new branch.
+                return {
+                    "created": branch_name,
+                    "active_branch": repo.active_branch.name
+                    if not repo.head.is_detached
+                    else "HEAD (detached)",
+                }
             elif action == "delete":
                 if not branch_name:
                     raise ValueError("branch_name required for delete")
@@ -325,6 +309,10 @@ def register(mcp) -> None:
     ) -> dict:
         """Push branch to remote.
 
+        Returns `pushed_sha`, the full sha of the ref that was pushed. A push can
+        succeed while carrying a branch that does not contain your latest commit —
+        compare `pushed_sha` against local HEAD to confirm your work landed.
+
         Args:
             repo_path: Absolute path to the local git repository.
             remote: Remote name (default: origin).
@@ -336,29 +324,21 @@ def register(mcp) -> None:
             validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             branch_name = branch or repo.active_branch.name
+            # Captured before the push so the reported sha is the one that was
+            # actually sent, not whatever the ref moved to afterwards.
+            try:
+                pushed_sha = repo.heads[branch_name].commit.hexsha
+            except (IndexError, KeyError):
+                pushed_sha = None
             push_info = repo.remotes[remote].push(branch_name)
 
-            decoded: list[str] = []
-            summaries: list[str] = []
-            failed = False
-            for p in push_info:
-                decoded.extend(_decode_push_flags(p.flags))
-                summary = (p.summary or "").strip()
-                if summary:
-                    summaries.append(summary)
-                if p.flags & _PUSH_ERROR_MASK:
-                    failed = True
+            outcome = evaluate_push(push_info)
+            decoded = outcome.flags
 
-            # An empty result means the remote acknowledged nothing at all — the
-            # branch did not move, so it is not a success.
-            if not push_info:
-                failed = True
-                summaries.append("remote reported no ref updates")
-
-            if failed:
+            if outcome.failed:
                 # PushInfo.summary is the remote's raw text and can carry a
                 # credential-bearing remote URL straight to the caller (SC-14).
-                reason = scrub("; ".join(summaries)) or "push rejected by remote"
+                reason = outcome.summary or "push rejected by remote"
                 log.warning(
                     "push_failed", remote=remote, branch=branch_name, flags=decoded, summary=reason
                 )
@@ -385,8 +365,13 @@ def register(mcp) -> None:
                 log.warning("push_upstream_not_set", branch=branch_name, error=str(e))
 
             ac.finish("ok")
+            # pushed_sha is the full sha of the ref that was pushed. A push can
+            # genuinely succeed while carrying a branch that does not contain the
+            # caller's latest commit (vikunja #289, id 300) — comparing this against
+            # local HEAD is the only way to tell. Full sha, to match `git ls-remote`.
             return {
                 "pushed": branch_name,
+                "pushed_sha": pushed_sha,
                 "remote": remote,
                 "flags": decoded,
                 "upstream_set": upstream_set,
@@ -407,9 +392,28 @@ def register(mcp) -> None:
         try:
             validate_write_path(repo_path)
             repo = _open_repo(repo_path)
-            pull_info = repo.remotes[remote].pull()
+            outcome = evaluate_fetch(repo.remotes[remote].pull())
+
+            if outcome.failed:
+                # FetchInfo.note is the remote's text and can carry a
+                # credential-bearing URL straight to the caller (SC-14) — it is
+                # scrubbed by evaluate_fetch.
+                reason = outcome.summary or "pull rejected by remote"
+                log.warning("pull_failed", remote=remote, flags=outcome.flags, note=reason)
+                ac.finish("error:FetchRejected")
+                # No success-shaped key alongside the error.
+                return {
+                    "error": f"pull from {remote} failed: {reason}",
+                    "remote": remote,
+                    "flags": outcome.flags,
+                    "note": reason,
+                }
+
             ac.finish("ok")
-            return {"remote": remote, "flags": [str(p.flags) for p in pull_info]}
+            result = {"remote": remote, "flags": outcome.flags}
+            if outcome.summary:
+                result["note"] = outcome.summary
+            return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": scrub(str(e))}
@@ -440,8 +444,34 @@ def register(mcp) -> None:
             tag = repo.create_tag(tag_name, message=tag_msg)
             result = {"tag": tag_name, "sha": tag.commit.hexsha[:12]}
             if push:
-                repo.remotes[remote].push(tag_name)
+                outcome = evaluate_push(repo.remotes[remote].push(tag_name))
+                if outcome.failed:
+                    reason = outcome.summary or "tag push rejected by remote"
+                    log.warning(
+                        "tag_push_failed",
+                        remote=remote,
+                        tag=tag_name,
+                        flags=outcome.flags,
+                        summary=reason,
+                    )
+                    ac.finish("error:PushRejected")
+                    # No "pushed" key on failure. The local tag exists by now, so
+                    # the caller is left holding state the remote does not have —
+                    # say so rather than making it infer that.
+                    return {
+                        "error": (
+                            f"tag {tag_name} push to {remote} failed: {reason}. "
+                            "The local tag was created and needs cleanup."
+                        ),
+                        "tag": tag_name,
+                        "sha": tag.commit.hexsha[:12],
+                        "remote": remote,
+                        "flags": outcome.flags,
+                        "summary": reason,
+                        "local_tag_created": True,
+                    }
                 result["pushed"] = True
+                result["flags"] = outcome.flags
             ac.finish("ok")
             return result
         except Exception as e:

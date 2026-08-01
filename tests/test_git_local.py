@@ -305,6 +305,236 @@ def test_git_push_failure_does_not_leak_remote_url_credentials(tools, bare_remot
     assert "***@github.com" in blob, f"expected redacted userinfo, got: {blob}"
 
 
+# ---------------------------------------------------------------------------
+# git_branch / git_push result honesty (vikunja #289, id 300)
+#
+# Two defects that compounded into "work silently did not land while every tool
+# call reported success" during venv-install-standardization-2026-07.
+# ---------------------------------------------------------------------------
+
+
+def test_git_branch_create_reports_unchanged_active_branch(tools):
+    """create does not check out. Nothing in the old return value said so, and a
+    following git_commit therefore landed on the wrong branch."""
+    fns, path = tools
+    local = git.Repo(str(path))
+    before = local.active_branch.name
+
+    result = fns["git_branch"](str(path), action="create", branch_name="feature-x")
+
+    assert result["created"] == "feature-x"
+    assert result["active_branch"] == before, (
+        "create must report the branch the repo is actually on"
+    )
+    assert local.active_branch.name == before, "create must not silently check out"
+
+
+def test_git_branch_list_still_reports_active(tools):
+    fns, path = tools
+    result = fns["git_branch"](str(path), action="list")
+    assert result["active"] == git.Repo(str(path)).active_branch.name
+
+
+def test_git_push_returns_pushed_sha(tools, bare_remote):
+    """A caller could not distinguish "pushed your work" from "pushed a branch that
+    does not contain your work"."""
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+    _commit_file(local, "work.txt", "real work")
+
+    result = fns["git_push"](str(path), branch=branch)
+
+    assert "error" not in result
+    assert result["pushed_sha"] == local.head.commit.hexsha
+    assert bare.refs[branch].commit.hexsha == result["pushed_sha"], (
+        "pushed_sha must match what the remote actually now holds"
+    )
+
+
+def test_git_push_sha_exposes_a_push_that_omits_your_commit(tools, bare_remote):
+    """The id 300 scenario exactly: the push succeeds, but the branch pushed sits at
+    an older tip than HEAD. pushed_sha != HEAD is the caller's only signal."""
+    fns, path = tools
+    _bare, branch = bare_remote
+    local = git.Repo(str(path))
+
+    # A feature branch is created at the current tip but never checked out...
+    stale_tip = local.head.commit.hexsha
+    local.create_head("feature-stale")
+    # ...and the real work lands on the original branch instead.
+    _commit_file(local, "elsewhere.txt", "the commit that matters")
+    assert local.active_branch.name == branch
+    assert local.head.commit.hexsha != stale_tip
+
+    result = fns["git_push"](str(path), branch="feature-stale")
+
+    assert "error" not in result, f"push genuinely succeeded, should not error: {result}"
+    assert result["pushed_sha"] == stale_tip
+    assert result["pushed_sha"] != local.head.commit.hexsha, (
+        "the caller must be able to see the pushed branch omits the new commit"
+    )
+
+
+# ---------------------------------------------------------------------------
+# git_pull result integrity (vikunja #274, id 285)
+#
+# git_pull returned {"flags": ["4"]} — a stringified bitmask, no error check, and
+# FetchInfo.note discarded. Note the realistic failure modes (diverged history,
+# clobbering tags) make GitPython raise rather than return error-flagged
+# FetchInfo; the mask itself is covered as a unit in tests/test_gitflags.py.
+# ---------------------------------------------------------------------------
+
+
+def test_git_pull_success_decodes_flags(tools, bare_remote):
+    """Flags must be names, not a stringified bitmask — "4" tells a caller nothing."""
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+
+    other = git.Repo.clone_from(bare.git_dir, str(path.parent / "puller"))
+    other.config_writer().set_value("user", "name", "Other").release()
+    other.config_writer().set_value("user", "email", "o@test.com").release()
+    _commit_file(other, "theirs.txt", "remote work")
+    other.remotes.origin.push(branch)
+
+    # `git pull <remote>` needs an upstream to know which branch to merge.
+    local.remotes.origin.fetch()
+    local.heads[branch].set_tracking_branch(local.remotes.origin.refs[branch])
+
+    result = fns["git_pull"](str(path))
+
+    assert "error" not in result, f"clean pull reported failure: {result}"
+    assert result["flags"], "flags must not be empty for a pull that moved the branch"
+    for flag in result["flags"]:
+        assert not flag.isdigit(), f"flags must be decoded names, got raw bitmask {flag!r}"
+    assert (path / "theirs.txt").exists(), "the pull did not actually land"
+
+
+def test_git_pull_diverged_reports_error(tools, bare_remote):
+    """A pull that cannot merge must report an error, not report ok."""
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+
+    other = git.Repo.clone_from(bare.git_dir, str(path.parent / "divergent"))
+    other.config_writer().set_value("user", "name", "Other").release()
+    other.config_writer().set_value("user", "email", "o@test.com").release()
+    _commit_file(other, "file.txt", "remote edit")
+    other.remotes.origin.push(branch)
+
+    _commit_file(local, "file.txt", "local edit")
+
+    result = fns["git_pull"](str(path))
+
+    assert "error" in result, f"unmergeable pull reported success: {result}"
+    assert "remote" not in result or "flags" not in result, (
+        "failure result must not also carry a success-shaped payload"
+    )
+
+
+def test_git_pull_error_flags_report_failure(tools, bare_remote, monkeypatch):
+    """Defence in depth: if git ever returns error-flagged FetchInfo without
+    raising, the tool must not report ok."""
+    fns, path = tools
+    local = git.Repo(str(path))
+
+    class FakeFetchInfo:
+        flags = git.remote.FetchInfo.ERROR
+        note = "would clobber existing tag"
+
+    monkeypatch.setattr(
+        type(local.remotes[0]), "pull", lambda self, *a, **kw: [FakeFetchInfo()], raising=False
+    )
+
+    result = fns["git_pull"](str(path))
+
+    assert "error" in result, f"error-flagged fetch reported success: {result}"
+    assert "would clobber existing tag" in result["error"], (
+        "FetchInfo.note carries the reason and must be surfaced"
+    )
+
+
+# ---------------------------------------------------------------------------
+# git_tag push result integrity — third instance of the id 276 family.
+#
+# git_tag(push=True) discarded the PushInfo entirely and set "pushed": True
+# unconditionally. Same real-bare-remote treatment as git_push above.
+# ---------------------------------------------------------------------------
+
+
+def _tag_remote_out_of_band(bare, path, clone_name: str, tag_name: str) -> None:
+    """Put `tag_name` on the bare remote from a separate clone, so a local tag of
+    the same name at a different commit will be rejected."""
+    other = git.Repo.clone_from(bare.git_dir, str(path.parent / clone_name))
+    other.config_writer().set_value("user", "name", "Other").release()
+    other.config_writer().set_value("user", "email", "o@test.com").release()
+    other.create_tag(tag_name)
+    other.remotes.origin.push(tag_name)
+
+
+def test_git_tag_push_success_reports_pushed(tools, bare_remote):
+    """A genuine tag push must still report success — guards against a check that
+    fails everything and passes a one-sided rejection test."""
+    fns, path = tools
+    bare, _branch = bare_remote
+
+    result = fns["git_tag"](str(path), "v1.0.0", message="Release", push=True)
+
+    assert "error" not in result, f"genuine tag push reported failure: {result}"
+    assert result["pushed"] is True
+    assert "v1.0.0" in [t.name for t in bare.tags], "tag did not reach the remote"
+
+
+def test_git_tag_push_rejected_reports_failure(tools, bare_remote):
+    """A tag the remote already holds at a different sha is rejected. The tool must
+    not claim {"pushed": True}."""
+    fns, path = tools
+    bare, _branch = bare_remote
+    local = git.Repo(str(path))
+
+    _tag_remote_out_of_band(bare, path, "tagother", "v1.0.0")
+    _commit_file(local, "ours.txt", "local work")
+
+    result = fns["git_tag"](str(path), "v1.0.0", push=True)
+
+    assert "error" in result, f"rejected tag push reported success: {result}"
+    assert "pushed" not in result, "failure result must not also claim a push landed"
+    # The remote genuinely still points at the old commit.
+    assert bare.tags["v1.0.0"].commit.hexsha != local.head.commit.hexsha
+
+
+def test_git_tag_push_failure_reports_local_tag_needs_cleanup(tools, bare_remote):
+    """The local tag is already created when the push fails. The caller has to know
+    that, or it is left with local state the remote does not have."""
+    fns, path = tools
+    bare, _branch = bare_remote
+    local = git.Repo(str(path))
+
+    _tag_remote_out_of_band(bare, path, "tagother2", "v2.0.0")
+    _commit_file(local, "ours.txt", "local work")
+
+    result = fns["git_tag"](str(path), "v2.0.0", push=True)
+
+    assert "error" in result
+    assert "v2.0.0" in [t.name for t in local.tags], "precondition: local tag was created"
+    assert result.get("local_tag_created") is True, (
+        f"caller cannot know the local tag needs cleanup: {result}"
+    )
+    assert "REJECTED" in result.get("flags", []), (
+        f"decoded flags must name REJECTED, got {result.get('flags')}"
+    )
+
+
+def test_git_tag_without_push_unchanged(tools):
+    """push=False must keep its existing shape — no pushed key, no error."""
+    fns, path = tools
+    result = fns["git_tag"](str(path), "v0.9.9", message="Local only")
+    assert result["tag"] == "v0.9.9"
+    assert "pushed" not in result
+    assert "error" not in result
+
+
 def test_git_push_sets_upstream(tools, bare_remote):
     """A push that leaves no upstream makes `git rev-list @{u}..HEAD` error rather
     than confirm. Either set upstream or say it wasn't set."""

@@ -8,10 +8,36 @@ from datetime import UTC, datetime
 
 import structlog
 
-from ..audit import verify_entry_hmac
+from ..audit import audit_backup_paths, verify_entry_hmac
 from ..config import get_config
 
 log = structlog.get_logger(__name__)
+
+# Read the file back-to-front in blocks. The previous f.readlines() pulled the
+# whole log into memory on every call — on a file that never rotated and was
+# already approaching a megabyte per agent.
+_REVERSE_READ_BLOCK = 64 * 1024
+
+
+def _reverse_lines(path: str):
+    """Yield the file's lines newest-first without loading it all into memory."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        remaining = f.tell()
+        tail = b""
+        while remaining > 0:
+            read_size = min(_REVERSE_READ_BLOCK, remaining)
+            remaining -= read_size
+            f.seek(remaining)
+            block = f.read(read_size) + tail
+            lines = block.split(b"\n")
+            # The first element may be a partial line continuing into the previous
+            # block, so hold it back until that block is read.
+            tail = lines.pop(0)
+            for line in reversed(lines):
+                yield line.decode("utf-8", errors="replace")
+        if tail:
+            yield tail.decode("utf-8", errors="replace")
 
 
 def _parse_iso_utc(value: str) -> datetime:
@@ -51,7 +77,7 @@ def register(mcp) -> None:
         audit_path = config.audit_log_file
 
         if not os.path.exists(audit_path):
-            return {"entries": [], "total_matched": 0}
+            return {"entries": [], "total_matched": 0, "sources_searched": []}
 
         since_dt: datetime | None = None
         if since:
@@ -64,39 +90,57 @@ def register(mcp) -> None:
                     )
                 }
 
-        entries = []
-        try:
-            with open(audit_path) as f:
-                lines = f.readlines()
-        except OSError as e:
-            return {"error": f"Cannot read audit log: {e}"}
+        # Search the live file first, then rotated backups newest-first. Without
+        # this, rotation would silently shrink the queryable window and a 'since'
+        # query spanning a rotation would come back short with no indication —
+        # the same class of defect rotation is being added to fix.
+        sources = [audit_path]
+        sources += [p for p in audit_backup_paths(audit_path, config.audit_log_backup_count)]
 
-        for line in reversed(lines):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            if agent_id and entry.get("agent_id") != agent_id:
-                continue
-            if tool and entry.get("tool") != tool:
-                continue
-            if repo and repo not in entry.get("repo", ""):
-                continue
-            if since_dt:
-                try:
-                    entry_dt = _parse_iso_utc(entry["ts"])
-                    if entry_dt < since_dt:
-                        continue
-                except (KeyError, ValueError):
-                    pass
-
-            entry["tamper_detected"] = not verify_entry_hmac(entry)
-            entries.append(entry)
+        entries: list[dict] = []
+        searched: list[str] = []
+        for source in sources:
             if len(entries) >= limit:
                 break
+            if not os.path.exists(source):
+                continue
+            searched.append(os.path.basename(source))
+            try:
+                for line in _reverse_lines(source):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-        return {"entries": entries, "total_matched": len(entries)}
+                    if agent_id and entry.get("agent_id") != agent_id:
+                        continue
+                    if tool and entry.get("tool") != tool:
+                        continue
+                    if repo and repo not in entry.get("repo", ""):
+                        continue
+                    if since_dt:
+                        try:
+                            entry_dt = _parse_iso_utc(entry["ts"])
+                            if entry_dt < since_dt:
+                                continue
+                        except (KeyError, ValueError):
+                            pass
+
+                    entry["tamper_detected"] = not verify_entry_hmac(entry)
+                    entries.append(entry)
+                    if len(entries) >= limit:
+                        break
+            except OSError as e:
+                # A backup we cannot read must not hide the results we did get.
+                if source == audit_path:
+                    return {"error": f"Cannot read audit log: {e}"}
+                log.warning("audit_backup_unreadable", path=source, error=str(e))
+
+        return {
+            "entries": entries,
+            "total_matched": len(entries),
+            "sources_searched": searched,
+        }

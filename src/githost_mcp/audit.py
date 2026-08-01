@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from logging.handlers import RotatingFileHandler
 from typing import Any
@@ -29,9 +30,10 @@ log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _credential_filter(logger: Any, method: str, event_dict: dict) -> dict:
+def _config_tokens() -> list[str]:
+    """Every configured secret, long enough to be worth matching on."""
     config = get_config()
-    tokens = [
+    return [
         t
         for t in [
             config.github_token,
@@ -46,13 +48,32 @@ def _credential_filter(logger: Any, method: str, event_dict: dict) -> dict:
         ]
         if t and len(t) > 4
     ]
+
+
+def _scrub_value(val: Any, tokens: list[str]) -> Any:
+    """Replace every configured token anywhere in a nested structure."""
+    if isinstance(val, str):
+        for tok in tokens:
+            val = val.replace(tok, "***")
+        return val
+    if isinstance(val, dict):
+        return {k: _scrub_value(v, tokens) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_scrub_value(i, tokens) for i in val]
+    if isinstance(val, tuple):
+        return tuple(_scrub_value(i, tokens) for i in val)
+    return val
+
+
+def _credential_filter(logger: Any, method: str, event_dict: dict) -> dict:
+    tokens = _config_tokens()
     if not tokens:
         return event_dict
+    # Recurses. This used to scrub top-level strings only, so a token inside a
+    # dict or list passed to a log call went to the log verbatim — while the
+    # audit writer alongside it recursed correctly.
     for key, val in list(event_dict.items()):
-        if isinstance(val, str):
-            for tok in tokens:
-                if tok in val:
-                    event_dict[key] = val.replace(tok, "***")
+        event_dict[key] = _scrub_value(val, tokens)
     return event_dict
 
 
@@ -88,8 +109,8 @@ def init_logging() -> None:
         handlers.append(
             RotatingFileHandler(
                 config.log_file,
-                maxBytes=config.audit_log_max_bytes,
-                backupCount=config.audit_log_backup_count,
+                maxBytes=config.log_max_bytes,
+                backupCount=config.log_backup_count,
             )
         )
 
@@ -145,40 +166,87 @@ def verify_entry_hmac(entry: dict) -> bool:
 # JSONL writer
 # ---------------------------------------------------------------------------
 
+_write_lock = threading.Lock()
 
-def _scrub_dict(d: dict) -> dict:
-    """Recursively replace credential values in a dict."""
+
+def audit_backup_paths(path: str, backup_count: int) -> list[str]:
+    """Rotated backups for `path`, newest first. Shared with audit_log_query so the
+    two agree on the naming scheme."""
+    return [f"{path}.{i}" for i in range(1, backup_count + 1)]
+
+
+def _rotate_if_needed(incoming_bytes: int) -> None:
+    """Roll the audit JSONL when the next line would exceed audit_log_max_bytes.
+
+    Matches RotatingFileHandler's scheme (`.jsonl.1` is newest) so the layout is
+    the familiar one, but done inline: write_audit_entry appends directly rather
+    than going through the logging stack.
+
+    Existing entries are only ever renamed, never truncated or rewritten — the
+    audit trail is the tamper-evident record. HMACs are per-entry rather than a
+    chain, so a rotated entry verifies exactly as it did before the rename.
+
+    Callers must hold _write_lock.
+    """
     config = get_config()
-    tokens = [
-        t
-        for t in [
-            config.github_token,
-            config.gitea_token,
-            config.gitlab_token,
-            config.woodpecker_token,
-            config.pypi_token,
-            config.pypi_test_token,
-            config.npm_token,
-            config.audit_signing_key,
-            config.auth_token,
-        ]
-        if t and len(t) > 4
-    ]
-    if not tokens:
-        return d
+    max_bytes = config.audit_log_max_bytes
+    backup_count = config.audit_log_backup_count
+    if max_bytes <= 0 or backup_count <= 0:
+        return  # rotation disabled
 
-    def _scrub_val(val):
-        if isinstance(val, str):
-            for tok in tokens:
-                val = val.replace(tok, "***")
-            return val
-        if isinstance(val, dict):
-            return {k: _scrub_val(v) for k, v in val.items()}
-        if isinstance(val, list):
-            return [_scrub_val(i) for i in val]
-        return val
+    try:
+        current = os.path.getsize(_audit_log_path)
+    except OSError:
+        return  # no file yet, or unreadable — the append below will report it
 
-    return {k: _scrub_val(v) for k, v in d.items()}
+    if current == 0 or current + incoming_bytes <= max_bytes:
+        return
+
+    # Drop the oldest, then shift each backup down one. The final rename moves the
+    # live file aside; the next append recreates it.
+    #
+    # Every step tolerates OSError so a rotation failure never takes down the
+    # write that triggered it — but each one logs. A silent failure here degrades
+    # invisibly: a failed final rename means the live file is never rotated and
+    # every subsequent write re-attempts and re-fails, growing past
+    # audit_log_max_bytes with no operator signal at all.
+    oldest = f"{_audit_log_path}.{backup_count}"
+    try:
+        os.remove(oldest)
+    except FileNotFoundError:
+        pass  # nothing to age out yet — the normal case
+    except OSError as e:
+        log.warning("audit_rotation_step_failed", step="remove_oldest", path=oldest, error=str(e))
+
+    for i in range(backup_count - 1, 0, -1):
+        src, dst = f"{_audit_log_path}.{i}", f"{_audit_log_path}.{i + 1}"
+        if os.path.exists(src):
+            try:
+                os.replace(src, dst)
+            except OSError as e:
+                log.warning(
+                    "audit_rotation_step_failed",
+                    step="shift_backup",
+                    src=src,
+                    dst=dst,
+                    error=str(e),
+                )
+
+    try:
+        os.replace(_audit_log_path, f"{_audit_log_path}.1")
+    except OSError as e:
+        # The one that matters: the live file did not roll, so it will keep
+        # growing and this same failure will repeat on every write.
+        log.error(
+            "audit_rotation_failed",
+            path=_audit_log_path,
+            size_bytes=current,
+            max_bytes=max_bytes,
+            error=str(e),
+        )
+        return
+
+    log.info("audit_log_rotated", path=_audit_log_path, size_bytes=current)
 
 
 def write_audit_entry(
@@ -190,39 +258,9 @@ def write_audit_entry(
     duration_ms: int,
 ) -> None:
     # Scrub credentials from params and result before writing
-    config = get_config()
-    tokens = [
-        t
-        for t in [
-            config.github_token,
-            config.gitea_token,
-            config.gitlab_token,
-            config.woodpecker_token,
-            config.pypi_token,
-            config.pypi_test_token,
-            config.npm_token,
-            config.audit_signing_key,
-            config.auth_token,
-        ]
-        if t and len(t) > 4
-    ]
-
-    def _scrub_str(s: str) -> str:
-        for tok in tokens:
-            s = s.replace(tok, "***")
-        return s
-
-    def _scrub_val(val):
-        if isinstance(val, str):
-            return _scrub_str(val)
-        if isinstance(val, dict):
-            return {k: _scrub_val(v) for k, v in val.items()}
-        if isinstance(val, list):
-            return [_scrub_val(i) for i in val]
-        return val
-
-    safe_params = {k: _scrub_val(v) for k, v in params.items()}
-    safe_result = _scrub_str(result)
+    tokens = _config_tokens()
+    safe_params = {k: _scrub_value(v, tokens) for k, v in params.items()}
+    safe_result = _scrub_value(result, tokens)
 
     entry: dict = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
@@ -241,9 +279,15 @@ def write_audit_entry(
     if audit_dir:
         os.makedirs(audit_dir, exist_ok=True)
 
+    line = json.dumps(entry) + "\n"
     try:
-        with open(_audit_log_path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+        # One lock for check-and-rotate plus write. Under the HTTP transport this
+        # runs on a threadpool, so an unguarded rotate would race a concurrent
+        # append and lose entries.
+        with _write_lock:
+            _rotate_if_needed(len(line.encode()))
+            with open(_audit_log_path, "a") as f:
+                f.write(line)
     except OSError as e:
         log.warning("audit_write_failed", error=str(e))
 

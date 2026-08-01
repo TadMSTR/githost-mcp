@@ -2,7 +2,7 @@
 
 import pytest
 
-from githost_mcp.config import get_config, reset_config
+from githost_mcp.config import get_config, load_config, reset_config
 
 
 def _write_manifest(path, workspace_access):
@@ -434,3 +434,44 @@ def test_explicit_manifest_path_wins_over_readable_default(tmp_path, monkeypatch
     assert config.allowed_repo_roots == [deployed_root]
     assert default_root not in config.allowed_repo_roots
     assert config.allowlist_source == f"manifest:{deployed_file}"
+
+
+# --- integer env parsing ----------------------------------------------------
+#
+# get_config() runs at import time (server.py), so a malformed value used to
+# kill the process with a bare int() traceback naming neither the variable nor
+# the value.
+
+
+@pytest.mark.parametrize(
+    "var", ["METRICS_PORT", "HTTP_PORT", "AUDIT_LOG_MAX_BYTES", "AUDIT_LOG_BACKUP_COUNT"]
+)
+def test_malformed_int_env_names_the_variable(monkeypatch, var):
+    monkeypatch.setenv(var, "not-a-number")
+    reset_config()
+    with pytest.raises(ValueError) as exc:
+        load_config()
+    assert var in str(exc.value), f"error does not name the variable: {exc.value}"
+    assert "not-a-number" in str(exc.value), f"error does not show the bad value: {exc.value}"
+
+
+def test_log_rotation_settings_default_to_audit_values(monkeypatch):
+    monkeypatch.setenv("AUDIT_LOG_MAX_BYTES", "2048")
+    monkeypatch.setenv("AUDIT_LOG_BACKUP_COUNT", "3")
+    monkeypatch.delenv("LOG_MAX_BYTES", raising=False)
+    monkeypatch.delenv("LOG_BACKUP_COUNT", raising=False)
+    reset_config()
+    config = load_config()
+    assert config.log_max_bytes == 2048
+    assert config.log_backup_count == 3
+
+
+def test_log_rotation_settings_are_independently_tunable(monkeypatch):
+    monkeypatch.setenv("AUDIT_LOG_MAX_BYTES", "2048")
+    monkeypatch.setenv("LOG_MAX_BYTES", "4096")
+    monkeypatch.setenv("LOG_BACKUP_COUNT", "9")
+    reset_config()
+    config = load_config()
+    assert config.audit_log_max_bytes == 2048
+    assert config.log_max_bytes == 4096
+    assert config.log_backup_count == 9

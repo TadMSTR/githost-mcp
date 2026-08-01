@@ -808,3 +808,115 @@ def test_github_issue_write_rejects_bad_method(tools):
     result = tools["github_issue_write"]("owner/repo", "explode")
     assert "error" in result
     assert "method must be one of" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Empty-result IndexError (vikunja #178, id 189)
+#
+# Root cause is PyGithub 2.9.1's PaginatedList._Slice.__iter__: on an unfetched
+# list __elements is empty but _couldGrow() is True, so `paginated[:limit]`
+# fetches an empty page and then indexes into it. Every `[:limit]` site is hit,
+# not just github_pr_list. Iteration (PaginatedListBase.__iter__) never indexes,
+# so it is safe.
+#
+# These build a REAL PaginatedList — the pre-existing tests pass plain Python
+# lists, which slice happily, and that is exactly why 355 green tests coexisted
+# with a live-reproducible bug.
+# ---------------------------------------------------------------------------
+
+
+def _empty_paginated(content_class):
+    """A PaginatedList that resolves to zero results — the shape that raises."""
+    from github.PaginatedList import PaginatedList
+
+    requester = MagicMock()
+    requester.requestJsonAndCheck.return_value = ({}, [])
+    return PaginatedList(content_class, requester, "/repos/owner/repo/items", {})
+
+
+def test_empty_paginated_list_slicing_still_raises():
+    """Precondition. If PyGithub ever fixes this, these regression tests stop
+    testing anything and this is the one that says so."""
+    from github.PullRequest import PullRequest
+
+    with pytest.raises(IndexError):
+        list(_empty_paginated(PullRequest)[:20])
+    # ...while plain iteration is safe — which is why the fix is islice.
+    assert list(_empty_paginated(PullRequest)) == []
+
+
+def test_github_pr_list_empty_returns_empty_not_error(tools):
+    """Reproduced live 2026-08-01: returned {"error": "list index out of range"},
+    making "no open PRs" indistinguishable from a real API failure."""
+    from github.PullRequest import PullRequest
+
+    mock_repo = MagicMock()
+    mock_repo.get_pulls.return_value = _empty_paginated(PullRequest)
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_list"]("owner/repo", state="open")
+
+    assert "error" not in result, f"empty PR list reported an error: {result}"
+    assert result["prs"] == []
+
+
+def test_github_workflow_list_empty_returns_empty_not_error(tools):
+    from github.WorkflowRun import WorkflowRun
+
+    mock_repo = MagicMock()
+    mock_repo.get_workflow_runs.return_value = _empty_paginated(WorkflowRun)
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_workflow_list"]("owner/repo")
+
+    assert "error" not in result, f"empty workflow list reported an error: {result}"
+    assert result["runs"] == []
+
+
+def test_github_issue_read_list_empty_returns_empty_not_error(tools):
+    from github.Issue import Issue
+
+    mock_repo = MagicMock()
+    mock_repo.get_issues.return_value = _empty_paginated(Issue)
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_issue_read"]("owner/repo", "list")
+
+    assert "error" not in result, f"empty issue list reported an error: {result}"
+    assert result["issues"] == []
+
+
+def test_github_pr_list_still_honours_limit(tools):
+    """islice must cap the result the way the slice did."""
+    prs = []
+    for n in range(5):
+        pr = MagicMock()
+        pr.number = n
+        pr.title = f"PR {n}"
+        pr.state = "open"
+        pr.user.login = "devuser"
+        pr.base.ref = "main"
+        pr.head.ref = f"feature-{n}"
+        pr.created_at.isoformat.return_value = "2026-05-01T00:00:00"
+        pr.html_url = f"https://github.com/owner/repo/pull/{n}"
+        prs.append(pr)
+
+    mock_repo = MagicMock()
+    mock_repo.get_pulls.return_value = prs
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_repo
+
+    p1, p2 = _patch_gh(mock_gh)
+    with p1, p2:
+        result = tools["github_pr_list"]("owner/repo", limit=2)
+
+    assert len(result["prs"]) == 2

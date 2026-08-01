@@ -302,6 +302,60 @@ async def test_woodpecker_check_response_500(tools):
 
 
 @pytest.mark.asyncio
+async def test_woodpecker_error_includes_response_body(tools):
+    """vikunja #277 (id 288): the body is the only thing that says why. Dropping it
+    is what made #269's 400 undiagnosable for the tool's entire life."""
+    with respx.mock:
+        _lookup_mock()
+        respx.post(f"{REPO_URL}/pipelines").mock(
+            return_value=httpx.Response(400, text="Bad Request: branch not found")
+        )
+        result = await tools["woodpecker_trigger"]("owner/repo")
+    assert "error" in result
+    assert "400" in result["error"]
+    assert "branch not found" in result["error"], f"response body was discarded: {result['error']}"
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_error_body_is_bounded(tools):
+    """A large body must not be echoed wholesale into the result."""
+    with respx.mock:
+        _lookup_mock()
+        respx.post(f"{REPO_URL}/pipelines").mock(return_value=httpx.Response(400, text="x" * 5000))
+        result = await tools["woodpecker_trigger"]("owner/repo")
+    assert "error" in result
+    assert result["error"].count("x") <= 300
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_error_body_is_scrubbed(tools):
+    """SC-14: the body can echo back a credential-bearing URL."""
+    leaked = "https://ted:ghp_LEAKED_TOKEN@gitea.example.com/o/r.git"
+    with respx.mock:
+        _lookup_mock()
+        respx.post(f"{REPO_URL}/pipelines").mock(
+            return_value=httpx.Response(400, text=f"clone failed for {leaked}")
+        )
+        result = await tools["woodpecker_trigger"]("owner/repo")
+    assert "error" in result
+    assert "ghp_LEAKED_TOKEN" not in result["error"], (
+        f"credential reached the caller: {result['error']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_error_with_empty_body_omits_separator(tools):
+    """No body means no dangling colon."""
+    with respx.mock:
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/9").mock(return_value=httpx.Response(500, text=""))
+        result = await tools["woodpecker_status"]("owner/repo", 9)
+    assert "error" in result
+    assert "500" in result["error"]
+    assert not result["error"].rstrip().endswith(":")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "tool_name,args",
     [

@@ -40,7 +40,14 @@ def _check_response(resp: httpx.Response) -> None:
     if resp.status_code == 403:
         raise ValueError("Woodpecker authorization denied")
     if resp.status_code >= 400:
-        raise ValueError(f"Woodpecker API error {resp.status_code}")
+        # The response body is the only thing that says *why*. Dropping it is what
+        # made #269 expensive: woodpecker_trigger returned "API error 400" for its
+        # entire life with no hint that the request form was wrong. Bounded and
+        # scrubbed — the body can echo back a credential-bearing URL (SC-14).
+        detail = scrub(resp.text[:300]).strip()
+        raise ValueError(
+            f"Woodpecker API error {resp.status_code}" + (f": {detail}" if detail else "")
+        )
 
 
 async def _woodpecker_repo_id(
