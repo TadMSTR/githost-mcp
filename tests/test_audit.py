@@ -287,3 +287,97 @@ def test_concurrent_writes_do_not_lose_entries_across_rotation(rotating_audit_en
     # a corrupt/interleaved line, which would fail json.loads in _read_entries above.
     assert seen, "no entries survived at all"
     assert all(r.startswith("/repo/") for r in seen), "interleaved write corrupted a line"
+
+
+# --- rotation failure is logged, not silent (audit LOW, batch 2) -------------
+
+
+def test_rotation_failure_logs_and_does_not_break_the_write(rotating_audit_env, monkeypatch):
+    """A failed final rename means the live file never rolls and every subsequent
+    write re-fails the same way. Silently, that grows past max_bytes forever."""
+    _write_n(6)  # get the live file over the 1024-byte threshold
+
+    real_replace = os.replace
+
+    def failing_replace(src, dst):
+        if str(src) == str(rotating_audit_env / "audit.jsonl"):
+            raise OSError(13, "Permission denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+
+    events = []
+    monkeypatch.setattr(
+        "githost_mcp.audit.log",
+        type(
+            "L",
+            (),
+            {
+                m: staticmethod(lambda _e=None, **k: events.append((_e, k)))
+                for m in ("info", "warning", "error")
+            },
+        )(),
+    )
+
+    write_audit_entry("git_status", "local", "/tmp/after", {}, "ok", 1)
+
+    assert any(e == "audit_rotation_failed" for e, _ in events), (
+        f"a failed rotation must not be silent: {events}"
+    )
+    # The entry itself must still land — rotation failure never loses an audit entry.
+    assert any(e["repo"] == "/tmp/after" for e in _read_entries(rotating_audit_env / "audit.jsonl"))
+
+
+def test_rotation_backup_shift_failure_is_logged(rotating_audit_env, monkeypatch):
+    """A mid-chain shift failure can leave backup numbering inconsistent."""
+    _write_n(20)  # produce at least one backup to shift
+
+    real_replace = os.replace
+
+    def failing_replace(src, dst):
+        if str(src).endswith(".1"):
+            raise OSError(5, "I/O error")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+
+    events = []
+    monkeypatch.setattr(
+        "githost_mcp.audit.log",
+        type(
+            "L",
+            (),
+            {
+                m: staticmethod(lambda _e=None, **k: events.append((_e, k)))
+                for m in ("info", "warning", "error")
+            },
+        )(),
+    )
+
+    _write_n(20)
+
+    assert any(e == "audit_rotation_step_failed" for e, _ in events), (
+        f"a failed backup shift must not be silent: {events}"
+    )
+
+
+def test_missing_oldest_backup_is_not_logged_as_a_failure(rotating_audit_env, monkeypatch):
+    """The common case — nothing to age out yet — must stay quiet."""
+    events = []
+    monkeypatch.setattr(
+        "githost_mcp.audit.log",
+        type(
+            "L",
+            (),
+            {
+                m: staticmethod(lambda _e=None, **k: events.append((_e, k)))
+                for m in ("info", "warning", "error")
+            },
+        )(),
+    )
+
+    _write_n(6)
+
+    assert not any(e == "audit_rotation_step_failed" for e, _ in events), (
+        f"absent backup file logged as a failure: {events}"
+    )

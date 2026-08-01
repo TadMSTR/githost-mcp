@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import hmac as _hmac
 import json
@@ -205,16 +204,48 @@ def _rotate_if_needed(incoming_bytes: int) -> None:
 
     # Drop the oldest, then shift each backup down one. The final rename moves the
     # live file aside; the next append recreates it.
+    #
+    # Every step tolerates OSError so a rotation failure never takes down the
+    # write that triggered it — but each one logs. A silent failure here degrades
+    # invisibly: a failed final rename means the live file is never rotated and
+    # every subsequent write re-attempts and re-fails, growing past
+    # audit_log_max_bytes with no operator signal at all.
     oldest = f"{_audit_log_path}.{backup_count}"
-    with contextlib.suppress(OSError):
+    try:
         os.remove(oldest)
+    except FileNotFoundError:
+        pass  # nothing to age out yet — the normal case
+    except OSError as e:
+        log.warning("audit_rotation_step_failed", step="remove_oldest", path=oldest, error=str(e))
+
     for i in range(backup_count - 1, 0, -1):
         src, dst = f"{_audit_log_path}.{i}", f"{_audit_log_path}.{i + 1}"
         if os.path.exists(src):
-            with contextlib.suppress(OSError):
+            try:
                 os.replace(src, dst)
-    with contextlib.suppress(OSError):
+            except OSError as e:
+                log.warning(
+                    "audit_rotation_step_failed",
+                    step="shift_backup",
+                    src=src,
+                    dst=dst,
+                    error=str(e),
+                )
+
+    try:
         os.replace(_audit_log_path, f"{_audit_log_path}.1")
+    except OSError as e:
+        # The one that matters: the live file did not roll, so it will keep
+        # growing and this same failure will repeat on every write.
+        log.error(
+            "audit_rotation_failed",
+            path=_audit_log_path,
+            size_bytes=current,
+            max_bytes=max_bytes,
+            error=str(e),
+        )
+        return
+
     log.info("audit_log_rotated", path=_audit_log_path, size_bytes=current)
 
 
