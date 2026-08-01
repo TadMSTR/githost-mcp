@@ -117,7 +117,7 @@ def register(mcp) -> None:
             if outcome.failed:
                 reason = outcome.summary or "tag push rejected by remote"
                 log.warning("release_tag_push_failed", tag=tag, flags=outcome.flags, summary=reason)
-                _rollback(repo, tag, created, urls)
+                await _rollback(repo, tag, created, urls)
                 ac.finish("error:git_tag_push")
                 return {
                     "error": f"Failed to push tag {tag}: {reason}",
@@ -127,7 +127,7 @@ def register(mcp) -> None:
                 }
             log.info("release_tag_created", tag=tag)
         except Exception as e:
-            _rollback(repo, tag, created, urls)
+            await _rollback(repo, tag, created, urls)
             ac.finish("error:git_tag")
             return {"error": f"Failed to create/push tag: {scrub(str(e))}"}
 
@@ -140,7 +140,7 @@ def register(mcp) -> None:
                 emit_release_target("github", "ok")
             except Exception as e:
                 emit_release_target("github", "error")
-                _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
+                await _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
                 ac.finish("error:github")
                 return {"error": f"GitHub release failed: {e}", "rolled_back": True}
 
@@ -159,7 +159,7 @@ def register(mcp) -> None:
                 emit_release_target("gitea", "ok")
             except Exception as e:
                 emit_release_target("gitea", "error")
-                _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
+                await _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
                 ac.finish("error:gitea")
                 return {"error": f"Gitea release failed: {e}", "rolled_back": True}
 
@@ -179,7 +179,7 @@ def register(mcp) -> None:
                 emit_release_target("gitlab", "ok")
             except Exception as e:
                 emit_release_target("gitlab", "error")
-                _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
+                await _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
                 ac.finish("error:gitlab")
                 return {"error": f"GitLab release failed: {e}", "rolled_back": True}
 
@@ -255,7 +255,7 @@ def register(mcp) -> None:
         }
 
 
-def _rollback(
+async def _rollback(
     repo,
     tag: str,
     created: list,
@@ -264,6 +264,11 @@ def _rollback(
     gitea_repo: str | None = None,
     gitlab_project: str | None = None,
 ) -> None:
+    """Undo what this release created, best effort.
+
+    Async because the Gitea delete client is async. Every call site is already
+    inside `release()`, so this did not force a signature change further up.
+    """
     log.warning("release_rollback", tag=tag, created=created, orphan_urls=urls)
 
     # Attempt to delete provider releases in reverse creation order
@@ -294,13 +299,31 @@ def _rollback(
                 "rollback_gitlab_release_failed", tag=tag, url=urls.get("gitlab"), error=str(exc)
             )
 
-    if "gitea" in created:
-        # No delete client implemented — log orphan for manual cleanup
+    if "gitea" in created and gitea_repo:
+        try:
+            from .._providers.gitea_client import gitea_delete
+            from ..config import get_config as _gc
+
+            owner = gitea_repo.split("/")[0] if "/" in gitea_repo else _gc().gitea_owner
+            repo_name = gitea_repo.split("/")[-1]
+            await gitea_delete(f"/repos/{owner}/{repo_name}/releases/tags/{tag}")
+            log.info("rollback_deleted_gitea_release", tag=tag)
+        except Exception as exc:
+            # Keep the orphan warning as the fallback it was always meant to be —
+            # it just no longer fires unconditionally.
+            log.warning(
+                "rollback_gitea_orphan",
+                tag=tag,
+                url=urls.get("gitea"),
+                error=scrub(str(exc)),
+                note="Gitea release delete failed; manual cleanup required",
+            )
+    elif "gitea" in created:
         log.warning(
             "rollback_gitea_orphan",
             tag=tag,
             url=urls.get("gitea"),
-            note="Gitea release delete not implemented; manual cleanup required",
+            note="Gitea release created without a repo reference; manual cleanup required",
         )
 
     # Delete local and remote git tag. Best-effort cleanup — a failure here must not

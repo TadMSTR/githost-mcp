@@ -158,14 +158,21 @@ async def test_gitea_failure_after_github_success_rolls_back_github_release(tool
 
 
 @pytest.mark.asyncio
-async def test_gitea_created_rollback_logs_orphan_no_delete_attempted(tools, clean_repo):
-    """Gitea has no release-delete client — rollback must not raise, just log the orphan."""
+async def test_gitea_created_rollback_deletes_the_release(tools, clean_repo):
+    """The rollback path logged "Gitea release delete not implemented" long after
+    gitea_delete / gitea_release_delete were added in the Tier 1 parity build."""
 
     async def _gitea_ok(*a, **kw):
         return {"html_url": "https://gitea.example.com/owner/repo/releases/tag/v1.0.0"}
 
+    deleted = []
+
+    async def _gitea_delete(path, *a, **kw):
+        deleted.append(path)
+
     with (
         patch("githost_mcp._providers.gitea_client.gitea_post", side_effect=_gitea_ok),
+        patch("githost_mcp._providers.gitea_client.gitea_delete", side_effect=_gitea_delete),
         patch("githost_mcp._providers.gitlab_client.get_gitlab", side_effect=ValueError("boom")),
     ):
         result = await tools["release"](
@@ -176,6 +183,40 @@ async def test_gitea_created_rollback_logs_orphan_no_delete_attempted(tools, cle
             gitlab_project="group/proj",
         )
 
+    assert result["rolled_back"] is True
+    assert "GitLab release failed" in result["error"]
+    assert deleted == ["/repos/owner/repo/releases/tags/v1.0.0"], (
+        f"Gitea release was not deleted on rollback: {deleted}"
+    )
+    repo = git.Repo(str(clean_repo))
+    assert "v1.0.0" not in [t.name for t in repo.tags]
+
+
+@pytest.mark.asyncio
+async def test_gitea_rollback_delete_failure_still_logs_orphan(tools, clean_repo):
+    """The orphan warning stays as the fallback — it just no longer fires
+    unconditionally. A failed delete must not mask the original error."""
+
+    async def _gitea_ok(*a, **kw):
+        return {"html_url": "https://gitea.example.com/owner/repo/releases/tag/v1.0.0"}
+
+    async def _gitea_delete_boom(*a, **kw):
+        raise ValueError("Gitea API error 500")
+
+    with (
+        patch("githost_mcp._providers.gitea_client.gitea_post", side_effect=_gitea_ok),
+        patch("githost_mcp._providers.gitea_client.gitea_delete", side_effect=_gitea_delete_boom),
+        patch("githost_mcp._providers.gitlab_client.get_gitlab", side_effect=ValueError("boom")),
+    ):
+        result = await tools["release"](
+            str(clean_repo),
+            "1.0.0",
+            targets=["gitea", "gitlab"],
+            gitea_repo="owner/repo",
+            gitlab_project="group/proj",
+        )
+
+    # The GitLab failure is still what the caller is told about.
     assert result["rolled_back"] is True
     assert "GitLab release failed" in result["error"]
     repo = git.Repo(str(clean_repo))
