@@ -7,7 +7,7 @@ import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
-from ..gitflags import evaluate_push
+from ..gitflags import evaluate_fetch, evaluate_push
 from ..security import scrub, validate_read_path, validate_write_path
 
 log = structlog.get_logger(__name__)
@@ -362,9 +362,28 @@ def register(mcp) -> None:
         try:
             validate_write_path(repo_path)
             repo = _open_repo(repo_path)
-            pull_info = repo.remotes[remote].pull()
+            outcome = evaluate_fetch(repo.remotes[remote].pull())
+
+            if outcome.failed:
+                # FetchInfo.note is the remote's text and can carry a
+                # credential-bearing URL straight to the caller (SC-14) — it is
+                # scrubbed by evaluate_fetch.
+                reason = outcome.summary or "pull rejected by remote"
+                log.warning("pull_failed", remote=remote, flags=outcome.flags, note=reason)
+                ac.finish("error:FetchRejected")
+                # No success-shaped key alongside the error.
+                return {
+                    "error": f"pull from {remote} failed: {reason}",
+                    "remote": remote,
+                    "flags": outcome.flags,
+                    "note": reason,
+                }
+
             ac.finish("ok")
-            return {"remote": remote, "flags": [str(p.flags) for p in pull_info]}
+            result = {"remote": remote, "flags": outcome.flags}
+            if outcome.summary:
+                result["note"] = outcome.summary
+            return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": scrub(str(e))}

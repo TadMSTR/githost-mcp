@@ -306,6 +306,85 @@ def test_git_push_failure_does_not_leak_remote_url_credentials(tools, bare_remot
 
 
 # ---------------------------------------------------------------------------
+# git_pull result integrity (vikunja #274, id 285)
+#
+# git_pull returned {"flags": ["4"]} — a stringified bitmask, no error check, and
+# FetchInfo.note discarded. Note the realistic failure modes (diverged history,
+# clobbering tags) make GitPython raise rather than return error-flagged
+# FetchInfo; the mask itself is covered as a unit in tests/test_gitflags.py.
+# ---------------------------------------------------------------------------
+
+
+def test_git_pull_success_decodes_flags(tools, bare_remote):
+    """Flags must be names, not a stringified bitmask — "4" tells a caller nothing."""
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+
+    other = git.Repo.clone_from(bare.git_dir, str(path.parent / "puller"))
+    other.config_writer().set_value("user", "name", "Other").release()
+    other.config_writer().set_value("user", "email", "o@test.com").release()
+    _commit_file(other, "theirs.txt", "remote work")
+    other.remotes.origin.push(branch)
+
+    # `git pull <remote>` needs an upstream to know which branch to merge.
+    local.remotes.origin.fetch()
+    local.heads[branch].set_tracking_branch(local.remotes.origin.refs[branch])
+
+    result = fns["git_pull"](str(path))
+
+    assert "error" not in result, f"clean pull reported failure: {result}"
+    assert result["flags"], "flags must not be empty for a pull that moved the branch"
+    for flag in result["flags"]:
+        assert not flag.isdigit(), f"flags must be decoded names, got raw bitmask {flag!r}"
+    assert (path / "theirs.txt").exists(), "the pull did not actually land"
+
+
+def test_git_pull_diverged_reports_error(tools, bare_remote):
+    """A pull that cannot merge must report an error, not report ok."""
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+
+    other = git.Repo.clone_from(bare.git_dir, str(path.parent / "divergent"))
+    other.config_writer().set_value("user", "name", "Other").release()
+    other.config_writer().set_value("user", "email", "o@test.com").release()
+    _commit_file(other, "file.txt", "remote edit")
+    other.remotes.origin.push(branch)
+
+    _commit_file(local, "file.txt", "local edit")
+
+    result = fns["git_pull"](str(path))
+
+    assert "error" in result, f"unmergeable pull reported success: {result}"
+    assert "remote" not in result or "flags" not in result, (
+        "failure result must not also carry a success-shaped payload"
+    )
+
+
+def test_git_pull_error_flags_report_failure(tools, bare_remote, monkeypatch):
+    """Defence in depth: if git ever returns error-flagged FetchInfo without
+    raising, the tool must not report ok."""
+    fns, path = tools
+    local = git.Repo(str(path))
+
+    class FakeFetchInfo:
+        flags = git.remote.FetchInfo.ERROR
+        note = "would clobber existing tag"
+
+    monkeypatch.setattr(
+        type(local.remotes[0]), "pull", lambda self, *a, **kw: [FakeFetchInfo()], raising=False
+    )
+
+    result = fns["git_pull"](str(path))
+
+    assert "error" in result, f"error-flagged fetch reported success: {result}"
+    assert "would clobber existing tag" in result["error"], (
+        "FetchInfo.note carries the reason and must be surfaced"
+    )
+
+
+# ---------------------------------------------------------------------------
 # git_tag push result integrity — third instance of the id 276 family.
 #
 # git_tag(push=True) discarded the PushInfo entirely and set "pushed": True
