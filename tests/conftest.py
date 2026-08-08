@@ -20,12 +20,16 @@ def tmp_repo(tmp_path):
 def reset_config(monkeypatch):
     """Reset config singleton between tests.
 
-    Also strips AGENT_ID/AGENT_MANIFEST_PATH so a real manifest on the host
-    machine can't leak into tests that don't opt into the manifest-fallback
-    path explicitly.
+    Also strips AGENT_ID/AGENT_MANIFEST_PATH, and points WORKSPACE_POLICY_PATH
+    at a sentinel path that cannot exist, so a real manifest or a real
+    /etc/forge/workspace-policy.yml on the host machine can't leak into tests
+    that don't opt into that fallback path explicitly. A test that wants to
+    exercise the policy loader sets WORKSPACE_POLICY_PATH itself, after this
+    fixture has already run.
     """
     monkeypatch.delenv("AGENT_ID", raising=False)
     monkeypatch.delenv("AGENT_MANIFEST_PATH", raising=False)
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", "/nonexistent/workspace-policy-test-sentinel.yml")
     from githost_mcp.config import reset_config
 
     reset_config()

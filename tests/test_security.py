@@ -50,7 +50,7 @@ def test_unset_allowed_roots_blocks_all(monkeypatch):
     from githost_mcp.config import reset_config
 
     reset_config()
-    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
+    with pytest.raises(ValueError, match="Write operations are disabled"):
         validate_write_path("/tmp/any/path")
 
 
@@ -59,7 +59,7 @@ def test_empty_allowed_roots_blocks_all(monkeypatch):
     from githost_mcp.config import reset_config
 
     reset_config()
-    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
+    with pytest.raises(ValueError, match="Write operations are disabled"):
         validate_write_path("/tmp/any/path")
 
 
@@ -94,7 +94,7 @@ def test_read_unset_allowed_roots_blocks_all(monkeypatch):
     from githost_mcp.config import reset_config
 
     reset_config()
-    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
+    with pytest.raises(ValueError, match="Read operations are disabled"):
         validate_read_path("/tmp/any/path")
 
 
@@ -136,6 +136,128 @@ def test_manifest_sourced_path_outside_allowed_root_blocked(manifest_allowed_env
     os.makedirs(outside, exist_ok=True)
     with pytest.raises(ValueError, match="not under any allowed root"):
         validate_write_path(outside)
+
+
+# --- read/write split (workspace-policy Phase 1) ------------------------------
+
+
+@pytest.fixture()
+def readonly_manifest_env(tmp_path, monkeypatch):
+    """A manifest with a single access: readonly entry."""
+    import yaml
+
+    ro_root = str(tmp_path / "appdata")
+    os.makedirs(ro_root, exist_ok=True)
+    manifest_path = tmp_path / "developer-agent.yml"
+    with open(manifest_path, "w") as f:
+        yaml.safe_dump(
+            {"workspace_access": [{"path": ro_root, "git_backed": True, "access": "readonly"}]},
+            f,
+        )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", str(manifest_path))
+    from githost_mcp.config import reset_config
+
+    reset_config()
+    yield ro_root, tmp_path
+
+
+def test_readonly_root_allows_read_denies_write(readonly_manifest_env):
+    ro_root, _tmp = readonly_manifest_env
+    repo_path = os.path.join(ro_root, "somerepo")
+    os.makedirs(repo_path, exist_ok=True)
+
+    validate_read_path(repo_path)  # should not raise
+
+    # No write-granting entries at all -> write allowlist is empty -> fail closed.
+    with pytest.raises(ValueError, match="Write operations are disabled"):
+        validate_write_path(repo_path)
+
+
+def test_write_denied_when_globs_granted_but_unenforced(tmp_path, monkeypatch):
+    """Audit MEDIUM (githost-workspace-policy-2026-08): an agent whose grant carries
+    write_globs must not get unrestricted write just because glob enforcement (Phase 3)
+    hasn't landed yet. Silently ignoring the scope would be worse than denying outright.
+    """
+    import yaml
+
+    write_root = str(tmp_path / "repos" / "gitea")
+    os.makedirs(write_root, exist_ok=True)
+    policy_path = tmp_path / "workspace-policy.yml"
+    with open(policy_path, "w") as f:
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "roots": [{"path": write_root}],
+                "default_read": "all",
+                "agents": {
+                    "writer": {
+                        "write_roots": [write_root],
+                        "write_globs": ["docs/**"],
+                    }
+                },
+                "explicit_agents": {},
+            },
+            f,
+        )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "writer")
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", str(policy_path))
+    from githost_mcp.config import reset_config
+
+    reset_config()
+
+    repo_path = os.path.join(write_root, "somerepo")
+    os.makedirs(repo_path, exist_ok=True)
+
+    validate_read_path(repo_path)  # read is unaffected — only write is gated
+
+    with pytest.raises(ValueError, match="glob enforcement is not implemented"):
+        validate_write_path(repo_path)
+
+
+def test_write_allowed_when_no_globs_granted(tmp_path, monkeypatch):
+    """An agent with write_roots but no write_globs (e.g. sysadmin/developer, unrestricted
+    within their roots) must not be caught by the glob-enforcement guard."""
+    import yaml
+
+    write_root = str(tmp_path / "repos" / "gitea")
+    os.makedirs(write_root, exist_ok=True)
+    policy_path = tmp_path / "workspace-policy.yml"
+    with open(policy_path, "w") as f:
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "roots": [{"path": write_root}],
+                "default_read": "all",
+                "agents": {"developer": {"write_roots": [write_root]}},
+                "explicit_agents": {},
+            },
+            f,
+        )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", str(policy_path))
+    from githost_mcp.config import reset_config
+
+    reset_config()
+
+    repo_path = os.path.join(write_root, "somerepo")
+    os.makedirs(repo_path, exist_ok=True)
+    validate_write_path(repo_path)  # should not raise
+
+
+def test_readwrite_root_implies_read(manifest_allowed_env):
+    """A root granted readwrite passes both validators, not just validate_write_path."""
+    allowed, _tmp = manifest_allowed_env
+    repo_path = os.path.join(allowed, "myrepo")
+    os.makedirs(repo_path, exist_ok=True)
+    validate_write_path(repo_path)  # should not raise
+    validate_read_path(repo_path)  # should not raise
 
 
 # --- clean_env (GHOST-11) -----------------------------------------------------

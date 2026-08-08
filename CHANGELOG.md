@@ -2,6 +2,63 @@
 
 ## [Unreleased]
 
+### Added — read/write allowlist split + workspace-policy.yml loader (workspace-policy Phase 1, vikunja #349)
+
+`Config` now has separate `allowed_read_roots` and `allowed_write_roots`, and
+`validate_read_path`/`validate_write_path` check the matching list instead of both running
+identical logic against one shared list. `allowed_repo_roots` remains as a deprecated alias of
+`allowed_write_roots` for any caller not yet migrated.
+
+Resolution order is now `ALLOWED_REPO_ROOTS` env (applies to both lists — unchanged as the
+break-glass override) → `/etc/forge/workspace-policy.yml` (new; path overridable via
+`WORKSPACE_POLICY_PATH`) → agent manifest `workspace_access` (unchanged, now the third
+fallback rather than the second) → empty, fail closed. This build ships with the policy file
+**absent** in production — sysadmin deploys it in a follow-on phase — so today's live
+behaviour is unchanged: with no policy file, resolution falls straight through to the manifest,
+exactly as before this release.
+
+### Security — write denied when a grant carries write_globs but enforcement isn't implemented yet
+
+Audit finding (MEDIUM, `githost-workspace-policy-2026-08`): `_load_policy` loads
+`write_globs`/`write_globs_deny` into `Config`, but glob enforcement itself is Phase 3, not yet
+built. Without a guard, an agent granted a glob-scoped write (e.g. writer, meant to be limited
+to `docs/**`) would silently get **unrestricted** write across its full `allowed_write_roots`
+instead — the glob loaded but never checked. `validate_write_path` now fails closed whenever
+`write_globs`/`write_globs_deny` is non-empty for the resolved config and
+`_GLOB_ENFORCEMENT_IMPLEMENTED` (`security.py`) is `False`. Phase 3 flips that flag when it adds
+enforcement. No live effect today — the policy file isn't deployed yet.
+
+### Changed — policy load failure now logs at error level with a distinct event name
+
+Audit finding (LOW, `githost-workspace-policy-2026-08`): `_load_policy` is only called after
+its caller confirms the policy file exists, so every failure inside it (unreadable, corrupt
+YAML, not a mapping) means "exists but broken", not "absent" — yet it silently falls through
+to the broader, un-globbed manifest allowlist exactly like an absent file would. That was
+logged at `log.warning` under the same event name (`policy_load_failed`) either way. It now
+logs `policy_load_failed_present` at `log.error`, so this failure mode is distinguishable and
+loud enough to alert on once this agent's Loki forwarding is enabled — it is not today (see
+Known Risks in the audit request). The underlying TOCTOU between `os.path.exists()` and
+`open()`, and the case for atomic policy-file writes, is Phase 2's responsibility (sysadmin) —
+tracked separately, not fixed here.
+
+### Changed — `access: readonly` in an agent manifest now grants read (behaviour change, not a bugfix)
+
+Previously, `_load_manifest_roots` admitted an entry to the single shared allowlist only when
+`access: readwrite`; any other value — including `readonly` — was dropped entirely, so
+`access: readonly` granted **no githost-mcp access at all**, not even read. This was documented
+and deferred (see the removed docstring at old `config.py:86-90`) and was the root cause behind
+repeated per-agent read-grant gaps (vikunja #203/#332/#308).
+
+With the read/write split, `access: readonly` now populates `allowed_read_roots` (still not
+`allowed_write_roots`). **This changes what an existing `access: readonly` entry in a deployed
+manifest means** — any agent manifest already carrying a `git_backed: true`, `access: readonly`
+entry gains read access to that path, which it did not have before. One `access: readonly`
+entry exists on forge today (`sysadmin-agent.yml`, `/mnt/atlas/`), but it is not `git_backed:
+true` and so remains excluded by that separate, unchanged gate — no live entry is affected by
+this deploy. Still a semantics change to a manifest key already in the schema, not merely a fix
+to unreleased code, and the next `git_backed: true` + `access: readonly` entry added to any
+manifest will grant read the moment this ships, with no code change required.
+
 ## [0.10.0] — 2026-08-01
 
 ### Fixed — reliability batch 2: unchecked pushes, empty-result crash, audit log rotation (vikunja id 311)
