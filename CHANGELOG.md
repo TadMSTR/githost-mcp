@@ -17,6 +17,17 @@ fallback rather than the second) → empty, fail closed. This build ships with t
 behaviour is unchanged: with no policy file, resolution falls straight through to the manifest,
 exactly as before this release.
 
+### Security — write denied when a grant carries write_globs but enforcement isn't implemented yet
+
+Audit finding (MEDIUM, `githost-workspace-policy-2026-08`): `_load_policy` loads
+`write_globs`/`write_globs_deny` into `Config`, but glob enforcement itself is Phase 3, not yet
+built. Without a guard, an agent granted a glob-scoped write (e.g. writer, meant to be limited
+to `docs/**`) would silently get **unrestricted** write across its full `allowed_write_roots`
+instead — the glob loaded but never checked. `validate_write_path` now fails closed whenever
+`write_globs`/`write_globs_deny` is non-empty for the resolved config and
+`_GLOB_ENFORCEMENT_IMPLEMENTED` (`security.py`) is `False`. Phase 3 flips that flag when it adds
+enforcement. No live effect today — the policy file isn't deployed yet.
+
 ### Changed — `access: readonly` in an agent manifest now grants read (behaviour change, not a bugfix)
 
 Previously, `_load_manifest_roots` admitted an entry to the single shared allowlist only when
