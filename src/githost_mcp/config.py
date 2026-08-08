@@ -161,16 +161,26 @@ def _load_policy(
     inherited, are both deliberate denials, not gaps to patch by falling back
     to the manifest. A caller must not treat an empty-but-successfully-parsed
     result as "no match" — see _resolve_allowed_roots.
+
+    Only called after the caller's own ``os.path.exists(policy_path)`` just
+    confirmed the file present, so every failure branch here means "exists but
+    unreadable/corrupt" (a transient NFS hiccup, a non-atomic write caught
+    mid-write, permissions) — never "absent". That silently falls through to
+    the broader, un-globbed manifest allowlist exactly like a genuinely-absent
+    file would, which is worth paging on, not just noting: hence log.error with
+    a distinct event name rather than the log.warning used elsewhere in this
+    module for expected/benign fallback paths. (githost-workspace-policy-2026-08
+    audit, LOW.)
     """
     try:
         with open(policy_path) as f:
             data = yaml.safe_load(f)
     except (OSError, yaml.YAMLError) as e:
-        log.warning("policy_load_failed", path=policy_path, error=str(e))
+        log.error("policy_load_failed_present", path=policy_path, error=str(e))
         return None
 
     if not isinstance(data, dict):
-        log.warning("policy_load_failed", path=policy_path, error="not a mapping")
+        log.error("policy_load_failed_present", path=policy_path, error="not a mapping")
         return None
 
     roots_raw = data.get("roots") or []

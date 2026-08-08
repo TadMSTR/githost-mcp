@@ -28,6 +28,19 @@ instead — the glob loaded but never checked. `validate_write_path` now fails c
 `_GLOB_ENFORCEMENT_IMPLEMENTED` (`security.py`) is `False`. Phase 3 flips that flag when it adds
 enforcement. No live effect today — the policy file isn't deployed yet.
 
+### Changed — policy load failure now logs at error level with a distinct event name
+
+Audit finding (LOW, `githost-workspace-policy-2026-08`): `_load_policy` is only called after
+its caller confirms the policy file exists, so every failure inside it (unreadable, corrupt
+YAML, not a mapping) means "exists but broken", not "absent" — yet it silently falls through
+to the broader, un-globbed manifest allowlist exactly like an absent file would. That was
+logged at `log.warning` under the same event name (`policy_load_failed`) either way. It now
+logs `policy_load_failed_present` at `log.error`, so this failure mode is distinguishable and
+loud enough to alert on once this agent's Loki forwarding is enabled — it is not today (see
+Known Risks in the audit request). The underlying TOCTOU between `os.path.exists()` and
+`open()`, and the case for atomic policy-file writes, is Phase 2's responsibility (sysadmin) —
+tracked separately, not fixed here.
+
 ### Changed — `access: readonly` in an agent manifest now grants read (behaviour change, not a bugfix)
 
 Previously, `_load_manifest_roots` admitted an entry to the single shared allowlist only when

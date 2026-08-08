@@ -669,6 +669,48 @@ def test_malformed_policy_falls_back_to_manifest(tmp_path, policy_path, manifest
     assert config.allowlist_source == f"manifest:{manifest_path}"
 
 
+def test_malformed_policy_logs_error_not_warning(tmp_path, policy_path, manifest_path, monkeypatch):
+    """githost-workspace-policy-2026-08 audit LOW: a policy file that exists but fails to
+    load must log louder than the ordinary (file-absent) fallback case, since it silently
+    resurrects the broader manifest allowlist. log.error, distinct event name."""
+    import githost_mcp.config as config_mod
+
+    captured = []
+
+    class _RecordingLogger:
+        def error(self, event, **kw):
+            captured.append(("error", event, kw))
+
+        def warning(self, event, **kw):
+            captured.append(("warning", event, kw))
+
+        def info(self, event, **kw):
+            pass
+
+    git_root = str(tmp_path / "repos" / "personal")
+    _write_manifest(manifest_path, [{"path": git_root, "git_backed": True, "access": "readwrite"}])
+    with open(policy_path, "w") as f:
+        f.write("agents: [{unterminated\n")
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", policy_path)
+    monkeypatch.setattr(config_mod, "log", _RecordingLogger())
+
+    reset_config()
+    get_config()
+
+    errors = [(event, kw) for level, event, kw in captured if level == "error"]
+    assert len(errors) == 1
+    assert errors[0][0] == "policy_load_failed_present"
+    assert errors[0][1]["path"] == policy_path
+    warnings_for_policy = [
+        kw for level, event, kw in captured if level == "warning" and "policy" in event
+    ]
+    assert warnings_for_policy == []
+
+
 def test_empty_policy_fails_closed_on_both_lists(tmp_path, policy_path, manifest_path, monkeypatch):
     """A policy that loads but has no roots/agents at all -> empty, and still
     authoritative (does not fall through to the manifest)."""
