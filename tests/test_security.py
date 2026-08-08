@@ -50,7 +50,7 @@ def test_unset_allowed_roots_blocks_all(monkeypatch):
     from githost_mcp.config import reset_config
 
     reset_config()
-    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
+    with pytest.raises(ValueError, match="Write operations are disabled"):
         validate_write_path("/tmp/any/path")
 
 
@@ -59,7 +59,7 @@ def test_empty_allowed_roots_blocks_all(monkeypatch):
     from githost_mcp.config import reset_config
 
     reset_config()
-    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
+    with pytest.raises(ValueError, match="Write operations are disabled"):
         validate_write_path("/tmp/any/path")
 
 
@@ -94,7 +94,7 @@ def test_read_unset_allowed_roots_blocks_all(monkeypatch):
     from githost_mcp.config import reset_config
 
     reset_config()
-    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
+    with pytest.raises(ValueError, match="Read operations are disabled"):
         validate_read_path("/tmp/any/path")
 
 
@@ -136,6 +136,53 @@ def test_manifest_sourced_path_outside_allowed_root_blocked(manifest_allowed_env
     os.makedirs(outside, exist_ok=True)
     with pytest.raises(ValueError, match="not under any allowed root"):
         validate_write_path(outside)
+
+
+# --- read/write split (workspace-policy Phase 1) ------------------------------
+
+
+@pytest.fixture()
+def readonly_manifest_env(tmp_path, monkeypatch):
+    """A manifest with a single access: readonly entry."""
+    import yaml
+
+    ro_root = str(tmp_path / "appdata")
+    os.makedirs(ro_root, exist_ok=True)
+    manifest_path = tmp_path / "developer-agent.yml"
+    with open(manifest_path, "w") as f:
+        yaml.safe_dump(
+            {"workspace_access": [{"path": ro_root, "git_backed": True, "access": "readonly"}]},
+            f,
+        )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", str(manifest_path))
+    from githost_mcp.config import reset_config
+
+    reset_config()
+    yield ro_root, tmp_path
+
+
+def test_readonly_root_allows_read_denies_write(readonly_manifest_env):
+    ro_root, _tmp = readonly_manifest_env
+    repo_path = os.path.join(ro_root, "somerepo")
+    os.makedirs(repo_path, exist_ok=True)
+
+    validate_read_path(repo_path)  # should not raise
+
+    # No write-granting entries at all -> write allowlist is empty -> fail closed.
+    with pytest.raises(ValueError, match="Write operations are disabled"):
+        validate_write_path(repo_path)
+
+
+def test_readwrite_root_implies_read(manifest_allowed_env):
+    """A root granted readwrite passes both validators, not just validate_write_path."""
+    allowed, _tmp = manifest_allowed_env
+    repo_path = os.path.join(allowed, "myrepo")
+    os.makedirs(repo_path, exist_ok=True)
+    validate_write_path(repo_path)  # should not raise
+    validate_read_path(repo_path)  # should not raise
 
 
 # --- clean_env (GHOST-11) -----------------------------------------------------

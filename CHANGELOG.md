@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Added — read/write allowlist split + workspace-policy.yml loader (workspace-policy Phase 1, vikunja #349)
+
+`Config` now has separate `allowed_read_roots` and `allowed_write_roots`, and
+`validate_read_path`/`validate_write_path` check the matching list instead of both running
+identical logic against one shared list. `allowed_repo_roots` remains as a deprecated alias of
+`allowed_write_roots` for any caller not yet migrated.
+
+Resolution order is now `ALLOWED_REPO_ROOTS` env (applies to both lists — unchanged as the
+break-glass override) → `/etc/forge/workspace-policy.yml` (new; path overridable via
+`WORKSPACE_POLICY_PATH`) → agent manifest `workspace_access` (unchanged, now the third
+fallback rather than the second) → empty, fail closed. This build ships with the policy file
+**absent** in production — sysadmin deploys it in a follow-on phase — so today's live
+behaviour is unchanged: with no policy file, resolution falls straight through to the manifest,
+exactly as before this release.
+
+### Changed — `access: readonly` in an agent manifest now grants read (behaviour change, not a bugfix)
+
+Previously, `_load_manifest_roots` admitted an entry to the single shared allowlist only when
+`access: readwrite`; any other value — including `readonly` — was dropped entirely, so
+`access: readonly` granted **no githost-mcp access at all**, not even read. This was documented
+and deferred (see the removed docstring at old `config.py:86-90`) and was the root cause behind
+repeated per-agent read-grant gaps (vikunja #203/#332/#308).
+
+With the read/write split, `access: readonly` now populates `allowed_read_roots` (still not
+`allowed_write_roots`). **This changes what an existing `access: readonly` entry in a deployed
+manifest means** — any agent manifest already carrying a `git_backed: true`, `access: readonly`
+entry gains read access to that path, which it did not have before. One `access: readonly`
+entry exists on forge today (`sysadmin-agent.yml`, `/mnt/atlas/`), but it is not `git_backed:
+true` and so remains excluded by that separate, unchanged gate — no live entry is affected by
+this deploy. Still a semantics change to a manifest key already in the schema, not merely a fix
+to unreleased code, and the next `git_backed: true` + `access: readonly` entry added to any
+manifest will grant read the moment this ships, with no code change required.
+
 ## [0.10.0] — 2026-08-01
 
 ### Fixed — reliability batch 2: unchecked pushes, empty-result crash, audit log rotation (vikunja id 311)

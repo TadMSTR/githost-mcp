@@ -33,6 +33,9 @@ def test_explicit_env_wins_over_manifest(tmp_path, manifest_path, monkeypatch):
 
     config = get_config()
     assert config.allowed_repo_roots == [env_root]
+    assert config.allowed_write_roots == [env_root]
+    # The env escape hatch applies to both lists, not write-only.
+    assert config.allowed_read_roots == [env_root]
     assert config.allowlist_source == "env"
 
 
@@ -85,7 +88,7 @@ def test_no_env_no_manifest_fails_closed(tmp_path, monkeypatch):
 
     from githost_mcp.security import validate_write_path
 
-    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
+    with pytest.raises(ValueError, match="Write operations are disabled"):
         validate_write_path("/tmp/any/path")
 
 
@@ -132,20 +135,22 @@ def test_manifest_with_no_workspace_access_key_fails_closed(tmp_path, manifest_p
     assert config.allowlist_source == "none"
 
 
-# --- access: filter on the manifest fallback (M-2) ----------------------------
+# --- access: filter on the manifest fallback (M-2, revised for the read/write split) --
 #
-# allowed_repo_roots is one list consulted by both validate_read_path() and
-# validate_write_path(), so "not readwrite" means no githost-mcp access at all.
+# allowed_read_roots and allowed_write_roots are now separate lists.
+# access: readwrite grants both; access: readonly grants read only (Phase 1 —
+# previously it granted nothing at all, see CHANGELOG). Anything else, including
+# absent, grants neither.
 
 
 @pytest.mark.parametrize(
     "access",
-    ["readonly", "read-only", "rw", "READWRITE", "", None],
+    ["read-only", "rw", "READWRITE", "", None],
 )
-def test_manifest_entry_excluded_unless_access_is_readwrite(
+def test_manifest_entry_excluded_unless_recognized_access(
     tmp_path, manifest_path, monkeypatch, access
 ):
-    """Anything that is not exactly `readwrite` fails closed, including absent."""
+    """Anything that is not exactly `readwrite` or `readonly` fails closed, including absent."""
     git_root = str(tmp_path / "repos" / "personal")
     entry = {"path": git_root, "git_backed": True}
     if access is not None:
@@ -158,7 +163,8 @@ def test_manifest_entry_excluded_unless_access_is_readwrite(
     reset_config()
 
     config = get_config()
-    assert config.allowed_repo_roots == []
+    assert config.allowed_read_roots == []
+    assert config.allowed_write_roots == []
     assert config.allowlist_source == "none"
 
 
@@ -171,10 +177,30 @@ def test_manifest_readwrite_entry_included(tmp_path, manifest_path, monkeypatch)
     monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
     reset_config()
 
-    assert get_config().allowed_repo_roots == [git_root]
+    config = get_config()
+    assert config.allowed_repo_roots == [git_root]
+    assert config.allowed_write_roots == [git_root]
+    assert config.allowed_read_roots == [git_root]
 
 
-def test_readonly_entry_dropped_from_mixed_manifest(tmp_path, manifest_path, monkeypatch):
+def test_manifest_readonly_entry_grants_read_only(tmp_path, manifest_path, monkeypatch):
+    """Phase 1 behaviour change: access: readonly now grants read, still not write."""
+    ro_root = str(tmp_path / "appdata")
+    _write_manifest(manifest_path, [{"path": ro_root, "git_backed": True, "access": "readonly"}])
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_read_roots == [ro_root]
+    assert config.allowed_write_roots == []
+    assert config.allowed_repo_roots == []  # deprecated alias tracks write, not read
+    assert config.allowlist_source == f"manifest:{manifest_path}"
+
+
+def test_readonly_entry_alongside_readwrite_in_mixed_manifest(tmp_path, manifest_path, monkeypatch):
     """A readonly entry alongside readwrite ones is the realistic shape."""
     rw_root = str(tmp_path / "repos" / "personal")
     ro_root = str(tmp_path / "appdata")
@@ -192,12 +218,13 @@ def test_readonly_entry_dropped_from_mixed_manifest(tmp_path, manifest_path, mon
     reset_config()
 
     config = get_config()
-    assert config.allowed_repo_roots == [rw_root]
-    assert ro_root not in config.allowed_repo_roots
+    assert config.allowed_write_roots == [rw_root]
+    assert ro_root not in config.allowed_write_roots
+    assert set(config.allowed_read_roots) == {rw_root, ro_root}
 
 
-def test_readonly_git_backed_entry_rejects_writes_and_reads(tmp_path, manifest_path, monkeypatch):
-    """The negative test M-2 describes: readonly + git_backed must not grant write.
+def test_readonly_git_backed_entry_grants_read_denies_write(tmp_path, manifest_path, monkeypatch):
+    """The M-2 property, updated for Phase 1: readonly + git_backed grants read, not write.
 
     Exercises the validators rather than just the parsed list, so a future change
     that reintroduces the entry downstream still fails here.
@@ -218,17 +245,19 @@ def test_readonly_git_backed_entry_rejects_writes_and_reads(tmp_path, manifest_p
 
     from githost_mcp.security import validate_read_path, validate_write_path
 
-    # No readwrite entries at all -> allowlist is empty -> fail closed.
-    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
+    validate_read_path(str(repo_under_ro))  # should not raise — this is the Phase 1 fix
+
+    # No write-granting entries at all -> write allowlist is empty -> fail closed.
+    with pytest.raises(ValueError, match="Write operations are disabled"):
         validate_write_path(str(repo_under_ro))
-    with pytest.raises(ValueError, match="ALLOWED_REPO_ROOTS is not set"):
-        validate_read_path(str(repo_under_ro))
 
-    assert os.path.isdir(repo_under_ro)  # the path exists; access is what's denied
+    assert os.path.isdir(repo_under_ro)  # the path exists; write is what's denied
 
 
-def test_readonly_entry_blocked_when_other_roots_are_allowed(tmp_path, manifest_path, monkeypatch):
-    """Same as above but with a non-empty allowlist, so the error path differs."""
+def test_readonly_entry_write_blocked_when_other_roots_are_allowed(
+    tmp_path, manifest_path, monkeypatch
+):
+    """Same as above but with a non-empty write allowlist, so the error path differs."""
     rw_root = tmp_path / "repos"
     ro_root = tmp_path / "appdata"
     (rw_root / "ok").mkdir(parents=True)
@@ -249,11 +278,10 @@ def test_readonly_entry_blocked_when_other_roots_are_allowed(tmp_path, manifest_
     from githost_mcp.security import validate_read_path, validate_write_path
 
     validate_write_path(str(rw_root / "ok"))  # should not raise
+    validate_read_path(str(ro_root / "denied"))  # should not raise — readonly grants read
 
     with pytest.raises(ValueError, match="not under any allowed root"):
         validate_write_path(str(ro_root / "denied"))
-    with pytest.raises(ValueError, match="not under any allowed root"):
-        validate_read_path(str(ro_root / "denied"))
 
 
 def test_non_git_backed_readwrite_entry_still_excluded(tmp_path, manifest_path, monkeypatch):
@@ -268,7 +296,9 @@ def test_non_git_backed_readwrite_entry_still_excluded(tmp_path, manifest_path, 
     monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
     reset_config()
 
-    assert get_config().allowed_repo_roots == []
+    config = get_config()
+    assert config.allowed_repo_roots == []
+    assert config.allowed_read_roots == []
 
 
 def test_skipped_entry_is_logged(tmp_path, manifest_path, monkeypatch):
@@ -279,6 +309,36 @@ def test_skipped_entry_is_logged(tmp_path, manifest_path, monkeypatch):
     time this test runs in a full-suite pass config.py's bound logger is already
     cached and a late structlog.configure() would not reach it.
     """
+    import githost_mcp.config as config_mod
+
+    captured = []
+
+    class _RecordingLogger:
+        def warning(self, event, **kw):
+            captured.append((event, kw))
+
+        def info(self, event, **kw):
+            pass
+
+    bad_root = str(tmp_path / "appdata")
+    _write_manifest(manifest_path, [{"path": bad_root, "git_backed": True, "access": "rw"}])
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(config_mod, "log", _RecordingLogger())
+
+    reset_config()
+    get_config()
+
+    skipped = [kw for event, kw in captured if event == "manifest_allowlist_entry_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["entry_path"] == bad_root
+    assert skipped[0]["access"] == "rw"
+
+
+def test_readonly_entry_is_not_logged_as_skipped(tmp_path, manifest_path, monkeypatch):
+    """readonly is now a recognized, granted access level — it must not log as skipped."""
     import githost_mcp.config as config_mod
 
     captured = []
@@ -302,9 +362,7 @@ def test_skipped_entry_is_logged(tmp_path, manifest_path, monkeypatch):
     get_config()
 
     skipped = [kw for event, kw in captured if event == "manifest_allowlist_entry_skipped"]
-    assert len(skipped) == 1
-    assert skipped[0]["entry_path"] == ro_root
-    assert skipped[0]["access"] == "readonly"
+    assert skipped == []
 
 
 def test_transport_defaults_to_stdio_loopback_no_auth(monkeypatch):
@@ -434,6 +492,249 @@ def test_explicit_manifest_path_wins_over_readable_default(tmp_path, monkeypatch
     assert config.allowed_repo_roots == [deployed_root]
     assert default_root not in config.allowed_repo_roots
     assert config.allowlist_source == f"manifest:{deployed_file}"
+
+
+# --- workspace-policy.yml loader (Phase 1) -----------------------------------
+#
+# Resolution order is env > policy > manifest > empty. Phase 1 ships with the
+# policy file absent in production (sysadmin deploys it in Phase 2), so the
+# "file missing" case above (falls through to manifest) is the live behaviour
+# today — these tests cover the loader itself and the precedence.
+
+
+def _write_policy(path, data):
+    import yaml
+
+    with open(path, "w") as f:
+        yaml.safe_dump(data, f)
+
+
+@pytest.fixture()
+def policy_path(tmp_path):
+    return str(tmp_path / "workspace-policy.yml")
+
+
+def test_missing_policy_file_falls_back_to_manifest(tmp_path, manifest_path, monkeypatch):
+    """Phase 1's critical requirement: absent policy file must not break anything."""
+    git_root = str(tmp_path / "repos" / "personal")
+    _write_manifest(manifest_path, [{"path": git_root, "git_backed": True, "access": "readwrite"}])
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", str(tmp_path / "does-not-exist.yml"))
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_write_roots == [git_root]
+    assert config.allowed_read_roots == [git_root]
+    assert config.allowlist_source == f"manifest:{manifest_path}"
+
+
+def test_policy_grants_read_to_agents_listed_regardless_of_write_roots(
+    tmp_path, policy_path, manifest_path, monkeypatch
+):
+    """default_read: all means every agent listed in `agents:` reads every root,
+    even one whose own write_roots is empty (e.g. research, security)."""
+    root_a = str(tmp_path / "repos" / "gitea")
+    root_b = str(tmp_path / "repos" / "personal")
+    _write_policy(
+        policy_path,
+        {
+            "version": 1,
+            "roots": [{"path": root_a}, {"path": root_b}],
+            "default_read": "all",
+            "agents": {"research": {"write_roots": []}},
+            "explicit_agents": {},
+        },
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "research")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)  # absent — must not matter
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", policy_path)
+    reset_config()
+
+    config = get_config()
+    assert set(config.allowed_read_roots) == {root_a, root_b}
+    assert config.allowed_write_roots == []
+    assert config.allowlist_source == f"policy:{policy_path}"
+
+
+def test_policy_scopes_write_roots_per_agent(tmp_path, policy_path, monkeypatch):
+    root_a = str(tmp_path / "repos" / "gitea")
+    root_b = str(tmp_path / "repos" / "personal")
+    _write_policy(
+        policy_path,
+        {
+            "version": 1,
+            "roots": [{"path": root_a}, {"path": root_b}],
+            "default_read": "all",
+            "agents": {
+                "writer": {
+                    "write_roots": [root_a, root_b],
+                    "write_globs": ["docs/**", "**/*.md"],
+                    "write_globs_deny": ["**/AGENT_WORKSPACE.md"],
+                }
+            },
+            "explicit_agents": {},
+        },
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "writer")
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", policy_path)
+    reset_config()
+
+    config = get_config()
+    assert set(config.allowed_read_roots) == {root_a, root_b}
+    assert set(config.allowed_write_roots) == {root_a, root_b}
+    assert config.write_globs == ["docs/**", "**/*.md"]
+    assert config.write_globs_deny == ["**/AGENT_WORKSPACE.md"]
+
+
+def test_policy_agent_not_listed_gets_nothing_even_with_manifest_present(
+    tmp_path, policy_path, manifest_path, monkeypatch
+):
+    """A present, parseable policy is authoritative — it must not fall through to
+    the manifest just because this specific agent has no entry in it. Otherwise
+    the whole point of centralizing grants (explicit, itemized) is defeated."""
+    git_root = str(tmp_path / "repos" / "personal")
+    _write_manifest(manifest_path, [{"path": git_root, "git_backed": True, "access": "readwrite"}])
+    _write_policy(
+        policy_path,
+        {
+            "version": 1,
+            "roots": [{"path": git_root}],
+            "default_read": "all",
+            "agents": {"developer": {"write_roots": [git_root]}},
+            "explicit_agents": {},
+        },
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "harlock")  # not in agents: or explicit_agents:
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", policy_path)
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_read_roots == []
+    assert config.allowed_write_roots == []
+    assert config.allowlist_source == f"policy:{policy_path}"  # not the manifest
+
+
+def test_policy_explicit_agents_itemized_grant_does_not_inherit_default_read(
+    tmp_path, policy_path, monkeypatch
+):
+    root_a = str(tmp_path / "repos" / "gitea")
+    root_b = str(tmp_path / "repos" / "third-party")
+    narrow_root = str(tmp_path / "repos" / "third-party" / "one-repo")
+    _write_policy(
+        policy_path,
+        {
+            "version": 1,
+            "roots": [{"path": root_a}, {"path": root_b}],
+            "default_read": "all",
+            "agents": {},
+            "explicit_agents": {"jobsearch": {"read_roots": [narrow_root]}},
+        },
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "jobsearch")
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", policy_path)
+    reset_config()
+
+    config = get_config()
+    # Itemized grant only — does NOT inherit default_read: all across every root.
+    assert config.allowed_read_roots == [narrow_root]
+    assert config.allowed_write_roots == []
+
+
+def test_malformed_policy_falls_back_to_manifest(tmp_path, policy_path, manifest_path, monkeypatch):
+    git_root = str(tmp_path / "repos" / "personal")
+    _write_manifest(manifest_path, [{"path": git_root, "git_backed": True, "access": "readwrite"}])
+    with open(policy_path, "w") as f:
+        f.write("agents: [{unterminated\n")
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", policy_path)
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_write_roots == [git_root]
+    assert config.allowlist_source == f"manifest:{manifest_path}"
+
+
+def test_empty_policy_fails_closed_on_both_lists(tmp_path, policy_path, manifest_path, monkeypatch):
+    """A policy that loads but has no roots/agents at all -> empty, and still
+    authoritative (does not fall through to the manifest)."""
+    git_root = str(tmp_path / "repos" / "personal")
+    _write_manifest(manifest_path, [{"path": git_root, "git_backed": True, "access": "readwrite"}])
+    _write_policy(policy_path, {"version": 1, "roots": [], "agents": {}, "explicit_agents": {}})
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("AGENT_MANIFEST_PATH", manifest_path)
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", policy_path)
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_read_roots == []
+    assert config.allowed_write_roots == []
+    assert config.allowlist_source == f"policy:{policy_path}"
+
+
+def test_env_wins_over_policy(tmp_path, policy_path, monkeypatch):
+    env_root = str(tmp_path / "env-repos")
+    policy_root = str(tmp_path / "policy-repos")
+    _write_policy(
+        policy_path,
+        {
+            "version": 1,
+            "roots": [{"path": policy_root}],
+            "default_read": "all",
+            "agents": {"developer": {"write_roots": [policy_root]}},
+            "explicit_agents": {},
+        },
+    )
+
+    monkeypatch.setenv("ALLOWED_REPO_ROOTS", env_root)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", policy_path)
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_read_roots == [env_root]
+    assert config.allowed_write_roots == [env_root]
+    assert config.allowlist_source == "env"
+
+
+def test_workspace_policy_path_env_overrides_default_location(tmp_path, monkeypatch):
+    custom_path = str(tmp_path / "custom-policy.yml")
+    git_root = str(tmp_path / "repos" / "personal")
+    _write_policy(
+        custom_path,
+        {
+            "version": 1,
+            "roots": [{"path": git_root}],
+            "default_read": "all",
+            "agents": {"developer": {"write_roots": [git_root]}},
+            "explicit_agents": {},
+        },
+    )
+
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", custom_path)
+    reset_config()
+
+    config = get_config()
+    assert config.allowed_write_roots == [git_root]
+    assert config.allowlist_source == f"policy:{custom_path}"
 
 
 # --- integer env parsing ----------------------------------------------------

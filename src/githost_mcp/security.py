@@ -37,20 +37,20 @@ def clean_env() -> dict:
     return {k: v for k, v in os.environ.items() if k not in _PM2_IPC_ENV_VARS}
 
 
-def validate_write_path(repo_path: str) -> None:
-    """Raise ValueError if repo_path is not under an allowed root."""
-    config = get_config()
-    if not config.allowed_repo_roots:
+def _validate_path(
+    repo_path: str, roots: list[str], *, verb: str, list_name: str, source: str
+) -> None:
+    if not roots:
         raise ValueError(
-            "Write operations are disabled: ALLOWED_REPO_ROOTS is not set. "
-            "Set ALLOWED_REPO_ROOTS to a comma-separated list of allowed directories."
+            f"{verb} operations are disabled: no {list_name} resolved (source: {source}). "
+            "Set ALLOWED_REPO_ROOTS, or grant this agent via the workspace policy or manifest."
         )
     try:
         resolved = Path(repo_path).resolve()
     except Exception as e:
         raise ValueError(f"Invalid repo path: {e}") from None
 
-    for root in config.allowed_repo_roots:
+    for root in roots:
         try:
             resolved.relative_to(Path(root).resolve())
             return
@@ -58,33 +58,32 @@ def validate_write_path(repo_path: str) -> None:
             continue
 
     raise ValueError(
-        f"Path '{repo_path}' is not under any allowed root. Allowed: {config.allowed_repo_roots}"
+        f"Path '{repo_path}' is not under any allowed root ({list_name}, source: {source}). "
+        f"Allowed: {roots}"
+    )
+
+
+def validate_write_path(repo_path: str) -> None:
+    """Raise ValueError if repo_path is not under an allowed write root."""
+    config = get_config()
+    _validate_path(
+        repo_path,
+        config.allowed_write_roots,
+        verb="Write",
+        list_name="allowed_write_roots",
+        source=config.allowlist_source,
     )
 
 
 def validate_read_path(repo_path: str) -> None:
-    """Raise ValueError if repo_path is not under an allowed root (read)."""
+    """Raise ValueError if repo_path is not under an allowed read root."""
     config = get_config()
-    if not config.allowed_repo_roots:
-        raise ValueError(
-            "Read operations are restricted: ALLOWED_REPO_ROOTS is not set. "
-            "Set ALLOWED_REPO_ROOTS to a comma-separated list of allowed directories."
-        )
-    try:
-        resolved = Path(repo_path).resolve()
-    except Exception as e:
-        raise ValueError(f"Invalid repo path: {e}") from None
-
-    for root in config.allowed_repo_roots:
-        try:
-            resolved.relative_to(Path(root).resolve())
-            return
-        except ValueError:
-            continue
-
-    raise ValueError(
-        f"Path '{repo_path}' is not under any allowed root (read). "
-        f"Allowed: {config.allowed_repo_roots}"
+    _validate_path(
+        repo_path,
+        config.allowed_read_roots,
+        verb="Read",
+        list_name="allowed_read_roots",
+        source=config.allowlist_source,
     )
 
 
