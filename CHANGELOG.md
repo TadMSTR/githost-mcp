@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Security — `validate_write_globs()` normalizes paths before matching (workspace-policy Phase 3 audit, MEDIUM)
+
+Audit finding: `validate_write_globs()` matched the raw, caller-supplied path string against
+each glob pattern. `fnmatch` has no path-segment awareness, so a traversal-shaped path like
+`docs/../src/exploit.py` textually matched the `docs/**` allow glob while resolving, once
+handed to the real `git add`, to a location outside the intended scope entirely. `git_add()`
+reported false success and logged a misleading `"ok"` audit-trail entry for it. No live bypass
+existed — `git_commit()` independently re-validates the actual git-normalized staged set and
+correctly denied the resulting commit — but `git_add()`'s own check was unreliable in
+isolation, which matters once `system-ops` is locked down and `git_add`/`git_commit` become
+the only write path. Paths are now normalized with `os.path.normpath()` before matching, and
+any path whose normalized form is absolute or still starts with `..` is denied outright,
+independent of glob match.
+
 ### Added — writer glob scope enforcement in `git_add`/`git_commit` (workspace-policy Phase 3, vikunja #349)
 
 `validate_write_globs()` (`security.py`) enforces `Config.write_globs`/`write_globs_deny`
