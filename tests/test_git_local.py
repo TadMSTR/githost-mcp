@@ -755,8 +755,6 @@ def test_git_commit_initial_commit_enforces_write_globs(writer_tools_fresh_repo)
     local.git.add("--", "docs/x.md", "src/y.py")
 
     result = fns["git_commit"](str(path), "initial commit")
-    assert "error" in result, (
-        f"out-of-scope path in the initial commit must be denied: {result}"
-    )
+    assert "error" in result, f"out-of-scope path in the initial commit must be denied: {result}"
     assert "src/y.py" in result["error"]
     assert not local.head.is_valid(), "the denied initial commit must not have landed"
