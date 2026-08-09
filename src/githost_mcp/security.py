@@ -141,6 +141,15 @@ def validate_write_globs(repo_path: str, paths: list[str]) -> None:
     requires a literal `/` before the filename and will not match a bare top-level
     `README.md`. The workspace policy accounts for this by pairing `**/*.md` with
     separate `README*`/`CHANGELOG*` entries for root-level files.
+
+    Each path is normalized with os.path.normpath() before matching, and any path
+    whose normalized form is absolute or still starts with `..` is denied outright,
+    independent of glob match. Without this, a traversal-shaped argument like
+    `docs/../src/exploit.py` can textually match an allow glob such as `docs/**` —
+    `fnmatch` has no path-segment awareness, `**` is just wildcards matching `..` and
+    `/` like any other characters — while resolving, once handed to the real `git
+    add`, to a location outside the intended scope entirely (githost-workspace-
+    policy-2026-08 Phase 3 audit, MEDIUM).
     """
     config = get_config()
     allow = config.write_globs
@@ -150,7 +159,10 @@ def validate_write_globs(repo_path: str, paths: list[str]) -> None:
 
     denied: list[str] = []
     for path in paths:
-        normalized = path.replace(os.sep, "/")
+        normalized = os.path.normpath(path.replace(os.sep, "/"))
+        if os.path.isabs(normalized) or normalized == ".." or normalized.startswith("../"):
+            denied.append(path)
+            continue
         passes_allow = not allow or any(fnmatch(normalized, pattern) for pattern in allow)
         hits_deny = bool(deny) and any(fnmatch(normalized, pattern) for pattern in deny)
         if not passes_allow or hits_deny:

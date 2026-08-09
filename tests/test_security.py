@@ -319,6 +319,32 @@ def test_write_globs_mixed_set_denied_wholesale(tmp_path, monkeypatch):
     assert exc_info.value.denied_paths == ["src/x.py"]
 
 
+def test_write_globs_traversal_denied_even_when_it_textually_matches_allow(tmp_path, monkeypatch):
+    """Audit MEDIUM (githost-workspace-policy-2026-08 Phase 3): fnmatch has no
+    path-segment awareness, so 'docs/../src/exploit.py' textually matches 'docs/**'
+    ('**' is just wildcards matching '..' and '/' like any other characters) while
+    resolving outside the declared scope entirely. Must be denied outright,
+    independent of the glob match."""
+    monkeypatch.setenv("AGENT_ID", "writer")
+    _set_writer_policy(tmp_path, monkeypatch, write_globs=["docs/**"])
+    with pytest.raises(WriteGlobDenied, match=r"docs/\.\./src/exploit\.py"):
+        validate_write_globs(str(tmp_path), ["docs/../src/exploit.py"])
+
+
+def test_write_globs_absolute_path_denied(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_ID", "writer")
+    _set_writer_policy(tmp_path, monkeypatch, write_globs=["docs/**"])
+    with pytest.raises(WriteGlobDenied):
+        validate_write_globs(str(tmp_path), ["/etc/passwd"])
+
+
+def test_write_globs_dot_segments_normalized_before_matching(tmp_path, monkeypatch):
+    """A harmless './' segment must not spuriously fail matching post-normalization."""
+    monkeypatch.setenv("AGENT_ID", "writer")
+    _set_writer_policy(tmp_path, monkeypatch, write_globs=["docs/**"])
+    validate_write_globs(str(tmp_path), ["docs/./x.md"])  # should not raise
+
+
 def _set_writer_policy(tmp_path, monkeypatch, write_globs=None, write_globs_deny=None):
     """Load a workspace policy granting writer write_roots=[tmp_path] with the given
     glob scope, and reset config so it takes effect."""

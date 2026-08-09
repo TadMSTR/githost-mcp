@@ -632,6 +632,20 @@ def test_git_add_denied_by_deny_list_beating_allow(writer_tools):
     assert "AGENT_WORKSPACE.md" in result["error"]
 
 
+def test_git_add_denied_for_traversal_shaped_path(writer_tools):
+    """Audit MEDIUM (githost-workspace-policy-2026-08 Phase 3): before the fix,
+    git_add(repo_path, ["docs/../src/exploit.py"]) reported {'staged': ['src/exploit.py']}
+    — false success — because 'docs/../src/exploit.py' textually matches the docs/**
+    allow glob while resolving outside it. Must now be denied at git_add itself, not
+    just caught later by git_commit's independent re-validation."""
+    fns, path = writer_tools
+    (path / "src").mkdir()
+    (path / "src" / "exploit.py").write_text("payload")
+    result = fns["git_add"](str(path), ["docs/../src/exploit.py"])
+    assert "error" in result, f"traversal-shaped path must be denied at git_add: {result}"
+    assert "staged" not in result
+
+
 def test_git_commit_allowed_within_write_glob(writer_tools):
     fns, path = writer_tools
     (path / "docs").mkdir()
