@@ -674,3 +674,75 @@ def test_git_commit_unrestricted_for_agent_without_write_globs(tools):
     fns["git_add"](str(path), ["anything.py"])
     result = fns["git_commit"](str(path), "unrestricted commit")
     assert "sha" in result
+
+
+@pytest.fixture()
+def writer_tools_fresh_repo(tmp_path, monkeypatch):
+    """Like `writer_tools`, but the repo has no commits yet — exercises
+    `_staged_paths()`'s `repo.index.entries` fallback (used when `repo.head.is_valid()`
+    is False) instead of the `index.diff("HEAD")` branch every other fixture in this
+    file goes through, since `repo_path`/`writer_tools` both pre-seed an initial commit.
+    """
+    import yaml
+
+    repo_dir = tmp_path / "fresh"
+    repo = git.Repo.init(repo_dir)
+    repo.config_writer().set_value("user", "name", "Test").release()
+    repo.config_writer().set_value("user", "email", "t@test.com").release()
+
+    policy_path = tmp_path / "workspace-policy.yml"
+    with open(policy_path, "w") as f:
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "roots": [{"path": str(tmp_path)}],
+                "default_read": "all",
+                "agents": {
+                    "writer": {
+                        "write_roots": [str(tmp_path)],
+                        "write_globs": ["docs/**"],
+                        "write_globs_deny": ["**/AGENT_WORKSPACE.md"],
+                    }
+                },
+                "explicit_agents": {},
+            },
+            f,
+        )
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "writer")
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", str(policy_path))
+    reset_config()
+
+    registered = {}
+
+    class MockMCP:
+        def tool(self, fn):
+            registered[fn.__name__] = fn
+            return fn
+
+    from githost_mcp.tools.git_local import register
+
+    register(MockMCP())
+    return registered, repo_dir
+
+
+def test_git_commit_initial_commit_enforces_write_globs(writer_tools_fresh_repo):
+    """Audit LOW (githost-workspace-policy-2026-08 Phase 3): `_staged_paths()`'s
+    `repo.index.entries` fallback — used on a repo's very first commit, before any HEAD
+    exists — had zero test coverage. Confirms it enforces scope correctly on the
+    initial commit, not just subsequent ones."""
+    fns, path = writer_tools_fresh_repo
+    (path / "docs").mkdir()
+    (path / "docs" / "x.md").write_text("docs")
+    (path / "src").mkdir()
+    (path / "src" / "y.py").write_text("code")
+
+    local = git.Repo(str(path))
+    local.git.add("--", "docs/x.md", "src/y.py")
+
+    result = fns["git_commit"](str(path), "initial commit")
+    assert "error" in result, (
+        f"out-of-scope path in the initial commit must be denied: {result}"
+    )
+    assert "src/y.py" in result["error"]
+    assert not local.head.is_valid(), "the denied initial commit must not have landed"
