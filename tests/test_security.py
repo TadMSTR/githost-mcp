@@ -6,8 +6,10 @@ import pytest
 
 from githost_mcp.security import (
     _PM2_IPC_ENV_VARS,
+    WriteGlobDenied,
     clean_env,
     validate_read_path,
+    validate_write_globs,
     validate_write_path,
 )
 
@@ -176,11 +178,20 @@ def test_readonly_root_allows_read_denies_write(readonly_manifest_env):
         validate_write_path(repo_path)
 
 
-def test_write_denied_when_globs_granted_but_unenforced(tmp_path, monkeypatch):
-    """Audit MEDIUM (githost-workspace-policy-2026-08): an agent whose grant carries
-    write_globs must not get unrestricted write just because glob enforcement (Phase 3)
-    hasn't landed yet. Silently ignoring the scope would be worse than denying outright.
-    """
+def test_glob_enforcement_flag_is_true():
+    """Phase 3 (githost-workspace-policy-2026-08) implemented glob enforcement in
+    git_add/git_commit. This flag must stay True — flipping it back to False without
+    also removing enforcement reopens the audit's MEDIUM (see the flag's docstring)."""
+    from githost_mcp.security import _GLOB_ENFORCEMENT_IMPLEMENTED
+
+    assert _GLOB_ENFORCEMENT_IMPLEMENTED is True
+
+
+def test_write_allowed_when_globs_granted_now_that_enforcement_exists(tmp_path, monkeypatch):
+    """Pre-Phase-3 regression guard, updated: an agent whose grant carries write_globs
+    is no longer blanket-denied by validate_write_path() now that validate_write_globs()
+    exists to enforce the actual scope — the repo-root check and the glob check are two
+    separate gates."""
     import yaml
 
     write_root = str(tmp_path / "repos" / "gitea")
@@ -213,10 +224,8 @@ def test_write_denied_when_globs_granted_but_unenforced(tmp_path, monkeypatch):
     repo_path = os.path.join(write_root, "somerepo")
     os.makedirs(repo_path, exist_ok=True)
 
-    validate_read_path(repo_path)  # read is unaffected — only write is gated
-
-    with pytest.raises(ValueError, match="glob enforcement is not implemented"):
-        validate_write_path(repo_path)
+    validate_read_path(repo_path)  # read is unaffected
+    validate_write_path(repo_path)  # should not raise — root check only, glob is separate
 
 
 def test_write_allowed_when_no_globs_granted(tmp_path, monkeypatch):
@@ -258,6 +267,86 @@ def test_readwrite_root_implies_read(manifest_allowed_env):
     os.makedirs(repo_path, exist_ok=True)
     validate_write_path(repo_path)  # should not raise
     validate_read_path(repo_path)  # should not raise
+
+
+# --- write_globs enforcement (workspace-policy Phase 3, vikunja#349) ----------
+
+
+def test_write_globs_no_scope_is_unrestricted():
+    """No write_globs and no write_globs_deny configured (e.g. sysadmin/developer) ->
+    every path passes. Absence of write_globs must not mean deny-everything."""
+    from githost_mcp.config import reset_config
+
+    reset_config()  # picks up autouse fixture defaults: no policy, no manifest
+    validate_write_globs("/any/repo", ["src/anything.py", "docs/x.md"])  # should not raise
+
+
+def test_write_globs_allow_match_passes(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_ID", "writer")
+    _set_writer_policy(tmp_path, monkeypatch, write_globs=["docs/**"])
+    validate_write_globs(str(tmp_path), ["docs/x.md"])  # should not raise
+
+
+def test_write_globs_no_allow_match_denied(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_ID", "writer")
+    _set_writer_policy(tmp_path, monkeypatch, write_globs=["docs/**"])
+    with pytest.raises(WriteGlobDenied, match=r"src/x\.py"):
+        validate_write_globs(str(tmp_path), ["src/x.py"])
+
+
+def test_write_globs_deny_beats_allow(tmp_path, monkeypatch):
+    """docs/AGENT_WORKSPACE.md matches the **/*.md allow glob, but the deny list must
+    still win — without it, **/*.md would let writer edit the policy governing it."""
+    monkeypatch.setenv("AGENT_ID", "writer")
+    _set_writer_policy(
+        tmp_path,
+        monkeypatch,
+        write_globs=["**/*.md"],
+        write_globs_deny=["**/AGENT_WORKSPACE.md"],
+    )
+    validate_write_globs(str(tmp_path), ["docs/readme.md"])  # allowed
+    with pytest.raises(WriteGlobDenied, match=r"AGENT_WORKSPACE\.md"):
+        validate_write_globs(str(tmp_path), ["docs/AGENT_WORKSPACE.md"])
+
+
+def test_write_globs_mixed_set_denied_wholesale(tmp_path, monkeypatch):
+    """One bad path in a batch rejects the whole call — callers must not be able to
+    partially stage/commit around the scope by mixing in-scope and out-of-scope paths."""
+    monkeypatch.setenv("AGENT_ID", "writer")
+    _set_writer_policy(tmp_path, monkeypatch, write_globs=["docs/**"])
+    with pytest.raises(WriteGlobDenied) as exc_info:
+        validate_write_globs(str(tmp_path), ["docs/x.md", "src/x.py"])
+    assert exc_info.value.denied_paths == ["src/x.py"]
+
+
+def _set_writer_policy(tmp_path, monkeypatch, write_globs=None, write_globs_deny=None):
+    """Load a workspace policy granting writer write_roots=[tmp_path] with the given
+    glob scope, and reset config so it takes effect."""
+    import yaml
+
+    policy_path = tmp_path / "workspace-policy.yml"
+    with open(policy_path, "w") as f:
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "roots": [{"path": str(tmp_path)}],
+                "default_read": "all",
+                "agents": {
+                    "writer": {
+                        "write_roots": [str(tmp_path)],
+                        "write_globs": write_globs or [],
+                        "write_globs_deny": write_globs_deny or [],
+                    }
+                },
+                "explicit_agents": {},
+            },
+            f,
+        )
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", str(policy_path))
+    from githost_mcp.config import reset_config
+
+    reset_config()
 
 
 # --- clean_env (GHOST-11) -----------------------------------------------------

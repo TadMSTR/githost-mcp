@@ -551,3 +551,126 @@ def test_git_push_sets_upstream(tools, bare_remote):
     assert local.active_branch.tracking_branch() is not None, (
         "tracking branch not configured — downstream `@{u}` verification will error"
     )
+
+
+# ---------------------------------------------------------------------------
+# write_globs enforcement in git_add / git_commit (workspace-policy Phase 3,
+# vikunja#349). Unit coverage of validate_write_globs() itself lives in
+# tests/test_security.py — these exercise it wired into the actual tools.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def writer_tools(repo_path, tmp_path, monkeypatch):
+    """Like `tools`, but resolves the writer identity through a workspace policy
+    granting write_roots=[tmp_path], write_globs=["docs/**"], and
+    write_globs_deny=["**/AGENT_WORKSPACE.md"] — mirrors writer's real grant shape."""
+    import yaml
+
+    policy_path = tmp_path / "workspace-policy.yml"
+    with open(policy_path, "w") as f:
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "roots": [{"path": str(tmp_path)}],
+                "default_read": "all",
+                "agents": {
+                    "writer": {
+                        "write_roots": [str(tmp_path)],
+                        "write_globs": ["docs/**"],
+                        "write_globs_deny": ["**/AGENT_WORKSPACE.md"],
+                    }
+                },
+                "explicit_agents": {},
+            },
+            f,
+        )
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "writer")
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", str(policy_path))
+    reset_config()
+
+    registered = {}
+
+    class MockMCP:
+        def tool(self, fn):
+            registered[fn.__name__] = fn
+            return fn
+
+    from githost_mcp.tools.git_local import register
+
+    register(MockMCP())
+    return registered, repo_path
+
+
+def test_git_add_allowed_within_write_glob(writer_tools):
+    fns, path = writer_tools
+    (path / "docs").mkdir()
+    (path / "docs" / "x.md").write_text("docs")
+    result = fns["git_add"](str(path), ["docs/x.md"])
+    assert "error" not in result, f"in-scope path denied: {result}"
+    assert "docs/x.md" in result["staged"]
+
+
+def test_git_add_denied_outside_write_glob(writer_tools):
+    fns, path = writer_tools
+    (path / "src").mkdir()
+    (path / "src" / "x.py").write_text("code")
+    result = fns["git_add"](str(path), ["src/x.py"])
+    assert "error" in result, "out-of-scope path must be denied"
+    assert "src/x.py" in result["error"]
+
+
+def test_git_add_denied_by_deny_list_beating_allow(writer_tools):
+    """docs/AGENT_WORKSPACE.md matches the docs/** allow glob but must still be
+    denied — without the deny list, writer could edit the policy governing it."""
+    fns, path = writer_tools
+    (path / "docs").mkdir()
+    (path / "docs" / "AGENT_WORKSPACE.md").write_text("policy")
+    result = fns["git_add"](str(path), ["docs/AGENT_WORKSPACE.md"])
+    assert "error" in result
+    assert "AGENT_WORKSPACE.md" in result["error"]
+
+
+def test_git_commit_allowed_within_write_glob(writer_tools):
+    fns, path = writer_tools
+    (path / "docs").mkdir()
+    (path / "docs" / "x.md").write_text("docs")
+    fns["git_add"](str(path), ["docs/x.md"])
+    result = fns["git_commit"](str(path), "docs update")
+    assert "sha" in result, f"in-scope commit denied: {result}"
+
+
+def test_git_commit_enforces_full_staged_set_not_just_last_git_add(writer_tools):
+    """git_commit must reject based on everything staged, not just the paths the most
+    recent git_add call itself validated — closes the bypass the plan calls out:
+    git_commit commits whatever is staged regardless of what staged it."""
+    fns, path = writer_tools
+    (path / "docs").mkdir()
+    (path / "docs" / "x.md").write_text("docs")
+    fns["git_add"](str(path), ["docs/x.md"])  # allowed, stages fine
+
+    (path / "src").mkdir()
+    (path / "src" / "x.py").write_text("code")
+    # Stage the out-of-scope file through the repo directly, simulating any staging
+    # path other than this tool's own git_add call.
+    local = git.Repo(str(path))
+    local.git.add("--", "src/x.py")
+
+    result = fns["git_commit"](str(path), "mixed commit")
+    assert "error" in result, (
+        f"mixed staged set with an out-of-scope path must be rejected: {result}"
+    )
+    assert "src/x.py" in result["error"]
+    # Nothing must have been committed — rejection is wholesale, not partial.
+    assert local.head.commit.message.strip() == "Initial"
+
+
+def test_git_commit_unrestricted_for_agent_without_write_globs(tools):
+    """sysadmin/developer-style agents (env-sourced roots, no write_globs) are
+    unaffected by glob enforcement — the `tools` fixture uses ALLOWED_REPO_ROOTS."""
+    fns, path = tools
+    (path / "anything.py").write_text("code")
+    fns["git_add"](str(path), ["anything.py"])
+    result = fns["git_commit"](str(path), "unrestricted commit")
+    assert "sha" in result

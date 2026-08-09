@@ -8,7 +8,13 @@ import structlog
 from ..audit import AuditCtx
 from ..config import get_config
 from ..gitflags import evaluate_fetch, evaluate_push
-from ..security import scrub, validate_read_path, validate_write_path
+from ..security import (
+    WriteGlobDenied,
+    scrub,
+    validate_read_path,
+    validate_write_globs,
+    validate_write_path,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -20,6 +26,20 @@ def _open_repo(repo_path: str) -> git.Repo:
         raise ValueError(f"Not a git repository: {repo_path}") from None
     except git.NoSuchPathError:
         raise ValueError(f"Path does not exist: {repo_path}") from None
+
+
+def _staged_paths(repo: git.Repo) -> list[str]:
+    """Every path currently staged for the next commit.
+
+    Mirrors git_add's own HEAD-validity fallback: before the first commit there is no
+    HEAD to diff against, so every index entry is staged by definition. Used to
+    enforce write_globs at commit time against what is actually staged, not just what
+    the most recent git_add call named — git_commit commits whatever is staged
+    regardless of what staged it.
+    """
+    if repo.head.is_valid():
+        return [item.a_path for item in repo.index.diff("HEAD")]
+    return [path for path, _stage in repo.index.entries]
 
 
 def register(mcp) -> None:
@@ -248,6 +268,7 @@ def register(mcp) -> None:
         ac = AuditCtx("git_add", "local", repo_path, {"repo_path": repo_path, "paths": paths})
         try:
             validate_write_path(repo_path)
+            validate_write_globs(repo_path, paths)
             repo = _open_repo(repo_path)
             # Use git binary to stage files; repo.index.add(["."])  would recurse
             # into .git/ internals. The git binary skips .git/ by design. (GHOST-1)
@@ -257,6 +278,9 @@ def register(mcp) -> None:
             )
             ac.finish("ok")
             return {"staged": staged}
+        except WriteGlobDenied as e:
+            ac.finish("denied:write_glob")
+            return {"error": scrub(str(e))}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": scrub(str(e))}
@@ -273,6 +297,10 @@ def register(mcp) -> None:
         try:
             validate_write_path(repo_path)
             repo = _open_repo(repo_path)
+            # Enforced against the staged set, not the paths a prior git_add call named —
+            # git_commit commits whatever is staged regardless of what staged it, so
+            # git_add-only enforcement would be bypassable via any other staging path.
+            validate_write_globs(repo_path, _staged_paths(repo))
             config = get_config()
             agent_tag = f"\n\nagent-id: {config.agent_id}" if config.agent_id != "unknown" else ""
             full_message = message + agent_tag
@@ -297,6 +325,9 @@ def register(mcp) -> None:
 
             ac.finish("ok")
             return {"sha": commit.hexsha[:12], "message": message}
+        except WriteGlobDenied as e:
+            ac.finish("denied:write_glob")
+            return {"error": scrub(str(e))}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": scrub(str(e))}

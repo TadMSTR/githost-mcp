@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+### Added — writer glob scope enforcement in `git_add`/`git_commit` (workspace-policy Phase 3, vikunja #349)
+
+`validate_write_globs()` (`security.py`) enforces `Config.write_globs`/`write_globs_deny`
+against the paths passed to `git_add` and against the full staged set at `git_commit` time —
+not just the paths a prior `git_add` call itself validated, since `git_commit` commits
+whatever is staged regardless of what staged it. The deny list is evaluated after the allow
+list and wins, so an allow pattern like `**/*.md` can never override a deny entry such as
+`**/AGENT_WORKSPACE.md`. An agent with no `write_globs`/`write_globs_deny` configured (e.g.
+sysadmin, developer) is unrestricted within its `allowed_write_roots`, matching prior
+behaviour — this only narrows an agent whose grant already carries a glob scope (writer).
+
+Patterns are plain `fnmatch` globs, not path-aware doublestar globs: `**/*.md` requires a
+literal `/` before the filename and will not match a bare top-level `README.md` — the
+workspace policy accounts for this with separate `README*`/`CHANGELOG*` entries for
+root-level files. Rejections raise `WriteGlobDenied`, a distinct exception type so `git_add`/
+`git_commit` can write a `denied:write_glob` audit-trail result instead of the generic
+`error:ValueError` other failures get.
+
+**Reordered ahead of Phase 2 (sysadmin) — see plan.md.** This phase was originally specified
+to land after the central policy file is deployed; that ordering would have left writer
+locked out of all githost-mcp writes for the gap between Phase 2 landing and this phase
+merging, because Phase 1's `_GLOB_ENFORCEMENT_IMPLEMENTED` guard fails closed whenever a
+grant carries `write_globs` but no enforcement exists yet. This build has no live effect
+until Phase 2 deploys `/etc/forge/workspace-policy.yml` — `write_globs` is populated only by
+the policy loader, which is unreachable while the file is absent.
+
+### Security — `_GLOB_ENFORCEMENT_IMPLEMENTED` flipped to `True`
+
+Now that `validate_write_globs()` is wired into `git_add`/`git_commit`, the fail-closed guard
+added in Phase 1 (`security.py`, MEDIUM finding) is no longer needed to prevent a glob-scoped
+grant from silently becoming unrestricted — enforcement now exists. The flag stays in the
+code as a fail-closed backstop: if it is ever flipped back to `False` without also removing
+enforcement, glob-scoped agents are denied rather than silently widened. A test
+(`test_glob_enforcement_flag_is_true`) asserts the flag stays `True`.
+
 ### Added — read/write allowlist split + workspace-policy.yml loader (workspace-policy Phase 1, vikunja #349)
 
 `Config` now has separate `allowed_read_roots` and `allowed_write_roots`, and

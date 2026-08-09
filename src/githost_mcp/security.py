@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from fnmatch import fnmatch
 from pathlib import Path
 
 from .config import get_config
@@ -31,14 +32,15 @@ _PM2_IPC_ENV_VARS = (
     "NODE_UNIQUE_ID",
 )
 
-# Phase 3 (workspace-policy plan, vikunja#349) adds validate_write_globs() and wires it
-# into git_add/git_commit to enforce Config.write_globs/write_globs_deny. Until that
-# lands, an agent whose policy grant carries a non-empty write_globs would otherwise get
-# unrestricted write across its full allowed_write_roots — e.g. writer's two full
+# Phase 3 (workspace-policy plan, vikunja#349) added validate_write_globs() and wired it
+# into git_add/git_commit to enforce Config.write_globs/write_globs_deny. Before this
+# landed, an agent whose policy grant carried a non-empty write_globs would otherwise have
+# gotten unrestricted write across its full allowed_write_roots — e.g. writer's two full
 # container-root trees instead of the docs/samples paths the glob was meant to scope to
-# (githost-workspace-policy-2026-08 audit, MEDIUM). Flip this to True in the same change
-# that adds glob enforcement.
-_GLOB_ENFORCEMENT_IMPLEMENTED = False
+# (githost-workspace-policy-2026-08 audit, MEDIUM). The guard below stays in place as a
+# fail-closed backstop even now that enforcement exists — if this ever regresses back to
+# False, write_globs-scoped agents get denied instead of silently widened.
+_GLOB_ENFORCEMENT_IMPLEMENTED = True
 
 
 def clean_env() -> dict:
@@ -107,6 +109,55 @@ def validate_read_path(repo_path: str) -> None:
         list_name="allowed_read_roots",
         source=config.allowlist_source,
     )
+
+
+class WriteGlobDenied(ValueError):
+    """Raised by validate_write_globs() when a path fails write_globs allow/deny scope.
+
+    A distinct type (rather than a bare ValueError) so callers can log/audit a policy
+    denial differently from an unrelated failure — git_add/git_commit use this to write
+    a `denied:write_glob` audit result instead of the generic `error:ValueError` other
+    exceptions get, so the trail shows *why* the write failed, not just that it did.
+    """
+
+    def __init__(self, repo_path: str, denied_paths: list[str], source: str) -> None:
+        self.denied_paths = denied_paths
+        super().__init__(
+            f"Write denied by policy write_globs scope for '{repo_path}': "
+            f"{denied_paths} (source: {source})"
+        )
+
+
+def validate_write_globs(repo_path: str, paths: list[str]) -> None:
+    """Raise WriteGlobDenied if any path fails this agent's write_globs allow/deny scope.
+
+    Absence of both write_globs and write_globs_deny means unrestricted within the
+    agent's write roots (e.g. sysadmin, developer) — this only narrows an agent that
+    already carries a glob scope in its grant (e.g. writer). The deny list is
+    evaluated after the allow list and wins: a path must match an allow pattern (when
+    any are configured) and must not match a deny pattern.
+
+    Patterns are plain fnmatch globs, not path-aware doublestar globs — `**/*.md`
+    requires a literal `/` before the filename and will not match a bare top-level
+    `README.md`. The workspace policy accounts for this by pairing `**/*.md` with
+    separate `README*`/`CHANGELOG*` entries for root-level files.
+    """
+    config = get_config()
+    allow = config.write_globs
+    deny = config.write_globs_deny
+    if not allow and not deny:
+        return
+
+    denied: list[str] = []
+    for path in paths:
+        normalized = path.replace(os.sep, "/")
+        passes_allow = not allow or any(fnmatch(normalized, pattern) for pattern in allow)
+        hits_deny = bool(deny) and any(fnmatch(normalized, pattern) for pattern in deny)
+        if not passes_allow or hits_deny:
+            denied.append(path)
+
+    if denied:
+        raise WriteGlobDenied(repo_path, denied, config.allowlist_source)
 
 
 def mask_credentials(text: str) -> str:
