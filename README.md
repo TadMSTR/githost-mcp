@@ -168,13 +168,21 @@ Resolution order (first match wins, see Architecture diagram above):
    `AGENT_MANIFEST_PATH` — now the third fallback rather than the second.
 4. Empty — fail closed, all operations disabled.
 
-Ships with the policy file **absent** in production as of this release, so live
-resolution today falls straight through to the manifest, unchanged from prior behavior.
+**Deployed in production on forge.** The policy declares a small set of *container
+roots* (e.g. `~/repos/gitea`, `~/repos/personal`) rather than per-repo paths, so a repo
+created inside an already-granted root is covered automatically — this is what closed
+the recurring "new repo, no access" gap class (vikunja #203/#332/#308) that per-repo
+manifest entries kept reproducing. `default_read: all` grants every agent listed in
+`agents:` read across every declared root regardless of that agent's own `write_roots`;
+`write_roots` and `write_globs`/`write_globs_deny` are then set per agent (e.g. writer is
+scoped to `docs/**`-style globs within its write roots — see
+[Write glob scoping](#write-glob-scoping) below). Agents not listed in `agents:` or
+`explicit_agents:` get nothing.
 
-**Behavior change:** a manifest `access: readonly` entry now populates
-`allowed_read_roots` (previously it granted **no access at all** — the root cause of a
-recurring class of per-agent read-grant gaps, vikunja #203/#332/#308). `access: readwrite`
-continues to populate both read and write lists.
+**Behavior change (relevant to any deployment still on manifest-only resolution):** a
+manifest `access: readonly` entry now populates `allowed_read_roots` (previously it
+granted **no access at all**). `access: readwrite` continues to populate both read and
+write lists.
 
 **When no source yields a root for the requested operation, it is denied** — fail closed,
 not open. A malformed or unreadable manifest or policy file resolves to zero roots rather
@@ -290,8 +298,8 @@ AGENT_MANIFEST_PATH=/home/user/.claude/manifests/dev-agent.yml  # optional — a
 
 WORKSPACE_POLICY_PATH=/etc/forge/workspace-policy.yml  # optional — checked ahead of the manifest
 # Default: /etc/forge/workspace-policy.yml. See Security Model > Repo path allowlist for
-# the full env > policy > manifest > empty resolution order. Absent in production today —
-# no live behavior change until sysadmin deploys the file.
+# the full env > policy > manifest > empty resolution order. Deployed in production on
+# forge — see that section for the container-root grant model.
 ```
 
 ### Agent Identity (optional)
