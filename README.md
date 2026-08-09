@@ -29,19 +29,31 @@ flowchart LR
     tool -.->|write ops| bus[[agent-bus event]]
 ```
 
-Path-taking tools resolve their allowlist before touching the filesystem. An explicit `ALLOWED_REPO_ROOTS` always wins; otherwise the agent manifest is consulted as a fallback; if neither yields a root, the operation fails closed.
+Path-taking tools resolve separate read and write allowlists before touching the
+filesystem: `ALLOWED_REPO_ROOTS` env (break-glass, applies to both lists) →
+`/etc/forge/workspace-policy.yml` → the agent manifest → empty, fail closed. First
+match wins — the policy file, once it loads successfully, is authoritative for that
+agent even if its own grant is empty. A write op additionally passes through a
+glob gate when the resolved grant carries `write_globs`/`write_globs_deny`.
 
 ```mermaid
 flowchart TD
     call[path-taking tool call] --> env{ALLOWED_REPO_ROOTS set?}
-    env -->|yes| envroots[use env roots]
-    env -->|no| manifest{manifest roots available?}
-    manifest -->|yes| mroots[use manifest-declared roots]
+    env -->|yes| envroots[env roots — same list for read + write]
+    env -->|no| policy{workspace-policy.yml present + parses?}
+    policy -->|yes| proots[policy read/write roots + write_globs]
+    policy -->|no| manifest{manifest roots available?}
+    manifest -->|yes| mroots[manifest-declared roots]
     manifest -->|no| deny[deny — fail closed]
-    envroots --> validate{path under an allowed root?}
+    envroots --> validate{path under the resolved read/write root?}
+    proots --> validate
     mroots --> validate
-    validate -->|yes| allow[proceed]
     validate -->|no| deny
+    validate -->|yes, read op| allow[proceed]
+    validate -->|yes, write op| glob{write_globs/write_globs_deny set?}
+    glob -->|no| allow
+    glob -->|yes, matches allow and not deny| allow
+    glob -->|yes, denied by glob| deny
 ```
 
 ## Why githost-mcp?
@@ -135,7 +147,68 @@ audit_log_query(agent_id="sysadmin", tool="git_push", since="2026-05-20")
 
 ### Repo path allowlist
 
-All tools — both read and write — reject any path not under the resolved allowlist. Read tools (`git_status`, `git_diff`, `git_log`, `git_show`) and write tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`, `git_branch create/delete`, `release`) are validated against it. An explicit `ALLOWED_REPO_ROOTS` always wins when set; otherwise `config.py` falls back to the `git_backed: true` `workspace_access` entries in the agent's manifest at `AGENT_MANIFEST_PATH` (see Architecture diagram above). **When neither source yields a root, all operations are disabled** — fail closed, not open. A malformed or unreadable manifest resolves to zero roots rather than raising, so it fails closed the same way an unset `ALLOWED_REPO_ROOTS` does.
+`Config` carries separate `allowed_read_roots` and `allowed_write_roots`. Read tools
+(`git_status`, `git_diff`, `git_log`, `git_show`) validate against the read list; write
+tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`, `git_branch
+create/delete`, `release`) validate against the write list. `allowed_repo_roots` remains
+as a deprecated alias of `allowed_write_roots` for any caller not yet migrated.
+
+Resolution order (first match wins, see Architecture diagram above):
+
+1. `ALLOWED_REPO_ROOTS` env — the break-glass override, unchanged: applies the same root
+   list to both read and write.
+2. `/etc/forge/workspace-policy.yml` (path overridable via `WORKSPACE_POLICY_PATH`) — a
+   central grant file keyed by agent ID, giving `read_roots`, `write_roots`, and
+   optionally `write_globs`/`write_globs_deny` per agent. Once this file loads
+   successfully it is authoritative for the requesting agent — an agent with no entry in
+   `agents:`/`explicit_agents:` gets zero roots and does **not** fall through to the
+   manifest. A missing, unreadable, or non-mapping file is the only case that falls
+   through.
+3. The agent manifest's `git_backed: true` `workspace_access` entries at
+   `AGENT_MANIFEST_PATH` — now the third fallback rather than the second.
+4. Empty — fail closed, all operations disabled.
+
+Ships with the policy file **absent** in production as of this release, so live
+resolution today falls straight through to the manifest, unchanged from prior behavior.
+
+**Behavior change:** a manifest `access: readonly` entry now populates
+`allowed_read_roots` (previously it granted **no access at all** — the root cause of a
+recurring class of per-agent read-grant gaps, vikunja #203/#332/#308). `access: readwrite`
+continues to populate both read and write lists.
+
+**When no source yields a root for the requested operation, it is denied** — fail closed,
+not open. A malformed or unreadable manifest or policy file resolves to zero roots rather
+than raising, so it fails closed the same way an unset `ALLOWED_REPO_ROOTS` does.
+
+### Write glob scoping
+
+A `workspace-policy.yml` grant can additionally narrow write access to a glob subset of
+`allowed_write_roots` via `write_globs` (allow) and `write_globs_deny` (deny) — e.g.
+scoping the writer agent to `docs/**` within a repo it otherwise has full write roots for.
+`validate_write_globs()` (`security.py`) enforces this in `git_add` (against the paths
+passed in) and again in `git_commit` (against the *full staged set*, since a commit
+commits whatever is staged regardless of what a prior `git_add` call itself validated).
+The deny list is evaluated after the allow list and wins — an allow pattern like
+`**/*.md` can never override a deny entry such as `**/AGENT_WORKSPACE.md`. An agent with
+neither `write_globs` nor `write_globs_deny` configured is unrestricted within its
+`allowed_write_roots`, matching prior behavior.
+
+Patterns are plain `fnmatch` globs, not path-aware doublestar globs: `**/*.md` requires a
+literal `/` before the filename and will not match a bare top-level `README.md` — the
+policy schema accounts for this with separate `README*`/`CHANGELOG*`-style entries for
+root-level files. Paths are normalized with `os.path.normpath()` before matching, and any
+path whose normalized form is absolute or still starts with `..` is denied outright,
+independent of glob match — closing a traversal shape (`docs/../src/exploit.py`) that
+would otherwise textually match a `docs/**` allow glob. A rejection raises
+`WriteGlobDenied`, logged as a distinct `denied:write_glob` audit-trail result rather than
+the generic `error:ValueError` other validation failures get.
+
+As a fail-closed backstop, if a resolved grant carries `write_globs`/`write_globs_deny`
+but the running code has no enforcement path for it, writes are denied entirely rather
+than silently becoming unrestricted across the full `allowed_write_roots`. Enforcement
+now exists (`_GLOB_ENFORCEMENT_IMPLEMENTED = True` in `security.py`), so this backstop is
+currently dormant — it exists to prevent a future revert of the enforcement code from
+silently widening a glob-scoped agent's grant again.
 
 ### Per-agent committer identity
 
@@ -214,6 +287,11 @@ AGENT_MANIFEST_PATH=/home/user/.claude/manifests/dev-agent.yml  # optional — a
 # Default: ~/.claude/manifests/{AGENT_ID}-agent.yml (only when AGENT_ID is set to a real identity)
 # On forge, ecosystem.config.js overrides this per-process to
 # /etc/forge/manifests/<agent>-agent.yml — see Deploy > Manifest allowlist path.
+
+WORKSPACE_POLICY_PATH=/etc/forge/workspace-policy.yml  # optional — checked ahead of the manifest
+# Default: /etc/forge/workspace-policy.yml. See Security Model > Repo path allowlist for
+# the full env > policy > manifest > empty resolution order. Absent in production today —
+# no live behavior change until sysadmin deploys the file.
 ```
 
 ### Agent Identity (optional)
