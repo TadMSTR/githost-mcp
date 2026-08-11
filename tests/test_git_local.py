@@ -1,5 +1,6 @@
 """Tests for local git tools using real temporary repositories."""
 
+import json
 import pathlib
 
 import git
@@ -941,3 +942,218 @@ def test_git_remote_list_allowed_on_read_only_grant(tools, tmp_path, monkeypatch
     assert "error" in fns["git_remote"](
         str(path), action="add", name="fork", url="https://github.com/o/r.git"
     )
+
+
+# ---------------------------------------------------------------------------
+# git_commit identity mode (vikunja#310, id 321)
+#
+# Against real repos with real remotes: the bug being fixed was about what ends up
+# in an actual commit object, which a mocked identity would not catch.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def public_identity_env(monkeypatch):
+    monkeypatch.setenv("GIT_PUBLIC_NAME", "TadMSTR")
+    monkeypatch.setenv("GIT_PUBLIC_EMAIL", "69825253+TadMSTR@users.noreply.github.com")
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.delenv("GIT_AGENT_NAME", raising=False)
+    monkeypatch.delenv("GIT_AGENT_EMAIL", raising=False)
+    reset_config()
+
+
+def _stage_a_file(path, name="work.txt"):
+    (path / name).write_text("work")
+    git.Repo(str(path)).git.add("--", name)
+
+
+def test_git_commit_third_party_remote_uses_public_identity(
+    tools, public_identity_env, monkeypatch
+):
+    """The decisive test: a commit bound for a third-party repo must not carry the
+    agent identity or the agent-id trailer into permanent public history."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "fix: a real upstream fix")
+
+    assert result.get("identity") == "public", result
+    commit = git.Repo(str(path)).head.commit
+    assert commit.author.name == "TadMSTR"
+    assert commit.author.email == "69825253+TadMSTR@users.noreply.github.com"
+    assert commit.committer.email == "69825253+TadMSTR@users.noreply.github.com"
+    assert "agent-id" not in commit.message
+    assert "forge" not in commit.message
+    assert "@forge" not in f"{commit.author.name} <{commit.author.email}>"
+
+
+def test_git_commit_forge_owned_remote_keeps_agent_identity(tools, public_identity_env):
+    """The other direction: internal repos must keep per-agent attribution."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "internal change")
+
+    assert result.get("identity") == "agent", result
+    commit = git.Repo(str(path)).head.commit
+    assert commit.author.name == "developer-agent"
+    assert commit.author.email == "developer@forge"
+    assert "agent-id: developer" in commit.message
+
+
+def test_git_commit_fork_layout_uses_public_identity(tools, public_identity_env):
+    """origin = our fork under a forge-owned account, upstream = theirs. An
+    owner-of-origin rule would call this forge-controlled and leak."""
+    fns, path = tools
+    repo = git.Repo(str(path))
+    repo.create_remote("origin", "https://github.com/TadMSTR/claudecodeui.git")
+    repo.create_remote("upstream", "https://github.com/siteboon/claudecodeui.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "fix: upstream fix")
+
+    assert result.get("identity") == "public", result
+    assert "agent-id" not in git.Repo(str(path)).head.commit.message
+
+
+def test_git_commit_audit_records_the_real_agent_in_public_mode(
+    tools, public_identity_env, tmp_path
+):
+    """Public-identity mode changes what external maintainers see. It must NOT
+    change what forge's own audit trail records — otherwise a cosmetic disclosure
+    fix becomes an accountability hole."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    _stage_a_file(path)
+    init_logging()  # rebind the audit agent id to 'developer'
+
+    fns["git_commit"](str(path), "upstream fix")
+
+    audit_lines = [
+        line for line in (tmp_path / "audit.jsonl").read_text().splitlines() if "git_commit" in line
+    ]
+    assert audit_lines, "the commit must be audited"
+    entry = json.loads(audit_lines[-1])
+    assert entry["agent_id"] == "developer", (
+        "the audit trail must name the real acting agent, not the public identity"
+    )
+    assert entry["result"] == "ok"
+
+
+def test_git_commit_no_remotes_keeps_agent_identity(tools, public_identity_env):
+    """No publication target — today's behaviour, so local-only repos keep working."""
+    fns, path = tools
+    assert git.Repo(str(path)).remotes == []
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "local work")
+
+    assert result.get("identity") == "agent", result
+    assert "agent-id: developer" in git.Repo(str(path)).head.commit.message
+
+
+def test_git_commit_identity_override_public_on_forge_repo(tools, public_identity_env):
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "manual public", identity="public")
+
+    assert result.get("identity") == "public"
+    assert "agent-id" not in git.Repo(str(path)).head.commit.message
+
+
+def test_git_commit_identity_override_agent_on_third_party_repo(tools, public_identity_env):
+    """The override wins both ways — the caller can still opt back in deliberately."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "deliberate", identity="agent")
+
+    assert result.get("identity") == "agent"
+    assert "agent-id: developer" in git.Repo(str(path)).head.commit.message
+
+
+def test_git_commit_unknown_identity_value_rejected(tools, public_identity_env):
+    fns, path = tools
+    _stage_a_file(path)
+    result = fns["git_commit"](str(path), "x", identity="whatever")
+    assert "error" in result
+    assert git.Repo(str(path)).head.commit.message.strip() == "Initial", (
+        "an unknown identity value must not fall through to a commit"
+    )
+
+
+def test_git_commit_refuses_when_remote_is_unparseable(tools, public_identity_env):
+    """Fail loud: guessing either way is worse than an error."""
+    fns, path = tools
+    repo = git.Repo(str(path))
+    with repo.config_writer() as cw:
+        cw.set_value('remote "odd"', "url", "@@@not-a-url@@@")
+        cw.set_value('remote "odd"', "fetch", "+refs/heads/*:refs/remotes/odd/*")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "ambiguous")
+
+    assert "error" in result, result
+    assert "identity" in result["error"].lower()
+    assert git.Repo(str(path)).head.commit.message.strip() == "Initial", (
+        "the refused commit must not have landed"
+    )
+
+
+def test_git_commit_refuses_when_public_identity_is_an_agent_identity(tools, monkeypatch):
+    """A repo-local user.email=<agent>@forge must not be handed back as 'public'."""
+    fns, path = tools
+    monkeypatch.delenv("GIT_PUBLIC_NAME", raising=False)
+    monkeypatch.delenv("GIT_PUBLIC_EMAIL", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    reset_config()
+    repo = git.Repo(str(path))
+    repo.create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "developer-agent")
+        cw.set_value("user", "email", "developer@forge")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "would have leaked")
+
+    assert "error" in result, result
+    assert "forge agent identity" in result["error"]
+
+
+def test_git_commit_public_identity_falls_back_to_git_config(tools, monkeypatch):
+    """No GIT_PUBLIC_* set: use the identity already in the repo's git config, which
+    is where forge's public identity actually lives."""
+    fns, path = tools
+    monkeypatch.delenv("GIT_PUBLIC_NAME", raising=False)
+    monkeypatch.delenv("GIT_PUBLIC_EMAIL", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    reset_config()
+    repo = git.Repo(str(path))
+    repo.create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "TadMSTR")
+        cw.set_value("user", "email", "69825253+TadMSTR@users.noreply.github.com")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "upstream fix")
+
+    assert result.get("identity") == "public", result
+    assert git.Repo(str(path)).head.commit.author.name == "TadMSTR"
+
+
+def test_git_commit_forge_gitea_host_keeps_agent_identity(tools, public_identity_env, monkeypatch):
+    """Anything on forge's own Gitea is forge's, whatever the org name."""
+    fns, path = tools
+    monkeypatch.setenv("GITEA_URL", "https://gitea.example-forge.test")
+    reset_config()
+    git.Repo(str(path)).create_remote("origin", "git@gitea.example-forge.test:host-forge/x.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "internal doc change")
+
+    assert result.get("identity") == "agent", result

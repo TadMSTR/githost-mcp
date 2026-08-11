@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import git
 import structlog
 
 from ..audit import AuditCtx
 from ..config import get_config
 from ..gitflags import evaluate_fetch, evaluate_push
+from ..identity import (
+    IDENTITY_AGENT,
+    IDENTITY_AUTO,
+    IDENTITY_PUBLIC,
+    IdentityUndetermined,
+    resolve_ownership,
+    resolve_public_identity,
+)
 from ..security import (
     RemoteUrlRejected,
     WriteGlobDenied,
@@ -44,6 +54,46 @@ def _staged_paths(repo: git.Repo) -> list[str]:
     if repo.head.is_valid():
         return [item.a_path for item in repo.index.diff("HEAD")]
     return [path for path, _stage in repo.index.entries]
+
+
+def _gitea_host(gitea_url: str) -> str:
+    """Host portion of the configured Gitea URL, or '' if none is configured."""
+    if not gitea_url:
+        return ""
+    return urlsplit(gitea_url).hostname or ""
+
+
+def _resolve_identity_mode(repo: git.Repo, requested: str, config) -> tuple[str, str]:
+    """Return ``(mode, reason)`` for this commit — an explicit request, or the remotes."""
+    if requested in (IDENTITY_AGENT, IDENTITY_PUBLIC):
+        return requested, f"explicitly requested by caller (identity={requested})"
+    if requested != IDENTITY_AUTO:
+        raise ValueError(f"Unknown identity '{requested}'; use auto, agent, or public")
+
+    remote_urls = {r.name: r.url for r in repo.remotes}
+    ownership = resolve_ownership(
+        remote_urls, config.forge_owned_owners, _gitea_host(config.gitea_url)
+    )
+    return ownership.mode, ownership.reason
+
+
+def _public_identity(repo: git.Repo, config) -> tuple[str, str]:
+    """The public name/email to commit as, falling back to the repo's git config.
+
+    The fallback is what makes this work with no new configuration: forge's global
+    git config already carries the public identity, which is what the manual
+    `git commit --amend --author=…` workaround reached for. resolve_public_identity
+    refuses it if it turns out to be an agent identity after all.
+    """
+    name, email = config.git_public_name, config.git_public_email
+    if not (name and email):
+        try:
+            reader = repo.config_reader()
+            name = name or reader.get_value("user", "name", "")
+            email = email or reader.get_value("user", "email", "")
+        except Exception as e:  # a missing/unreadable git config is just an empty identity
+            log.warning("public_identity_git_config_unreadable", error=str(e))
+    return resolve_public_identity(str(name), str(email))
 
 
 def register(mcp) -> None:
@@ -364,14 +414,30 @@ def register(mcp) -> None:
             return {"error": scrub(str(e))}
 
     @mcp.tool
-    def git_commit(repo_path: str, message: str) -> dict:
-        """Create a commit. Agent ID is appended to commit metadata.
+    def git_commit(repo_path: str, message: str, identity: str = "auto") -> dict:
+        """Create a commit, choosing the commit identity from the repo's remotes.
+
+        On a repo forge controls, the commit carries the acting agent's identity
+        and an `agent-id:` trailer. On a repo with any third-party remote it
+        carries the public identity and no trailer — that naming is of no use to
+        an external maintainer and discloses forge's internal agent scheme into
+        permanent public git history.
+
+        This changes only what the commit object says. The audit entry records the
+        real acting agent either way.
+
+        Detection is by remote, not by a flag the caller has to remember: forgetting
+        is how the existing contamination in TadMSTR/claudecodeui@e17739f7 happened.
+        `identity` overrides it when needed.
 
         Args:
             repo_path: Absolute path to the local git repository.
             message: Commit message.
+            identity: 'auto' (default, decide from remotes), 'agent', or 'public'.
         """
-        ac = AuditCtx("git_commit", "local", repo_path, {"repo_path": repo_path})
+        ac = AuditCtx(
+            "git_commit", "local", repo_path, {"repo_path": repo_path, "identity": identity}
+        )
         try:
             validate_write_path(repo_path)
             repo = _open_repo(repo_path)
@@ -380,14 +446,25 @@ def register(mcp) -> None:
             # git_add-only enforcement would be bypassable via any other staging path.
             validate_write_globs(repo_path, _staged_paths(repo))
             config = get_config()
-            agent_tag = f"\n\nagent-id: {config.agent_id}" if config.agent_id != "unknown" else ""
-            full_message = message + agent_tag
+            mode, reason = _resolve_identity_mode(repo, identity, config)
 
-            actor = (
-                git.Actor(config.git_agent_name, config.git_agent_email)
-                if config.git_agent_name
-                else None
-            )
+            if mode == IDENTITY_PUBLIC:
+                # No agent-id trailer: it means nothing to an external maintainer
+                # and names forge's internal agents.
+                full_message = message
+                actor = git.Actor(*_public_identity(repo, config))
+            else:
+                agent_tag = (
+                    f"\n\nagent-id: {config.agent_id}" if config.agent_id != "unknown" else ""
+                )
+                full_message = message + agent_tag
+                actor = (
+                    git.Actor(config.git_agent_name, config.git_agent_email)
+                    if config.git_agent_name
+                    else None
+                )
+            log.info("commit_identity_resolved", repo=repo_path, mode=mode, reason=reason)
+
             signing_key = config.git_signing_key
             if signing_key:
                 # gitpython uses -S with GPG key ID (not the key value)
@@ -402,9 +479,18 @@ def register(mcp) -> None:
                 commit = repo.index.commit(full_message, **kwargs)
 
             ac.finish("ok")
-            return {"sha": commit.hexsha[:12], "message": message}
+            return {
+                "sha": commit.hexsha[:12],
+                "message": message,
+                "identity": mode,
+                "identity_reason": reason,
+                "author": f"{commit.author.name} <{commit.author.email}>",
+            }
         except WriteGlobDenied as e:
             ac.finish("denied:write_glob")
+            return {"error": scrub(str(e))}
+        except IdentityUndetermined as e:
+            ac.finish("denied:identity_undetermined")
             return {"error": scrub(str(e))}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")

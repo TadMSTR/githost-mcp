@@ -39,6 +39,14 @@ class Config:
     git_signing_key: str = ""
     git_agent_name: str = ""
     git_agent_email: str = ""
+    # Public (non-agent) commit identity, used when a repo has a third-party
+    # remote. Empty means "fall back to the repo's own git config".
+    git_public_name: str = ""
+    git_public_email: str = ""
+    # Accounts/orgs forge controls. A repo whose remotes all sit under one of these
+    # — or on the configured GITEA_URL host — gets the agent identity and the
+    # agent-id trailer; anything else gets the public identity.
+    forge_owned_owners: list[str] = field(default_factory=lambda: ["TadMSTR"])
     # OTEL
     otel_endpoint: str = ""
     otel_protocol: str = "grpc"
@@ -76,8 +84,13 @@ class Config:
     auth_token: str = ""
 
 
-def _parse_allowed_roots(raw: str) -> list[str]:
+def _parse_csv(raw: str) -> list[str]:
     return [r.strip() for r in raw.split(",") if r.strip()] if raw else []
+
+
+# Kept under its original name: the roots parser is what this was, and the call
+# site reads better than a bare _parse_csv there.
+_parse_allowed_roots = _parse_csv
 
 
 _DEFAULT_POLICY_PATH = "/etc/forge/workspace-policy.yml"
@@ -292,6 +305,12 @@ def load_config() -> Config:
         .replace("\0", "")
     )
 
+    # Defaults to the account this project is published under, so an existing
+    # deployment keeps the agent identity on its own repos with no config change.
+    # Forge's own Gitea host is derived from GITEA_URL at resolution time rather
+    # than named here — this file ships in a public repo.
+    _forge_owned_owners = _parse_csv(os.getenv("FORGE_OWNED_OWNERS", "")) or ["TadMSTR"]
+
     _manifest_path_raw = os.getenv("AGENT_MANIFEST_PATH", "") or _default_manifest_path(_agent_id)
     _manifest_path = os.path.expanduser(_manifest_path_raw) if _manifest_path_raw else ""
     _policy_path_raw = os.getenv("WORKSPACE_POLICY_PATH", "") or _DEFAULT_POLICY_PATH
@@ -328,6 +347,9 @@ def load_config() -> Config:
         git_signing_key=os.getenv("GIT_SIGNING_KEY", ""),
         git_agent_name=_git_agent_name,
         git_agent_email=_git_agent_email,
+        git_public_name=os.getenv("GIT_PUBLIC_NAME", ""),
+        git_public_email=os.getenv("GIT_PUBLIC_EMAIL", ""),
+        forge_owned_owners=_forge_owned_owners,
         otel_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         otel_protocol=os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
         otel_service_name=os.getenv("OTEL_SERVICE_NAME", "githost-mcp"),

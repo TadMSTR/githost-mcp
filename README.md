@@ -242,7 +242,55 @@ silently widening a glob-scoped agent's grant again.
 
 ### Per-agent committer identity
 
-`GIT_AGENT_NAME` and `GIT_AGENT_EMAIL` set the git author/committer on commits. Defaults to `{AGENT_ID}-agent` / `{AGENT_ID}@forge` when not explicitly set. Values are sanitized (newlines and null bytes stripped) to prevent git header injection. Each commit also appends `agent-id: {AGENT_ID}` as a trailer.
+`GIT_AGENT_NAME` and `GIT_AGENT_EMAIL` set the git author/committer on commits to repos
+you control. Defaults to `{AGENT_ID}-agent` / `{AGENT_ID}@forge` when not explicitly set.
+Values are sanitized (newlines and null bytes stripped) to prevent git header injection.
+Those commits also append `agent-id: {AGENT_ID}` as a trailer.
+
+### Public identity on third-party repos
+
+An agent identity is useful on repos you control and is a disclosure on ones you don't: it
+names your internal agents in permanent public git history, where an external maintainer
+has no use for it. `git_commit` therefore picks its identity from the repo's remotes.
+
+A repo is **forge-controlled** when *every* remote is either owned by an account listed in
+`FORGE_OWNED_OWNERS` or hosted on the configured `GITEA_URL` host (any org). Those commits
+get the agent identity and the `agent-id:` trailer. If **any** remote is third-party, the
+commit gets `GIT_PUBLIC_NAME`/`GIT_PUBLIC_EMAIL` and no trailer.
+
+Detection is by remote rather than by a flag the caller passes, because the caller
+forgetting the flag is precisely how the existing contamination happened.
+
+It deliberately does not read the owner of `origin` alone. Which remote is `origin` is an
+artifact of how the clone was made — for a fork checkout, `origin=upstream, fork=ours` and
+`origin=ours, upstream=theirs` are both common — so an origin-only rule answers the same
+situation two different ways, and gets the fork-under-your-own-account case wrong in the
+leaking direction.
+
+| Situation | Identity |
+|---|---|
+| No remotes | agent — nothing to publish to |
+| All remotes forge-owned or on the Gitea host | agent + `agent-id:` trailer |
+| Any third-party remote | public, no trailer |
+| A remote URL that cannot be parsed | **refused** |
+| A local filesystem path remote | agent — a path on your own disk |
+
+Two refusals, both deliberate. An unparseable remote is refused rather than guessed at:
+defaulting to the agent identity leaks it, defaulting to the public identity breaks
+attribution on internal repos, and an error the caller can resolve with an explicit
+`identity=` argument beats either. A resolved public identity that still looks like an
+agent identity (`*@forge`, `*-agent`) is also refused — a repo-local `user.email` is enough
+to produce one, and it would be the same leak under a different label.
+
+`GIT_PUBLIC_NAME`/`GIT_PUBLIC_EMAIL` fall back to the repo's own git config
+(`user.name`/`user.email`) when unset.
+
+**This changes the commit object only.** Every audit entry records the real acting agent in
+both modes — `write_audit_entry` reads the process-wide agent ID and never consults identity
+resolution. Inverting that would turn a disclosure fix into an accountability hole.
+
+`git_commit(identity=...)` overrides the detection in either direction: `auto` (default),
+`agent`, or `public`.
 
 ### Query limits
 
@@ -340,6 +388,16 @@ WORKSPACE_POLICY_PATH=/etc/forge/workspace-policy.yml  # optional — checked ah
 ```env
 GIT_AGENT_NAME=dev-agent         # git author/committer name (default: {AGENT_ID}-agent)
 GIT_AGENT_EMAIL=dev@forge        # git author/committer email (default: {AGENT_ID}@forge)
+
+# Identity used instead, on any repo that has a third-party remote. Falls back to the
+# repo's own git config user.name/user.email when unset. See Security Model >
+# Public identity on third-party repos.
+GIT_PUBLIC_NAME=YourAccount
+GIT_PUBLIC_EMAIL=12345+YourAccount@users.noreply.github.com
+
+# Accounts/orgs you control, comma-separated (default: TadMSTR). Repos whose remotes
+# all sit under one of these — or on the GITEA_URL host — keep the agent identity.
+FORGE_OWNED_OWNERS=YourAccount,YourOrg
 ```
 
 ### GitHub
