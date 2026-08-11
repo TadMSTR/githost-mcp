@@ -6,9 +6,14 @@ import os
 import pytest
 
 from githost_mcp.audit import (
+    INTEGRITY_TAMPERED,
+    INTEGRITY_UNSIGNED,
+    INTEGRITY_UNVERIFIABLE,
+    INTEGRITY_VERIFIED,
     AuditCtx,
     init_logging,
     verify_entry_hmac,
+    verify_entry_integrity,
     write_audit_entry,
 )
 from githost_mcp.config import reset_config
@@ -86,6 +91,90 @@ def test_hmac_byte_flip_detected(audit_env):
     for entry in entries:
         if "hmac" in entry:
             assert verify_entry_hmac(entry) is False
+
+
+# ---------------------------------------------------------------------------
+# Integrity classification (vikunja#301, id 312)
+#
+# verify_entry_hmac used to return True when no signing key was configured, so an
+# entry with no tamper evidence at all reported exactly like one that had been
+# checked and found intact.
+# ---------------------------------------------------------------------------
+
+
+def test_integrity_verified_for_signed_intact_entry(audit_env):
+    write_audit_entry("git_status", "local", "/repo", {}, "ok", 10)
+    entries = _read_entries(os.environ["AUDIT_LOG_FILE"])
+    assert verify_entry_integrity(entries[0]) == INTEGRITY_VERIFIED
+
+
+def test_integrity_tampered_for_altered_signed_entry(audit_env):
+    write_audit_entry("git_status", "local", "/repo", {}, "ok", 10)
+    entry = _read_entries(os.environ["AUDIT_LOG_FILE"])[0]
+    entry["result"] = "tampered"
+    assert verify_entry_integrity(entry) == INTEGRITY_TAMPERED
+
+
+def test_integrity_unsigned_when_no_key_configured(audit_env, monkeypatch):
+    """The case that motivated this: an entry written with no key must never be
+    reportable as intact."""
+    monkeypatch.delenv("AUDIT_SIGNING_KEY", raising=False)
+    reset_config()
+    init_logging()
+    write_audit_entry("git_status", "local", "/repo", {}, "ok", 10)
+
+    entry = _read_entries(os.environ["AUDIT_LOG_FILE"])[0]
+    assert "hmac" not in entry
+    assert verify_entry_integrity(entry) == INTEGRITY_UNSIGNED
+    assert verify_entry_hmac(entry) is False
+
+
+def test_integrity_unsigned_stays_unsigned_after_key_is_added(audit_env):
+    """An entry from the unsigned window must remain identifiable once the key
+    lands — the absence of an hmac is a fact about the entry, not about config."""
+    unsigned_entry = {
+        "ts": "2026-07-30T00:00:00.000Z",
+        "agent_id": "writer",
+        "tool": "git_commit",
+        "provider": "local",
+        "repo": "/repo",
+        "params": {},
+        "result": "ok",
+        "duration_ms": 1,
+    }
+    # audit_env has a signing key configured.
+    assert verify_entry_integrity(unsigned_entry) == INTEGRITY_UNSIGNED
+
+
+def test_integrity_unverifiable_when_signed_but_no_key_here(audit_env, monkeypatch):
+    """A signed entry read by a process holding no key: no opinion, not a pass."""
+    write_audit_entry("git_status", "local", "/repo", {}, "ok", 10)
+    entry = _read_entries(os.environ["AUDIT_LOG_FILE"])[0]
+    assert "hmac" in entry
+
+    monkeypatch.delenv("AUDIT_SIGNING_KEY", raising=False)
+    reset_config()
+    init_logging()
+
+    assert verify_entry_integrity(entry) == INTEGRITY_UNVERIFIABLE
+    assert verify_entry_hmac(entry) is False
+
+
+def test_missing_key_logs_startup_warning(audit_env, monkeypatch, capsys):
+    # Read stderr rather than caplog: init_logging() clears the root handlers,
+    # which removes pytest's own capture handler along with them.
+    monkeypatch.delenv("AUDIT_SIGNING_KEY", raising=False)
+    monkeypatch.setenv("AGENT_ID", "writer")
+    reset_config()
+    init_logging()
+    err = capsys.readouterr().err
+    assert "audit_signing_key_unset" in err
+    assert "writer" in err, "the warning must name the agent whose key is missing"
+
+
+def test_present_key_logs_no_startup_warning(audit_env, capsys):
+    init_logging()
+    assert "audit_signing_key_unset" not in capsys.readouterr().err
 
 
 def test_credential_not_in_audit_log(audit_env, monkeypatch):

@@ -135,7 +135,20 @@ Every tool call writes a JSONL entry before returning:
 }
 ```
 
-Each entry is HMAC-SHA256 signed with `AUDIT_SIGNING_KEY`. The `audit_log_query` tool verifies every returned entry and includes `tamper_detected: true` on any entry that fails.
+Each entry is HMAC-SHA256 signed **when `AUDIT_SIGNING_KEY` is set** — with no key the `hmac`
+field is simply absent and the entry carries no tamper evidence at all. `audit_log_query`
+classifies every returned entry in an `integrity` field, and reports `integrity_summary` counts
+plus `signing_key_configured` alongside the results:
+
+| `integrity` | `tamper_detected` | Meaning |
+|---|---|---|
+| `verified` | `false` | Signed, and the HMAC matches. |
+| `tampered` | `true` | Signed, but the HMAC does not match — the entry was altered. |
+| `unsigned` | `null` | No `hmac` field. Written while the agent had no key; nothing can be confirmed. |
+| `unverifiable` | `null` | Signed, but this process holds no key to check it against. |
+
+`tamper_detected` is retained for older callers and is `null` — never `false` — whenever
+integrity could not be established. An unsigned entry is not a clean bill of health.
 
 Example — what did the sysadmin agent push last week?
 
@@ -254,7 +267,18 @@ Each provider has its own env vars — a compromised GitHub token does not expos
 
 ### HMAC tamper-evidence
 
-`AUDIT_SIGNING_KEY` (required) is a server-side secret set in the launcher. Each JSONL entry includes `hmac: HMAC-SHA256(canonical_json, key)`. The `audit_log_query` tool verifies every returned entry. This is symmetric (same key signs and verifies) — it proves the file wasn't edited after write, not that the agent identity is genuine. Agent identity proof is the scoped-mcp layer's job.
+`AUDIT_SIGNING_KEY` is a server-side secret set in the launcher, per agent. When it is set, each
+JSONL entry includes `hmac: HMAC-SHA256(canonical_json, key)`. This is symmetric (same key signs
+and verifies) — it proves the file wasn't edited after write, not that the agent identity is
+genuine. Agent identity proof is the scoped-mcp layer's job.
+
+The key is **not enforced at startup**: an agent launched without one starts normally, logs an
+`audit_signing_key_unset` warning naming itself, and writes unsigned entries from then on. Those
+entries report as `unsigned` from `audit_log_query` (see [Audit Architecture](#audit-architecture))
+rather than as verified, and stay identifiable as unsigned after a key is later added — the
+absence of an `hmac` is a property of the entry, not of the current config. Refusing to start
+without a key is a deployment policy choice and is deliberately not made here; it would take an
+agent offline for a missing secret rather than degrade visibly.
 
 ### HTTP transport surface
 

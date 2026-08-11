@@ -141,6 +141,24 @@ def init_logging() -> None:
 
     structlog.contextvars.bind_contextvars(agent_id=_agent_id)
 
+    # Emitted after structlog is configured, so it lands in the real log rather
+    # than a bootstrap logger. Without this the unsigned condition is only
+    # discoverable by querying the audit log and noticing the absent hmac field —
+    # which is exactly how it went unnoticed for the writer agent from deploy
+    # until 2026-08-01 (vikunja#301, id 312). Named per-agent because the key is
+    # supplied per-agent from ~/.secrets/githost-mcp-<agent>.env, so this is
+    # always one agent's problem, not the fleet's.
+    if not _signing_key:
+        log.warning(
+            "audit_signing_key_unset",
+            agent_id=_agent_id,
+            audit_log_file=_audit_log_path,
+            detail=(
+                "AUDIT_SIGNING_KEY is not set — audit entries for this agent are written "
+                "with no tamper evidence and audit_log_query will report them as unsigned."
+            ),
+        )
+
 
 # ---------------------------------------------------------------------------
 # HMAC helpers
@@ -152,14 +170,46 @@ def _compute_hmac(entry_without_hmac: dict) -> str:
     return _hmac.new(_signing_key, canonical.encode(), hashlib.sha256).hexdigest()
 
 
-def verify_entry_hmac(entry: dict) -> bool:
-    """Return True if entry HMAC is valid (or if no signing key is configured)."""
+# Integrity states for a single audit entry. Four distinct facts, deliberately not
+# collapsed into a bool: "we checked and it is intact" and "there was nothing to
+# check" are not the same answer, and reporting the second as the first is a false
+# assurance rather than a missing one (vikunja#301, id 312).
+INTEGRITY_VERIFIED = "verified"  # signed, key present, HMAC matches
+INTEGRITY_TAMPERED = "tampered"  # signed, key present, HMAC does not match
+INTEGRITY_UNSIGNED = "unsigned"  # entry carries no hmac — it was never signed
+INTEGRITY_UNVERIFIABLE = "unverifiable"  # entry is signed but no key is configured here
+
+
+def verify_entry_integrity(entry: dict) -> str:
+    """Classify one audit entry's integrity as one of the INTEGRITY_* constants.
+
+    The absence of an `hmac` field is a property of the entry itself, so it is
+    reported as `unsigned` whether or not a key is configured now — an entry
+    written during an unsigned window stays identifiable after the key is added.
+    A signed entry with no key available to check it is `unverifiable`: we hold
+    no opinion on it, which is different from finding it intact.
+    """
+    if "hmac" not in entry:
+        return INTEGRITY_UNSIGNED
     if not _signing_key:
-        return True
+        return INTEGRITY_UNVERIFIABLE
     stored = entry.get("hmac", "")
     without_hmac = {k: v for k, v in entry.items() if k != "hmac"}
     expected = _compute_hmac(without_hmac)
-    return _hmac.compare_digest(stored, expected)
+    return INTEGRITY_VERIFIED if _hmac.compare_digest(stored, expected) else INTEGRITY_TAMPERED
+
+
+def verify_entry_hmac(entry: dict) -> bool:
+    """Return True only if the entry was positively verified against a signing key.
+
+    This used to return True when no signing key was configured, which meant an
+    unsigned entry — one with no tamper evidence at all — was reported as intact.
+    An unsigned or unverifiable entry now returns False. Callers that need to tell
+    "failed verification" from "nothing to verify" must use verify_entry_integrity();
+    this wrapper cannot express the difference and is kept only for callers that
+    genuinely want the strict question "is this entry known-good?".
+    """
+    return verify_entry_integrity(entry) == INTEGRITY_VERIFIED
 
 
 # ---------------------------------------------------------------------------

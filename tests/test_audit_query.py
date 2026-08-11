@@ -142,15 +142,70 @@ def test_query_detects_tampered_entry(tools, tmp_path):
     assert result["entries"][0]["tamper_detected"] is True
 
 
-def test_query_no_signing_key_never_flags_tamper(tools, monkeypatch):
-    """Without AUDIT_SIGNING_KEY, entries carry no hmac and are never flagged."""
+def test_query_marks_valid_entry_verified(tools):
+    write_audit_entry("git_status", "local", "/repo", {}, "ok", 5)
+    result = tools["audit_log_query"]()
+    assert result["entries"][0]["integrity"] == "verified"
+    assert result["integrity_summary"] == {"verified": 1}
+    assert result["signing_key_configured"] is True
+
+
+def test_query_unsigned_entry_is_not_reported_as_intact(tools, monkeypatch):
+    """Without AUDIT_SIGNING_KEY, entries carry no hmac. Reporting
+    tamper_detected: false on those is a false assurance — the entry has no tamper
+    evidence at all, so nothing was ever checked (vikunja#301, id 312)."""
     monkeypatch.delenv("AUDIT_SIGNING_KEY", raising=False)
     reset_config()
     init_logging()
     write_audit_entry("git_status", "local", "/repo", {}, "ok", 5)
+
     result = tools["audit_log_query"]()
-    assert result["entries"][0]["tamper_detected"] is False
-    assert "hmac" not in result["entries"][0]
+    entry = result["entries"][0]
+
+    assert "hmac" not in entry
+    assert entry["integrity"] == "unsigned"
+    assert entry["tamper_detected"] is not False, (
+        "an unsigned entry must never come back as a clean bill of health"
+    )
+    assert entry["tamper_detected"] is None
+    assert result["integrity_summary"] == {"unsigned": 1}
+    assert result["signing_key_configured"] is False
+
+
+def test_query_signed_entry_without_key_is_unverifiable(tools, monkeypatch, tmp_path):
+    write_audit_entry("git_status", "local", "/repo", {}, "ok", 5)
+    monkeypatch.delenv("AUDIT_SIGNING_KEY", raising=False)
+    reset_config()
+    init_logging()
+
+    result = tools["audit_log_query"]()
+    assert result["entries"][0]["integrity"] == "unverifiable"
+    assert result["entries"][0]["tamper_detected"] is None
+
+
+def test_query_integrity_summary_counts_mixed_states(tools, tmp_path, monkeypatch):
+    """A log spanning an unsigned window and a signed one reports both."""
+    write_audit_entry("git_signed", "local", "/repo", {}, "ok", 5)
+    audit_path = tmp_path / "audit.jsonl"
+    with open(audit_path, "a") as f:
+        f.write(
+            json.dumps(
+                {
+                    "ts": "2026-07-30T00:00:00.000Z",
+                    "agent_id": "test-agent",
+                    "tool": "git_unsigned",
+                    "provider": "local",
+                    "repo": "/repo",
+                    "params": {},
+                    "result": "ok",
+                    "duration_ms": 1,
+                }
+            )
+            + "\n"
+        )
+
+    result = tools["audit_log_query"]()
+    assert result["integrity_summary"] == {"verified": 1, "unsigned": 1}
 
 
 def test_query_unreadable_log_returns_error(tools, tmp_path, monkeypatch):

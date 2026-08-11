@@ -8,7 +8,12 @@ from datetime import UTC, datetime
 
 import structlog
 
-from ..audit import audit_backup_paths, verify_entry_hmac
+from ..audit import (
+    INTEGRITY_TAMPERED,
+    INTEGRITY_VERIFIED,
+    audit_backup_paths,
+    verify_entry_integrity,
+)
 from ..config import get_config
 
 log = structlog.get_logger(__name__)
@@ -64,7 +69,22 @@ def register(mcp) -> None:
     ) -> dict:
         """Query the structured JSONL audit log.
 
-        Each returned entry includes a tamper_detected field (True if HMAC verification fails).
+        Each returned entry carries an `integrity` field:
+
+          verified     — signed, and the HMAC matches.
+          tampered     — signed, but the HMAC does not match: the entry was altered.
+          unsigned     — the entry carries no HMAC. It was written while this agent
+                         had no AUDIT_SIGNING_KEY, so it has no tamper evidence at
+                         all and nothing about it can be confirmed.
+          unverifiable — the entry is signed, but this process has no key to check
+                         it against.
+
+        `tamper_detected` is kept for older callers and is true/false/null, mirroring
+        the above — it is null whenever integrity could not be established, because
+        the absence of tampering was never demonstrated.
+
+        The result also carries `integrity_summary` (counts per state) and
+        `signing_key_configured`.
 
         Args:
             agent_id: Filter by agent ID (exact match).
@@ -99,6 +119,7 @@ def register(mcp) -> None:
 
         entries: list[dict] = []
         searched: list[str] = []
+        integrity_counts: dict[str, int] = {}
         for source in sources:
             if len(entries) >= limit:
                 break
@@ -129,7 +150,20 @@ def register(mcp) -> None:
                         except (KeyError, ValueError):
                             pass
 
-                    entry["tamper_detected"] = not verify_entry_hmac(entry)
+                    integrity = verify_entry_integrity(entry)
+                    entry["integrity"] = integrity
+                    # Kept for callers written against the old field, but it is now
+                    # tri-valued: null where integrity could not be established at
+                    # all. It used to be False for an unsigned entry, which reads as
+                    # a clean bill of health on a record that carries no tamper
+                    # evidence whatsoever.
+                    if integrity == INTEGRITY_VERIFIED:
+                        entry["tamper_detected"] = False
+                    elif integrity == INTEGRITY_TAMPERED:
+                        entry["tamper_detected"] = True
+                    else:
+                        entry["tamper_detected"] = None
+                    integrity_counts[integrity] = integrity_counts.get(integrity, 0) + 1
                     entries.append(entry)
                     if len(entries) >= limit:
                         break
@@ -143,4 +177,9 @@ def register(mcp) -> None:
             "entries": entries,
             "total_matched": len(entries),
             "sources_searched": searched,
+            # Both surfaced at the top level so the condition is visible without
+            # reading every entry: the summary says what was found, and the flag
+            # says whether this process could have verified anything at all.
+            "integrity_summary": integrity_counts,
+            "signing_key_configured": bool(config.audit_signing_key),
         }
