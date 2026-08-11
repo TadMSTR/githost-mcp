@@ -920,3 +920,125 @@ def test_github_pr_list_still_honours_limit(tools):
         result = tools["github_pr_list"]("owner/repo", limit=2)
 
     assert len(result["prs"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# github_fork (vikunja#189, id 200)
+#
+# Forking was the first of the three upstream-contribution steps with no tool at
+# all — the previous contribution shelled out to `gh repo fork`, which is not
+# even authenticated on forge.
+# ---------------------------------------------------------------------------
+
+
+def _mock_fork(full_name="TadMSTR/Hello-World"):
+    import datetime
+
+    f = MagicMock()
+    f.full_name = full_name
+    f.clone_url = f"https://github.com/{full_name}.git"
+    f.ssh_url = f"git@github.com:{full_name}.git"
+    f.html_url = f"https://github.com/{full_name}"
+    f.default_branch = "master"
+    f.created_at = datetime.datetime(2026, 8, 11, 12, 0, 0, tzinfo=datetime.UTC)
+    return f
+
+
+def _fork_patches(mock_gh):
+    return (
+        patch("githost_mcp.tools.github.get_github", return_value=mock_gh),
+        patch(
+            "githost_mcp.tools.github.github_call", side_effect=lambda fn, *a, **kw: fn(*a, **kw)
+        ),
+    )
+
+
+def test_github_fork_returns_clone_url_for_git_remote(tools):
+    """The clone URL is the whole point: it feeds straight into git_remote(add)."""
+    mock_upstream = MagicMock()
+    mock_upstream.create_fork.return_value = _mock_fork()
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_upstream
+
+    p1, p2 = _fork_patches(mock_gh)
+    with p1, p2:
+        result = tools["github_fork"]("octocat", "Hello-World")
+
+    mock_gh.get_repo.assert_called_once_with("octocat/Hello-World")
+    assert result["fork"] == "TadMSTR/Hello-World"
+    assert result["source"] == "octocat/Hello-World"
+    assert result["clone_url"] == "https://github.com/TadMSTR/Hello-World.git"
+    assert result["ssh_url"] == "git@github.com:TadMSTR/Hello-World.git"
+    assert result["default_branch"] == "master"
+
+
+def test_github_fork_omits_organization_when_not_given(tools):
+    """PyGithub asserts organization is a string or its own NotSet sentinel —
+    passing None raises rather than defaulting to the user's account."""
+    mock_upstream = MagicMock()
+    mock_upstream.create_fork.return_value = _mock_fork()
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_upstream
+
+    p1, p2 = _fork_patches(mock_gh)
+    with p1, p2:
+        tools["github_fork"]("octocat", "Hello-World")
+
+    mock_upstream.create_fork.assert_called_once_with()
+
+
+def test_github_fork_into_organization(tools):
+    mock_upstream = MagicMock()
+    mock_upstream.create_fork.return_value = _mock_fork("some-org/Hello-World")
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_upstream
+
+    p1, p2 = _fork_patches(mock_gh)
+    with p1, p2:
+        result = tools["github_fork"]("octocat", "Hello-World", org="some-org")
+
+    mock_upstream.create_fork.assert_called_once_with(organization="some-org")
+    assert result["fork"] == "some-org/Hello-World"
+
+
+@pytest.mark.parametrize(
+    ("owner", "repo"),
+    [("octo/cat", "Hello-World"), ("octocat", "Hello/World"), ("../etc", "passwd"), ("", "repo")],
+)
+def test_github_fork_rejects_malformed_owner_or_repo(tools, owner, repo):
+    result = tools["github_fork"](owner, repo)
+    assert "error" in result
+
+
+@pytest.mark.parametrize("org", ["some/org", "..", "org with space"])
+def test_github_fork_rejects_malformed_org(tools, org):
+    result = tools["github_fork"]("octocat", "Hello-World", org=org)
+    assert "error" in result
+
+
+def test_github_fork_error_is_scrubbed(tools):
+    """A failure must not surface the token."""
+    token = "ghp_fakefakefake123456789012345678901"
+    mock_gh = MagicMock()
+    mock_gh.get_repo.side_effect = Exception(f"401 Bad credentials for {token}")
+
+    with patch("githost_mcp.tools.github.get_github", return_value=mock_gh):
+        result = tools["github_fork"]("octocat", "Hello-World")
+
+    assert "error" in result
+    assert token not in result["error"]
+
+
+def test_github_fork_writes_audit_entry(tools, tmp_path):
+    mock_upstream = MagicMock()
+    mock_upstream.create_fork.return_value = _mock_fork()
+    mock_gh = MagicMock()
+    mock_gh.get_repo.return_value = mock_upstream
+
+    p1, p2 = _fork_patches(mock_gh)
+    with p1, p2:
+        tools["github_fork"]("octocat", "Hello-World")
+
+    audit = (tmp_path / "audit.jsonl").read_text()
+    assert "github_fork" in audit
+    assert "octocat/Hello-World" in audit

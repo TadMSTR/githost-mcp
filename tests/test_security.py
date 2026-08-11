@@ -6,9 +6,12 @@ import pytest
 
 from githost_mcp.security import (
     _PM2_IPC_ENV_VARS,
+    RemoteUrlRejected,
     WriteGlobDenied,
     clean_env,
     validate_read_path,
+    validate_remote_name,
+    validate_remote_url,
     validate_write_globs,
     validate_write_path,
 )
@@ -435,3 +438,75 @@ def test_scrub_catches_unconfigured_credential_that_mask_alone_misses(monkeypatc
     )
     assert "ghp_HANDADDED_NOT_IN_CONFIG" not in scrub(text)
     assert "***@github.com" in scrub(text)
+
+
+# ---------------------------------------------------------------------------
+# Remote URL / name validation (git_remote, vikunja#189 id 200)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/owner/repo.git",
+        "http://gitea.internal/owner/repo.git",
+        "ssh://git@github.com/owner/repo.git",
+        "git://github.com/owner/repo.git",
+        "git@github.com:owner/repo.git",
+        "git@gitea.tadmstr.me:host-forge/component-registry.git",
+    ],
+)
+def test_validate_remote_url_accepts_supported_forms(url):
+    validate_remote_url(url)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:token@github.com/owner/repo.git",
+        "https://ghp_tokenonlynouser@github.com/owner/repo.git",
+        "http://user:pw@host/r.git",
+        "ssh://user:pw@host/r.git",
+        "user:pw@github.com:owner/repo.git",
+    ],
+)
+def test_validate_remote_url_refuses_embedded_credentials(url):
+    with pytest.raises(RemoteUrlRejected):
+        validate_remote_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ext::sh -c 'id > /tmp/pwned'",
+        "fd::7/repo",
+        "file:///srv/repo.git",
+        "/absolute/local/path",
+        "./relative/path",
+        "",
+        "--upload-pack=evil",
+        "-u",
+    ],
+)
+def test_validate_remote_url_refuses_unsupported_or_option_shaped(url):
+    with pytest.raises(RemoteUrlRejected):
+        validate_remote_url(url)
+
+
+def test_validate_remote_url_error_does_not_echo_the_credential():
+    """The rejection message reaches the caller and the audit log — it must not
+    carry the token it is rejecting."""
+    with pytest.raises(RemoteUrlRejected) as excinfo:
+        validate_remote_url("https://ghp_sekrit_token_value@github.com/o/r.git")
+    assert "ghp_sekrit_token_value" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("name", ["origin", "fork", "up-stream", "a.b_c", "team/fork"])
+def test_validate_remote_name_accepts_plain_names(name):
+    validate_remote_name(name)
+
+
+@pytest.mark.parametrize("name", ["", "-u", "--upload-pack=evil", "has space", "semi;colon"])
+def test_validate_remote_name_refuses_option_shaped_or_odd(name):
+    with pytest.raises(ValueError):
+        validate_remote_name(name)

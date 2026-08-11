@@ -758,3 +758,186 @@ def test_git_commit_initial_commit_enforces_write_globs(writer_tools_fresh_repo)
     assert "error" in result, f"out-of-scope path in the initial commit must be denied: {result}"
     assert "src/y.py" in result["error"]
     assert not local.head.is_valid(), "the denied initial commit must not have landed"
+
+
+# ---------------------------------------------------------------------------
+# git_remote (vikunja#189, id 200)
+#
+# Adding a remote was one of the three steps of the upstream-contribution
+# workflow that had no tool and was done via raw shell, outside the audited path.
+# ---------------------------------------------------------------------------
+
+
+def test_git_remote_list_empty(tools):
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="list")
+    assert result["remotes"] == []
+
+
+def test_git_remote_add_then_list(tools):
+    fns, path = tools
+    added = fns["git_remote"](
+        str(path), action="add", name="fork", url="https://github.com/TadMSTR/Hello-World.git"
+    )
+    assert added["added"] == "fork"
+
+    listed = fns["git_remote"](str(path), action="list")
+    assert listed["remotes"] == [
+        {"name": "fork", "url": "https://github.com/TadMSTR/Hello-World.git"}
+    ]
+    # Really in .git/config, not just in the response.
+    assert "fork" in [r.name for r in git.Repo(str(path)).remotes]
+
+
+def test_git_remote_add_scp_style_ssh(tools):
+    fns, path = tools
+    result = fns["git_remote"](
+        str(path), action="add", name="origin", url="git@gitea.tadmstr.me:host-forge/x.git"
+    )
+    assert result["added"] == "origin", f"the form every forge remote uses must work: {result}"
+
+
+def test_git_remote_remove(tools):
+    fns, path = tools
+    fns["git_remote"](str(path), action="add", name="fork", url="https://github.com/o/r.git")
+    result = fns["git_remote"](str(path), action="remove", name="fork")
+    assert result["removed"] == "fork"
+    assert fns["git_remote"](str(path), action="list")["remotes"] == []
+
+
+def test_git_remote_add_duplicate_name_rejected(tools):
+    fns, path = tools
+    fns["git_remote"](str(path), action="add", name="fork", url="https://github.com/o/r.git")
+    result = fns["git_remote"](
+        str(path), action="add", name="fork", url="https://github.com/o/s.git"
+    )
+    assert "error" in result
+    assert "already exists" in result["error"]
+
+
+def test_git_remote_remove_unknown_name_rejected(tools):
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="remove", name="nope")
+    assert "error" in result
+    assert "No such remote" in result["error"]
+
+
+def test_git_remote_unknown_action_rejected(tools):
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="rename", name="a")
+    assert "error" in result
+    assert "Unknown action" in result["error"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:ghp_realtokenvalue@github.com/o/r.git",
+        "https://ghp_realtokenvalue@github.com/o/r.git",
+        "ssh://user:pw@host/o/r.git",
+        "user:pw@github.com:o/r.git",
+    ],
+)
+def test_git_remote_add_refuses_embedded_credentials(tools, url):
+    """Refused, not redacted: a credential in a remote URL persists in .git/config
+    and is reused by every later fetch and push."""
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="add", name="fork", url=url)
+    assert "error" in result, f"credential-bearing URL must be refused: {url}"
+    assert git.Repo(str(path)).remotes == [], "the refused remote must not have been created"
+
+
+def test_git_remote_refused_credential_not_written_to_audit_log(tools, tmp_path):
+    """The refusal path must not record the very credential it is refusing."""
+    fns, path = tools
+    fns["git_remote"](
+        str(path),
+        action="add",
+        name="fork",
+        url="https://ghp_sekrittokenvalue123@github.com/o/r.git",
+    )
+    audit = (tmp_path / "audit.jsonl").read_text()
+    assert "ghp_sekrittokenvalue123" not in audit
+    assert "denied:remote_url" in audit
+
+
+def test_git_remote_list_redacts_preexisting_credentials(tools):
+    """A remote added out-of-band must not leak its token back through this tool."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("legacy", "https://ghp_addedbyhand123@github.com/o/r.git")
+    result = fns["git_remote"](str(path), action="list")
+    assert "ghp_addedbyhand123" not in str(result)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ext::sh -c 'touch /tmp/pwned'",
+        "fd::7/repo",
+        "file:///etc",
+        "/some/local/path",
+    ],
+)
+def test_git_remote_add_refuses_unsupported_transports(tools, url):
+    """`ext::` runs a shell command on the next fetch. A tool that exists to be the
+    audited write path must not be a way to plant one."""
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="add", name="x", url=url)
+    assert "error" in result, f"unsupported transport must be refused: {url}"
+    assert git.Repo(str(path)).remotes == []
+
+
+@pytest.mark.parametrize("bad", ["-u", "--upload-pack=evil"])
+def test_git_remote_add_refuses_option_shaped_name(tools, bad):
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="add", name=bad, url="https://github.com/o/r.git")
+    assert "error" in result
+
+
+def test_git_remote_add_refuses_option_shaped_url(tools):
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="add", name="x", url="--upload-pack=evil")
+    assert "error" in result
+
+
+def test_git_remote_write_blocked_outside_allowed_roots(tools, monkeypatch):
+    """A remote-management tool that skipped the allowlist would be a hole in the
+    boundary this server exists to enforce."""
+    fns, path = tools
+    monkeypatch.setenv("ALLOWED_REPO_ROOTS", "/nonexistent/root")
+    reset_config()
+    for kwargs in (
+        {"action": "add", "name": "fork", "url": "https://github.com/o/r.git"},
+        {"action": "remove", "name": "fork"},
+        {"action": "list"},
+    ):
+        result = fns["git_remote"](str(path), **kwargs)
+        assert "error" in result, f"git_remote {kwargs['action']} must respect the allowlist"
+
+
+def test_git_remote_list_allowed_on_read_only_grant(tools, tmp_path, monkeypatch):
+    """list is a read, and must work for an agent with read but no write grant."""
+    import yaml
+
+    fns, path = tools
+    policy_path = tmp_path / "workspace-policy.yml"
+    with open(policy_path, "w") as f:
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "roots": [{"path": str(tmp_path)}],
+                "default_read": "all",
+                "agents": {"research": {"write_roots": []}},
+                "explicit_agents": {},
+            },
+            f,
+        )
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "research")
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", str(policy_path))
+    reset_config()
+
+    assert "error" not in fns["git_remote"](str(path), action="list")
+    assert "error" in fns["git_remote"](
+        str(path), action="add", name="fork", url="https://github.com/o/r.git"
+    )

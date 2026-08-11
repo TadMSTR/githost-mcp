@@ -9,9 +9,13 @@ from ..audit import AuditCtx
 from ..config import get_config
 from ..gitflags import evaluate_fetch, evaluate_push
 from ..security import (
+    RemoteUrlRejected,
     WriteGlobDenied,
+    redact_url_credentials,
     scrub,
     validate_read_path,
+    validate_remote_name,
+    validate_remote_url,
     validate_write_globs,
     validate_write_path,
 )
@@ -253,6 +257,80 @@ def register(mcp) -> None:
             repo.git.checkout(ref)
             ac.finish("ok")
             return {"checked_out": ref, "detached": repo.head.is_detached}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return {"error": scrub(str(e))}
+
+    @mcp.tool
+    def git_remote(
+        repo_path: str,
+        action: str = "list",
+        name: str | None = None,
+        url: str | None = None,
+    ) -> dict:
+        """List, add, or remove git remotes.
+
+        Adding a remote is what makes the fork-and-contribute workflow possible
+        without leaving this server: pair with github_fork, which returns the
+        clone URL to pass here.
+
+        Remote URLs must not embed credentials. A credential-bearing URL is
+        refused outright rather than redacted — it would otherwise persist in
+        .git/config and be used by every later fetch and push. Returned URLs have
+        any pre-existing userinfo redacted, so a remote added out-of-band cannot
+        leak a token through this tool.
+
+        Args:
+            repo_path: Absolute path to the local git repository.
+            action: 'list', 'add', or 'remove'.
+            name: Remote name (required for add/remove).
+            url: Remote URL (required for add). http(s)/ssh/git or scp-style user@host:path.
+        """
+        params = {
+            "repo_path": repo_path,
+            "action": action,
+            "name": name,
+            # The URL reaches the audit log, so redact before it is recorded — an
+            # add that is about to be refused for embedded credentials must not
+            # write those credentials to the audit trail on its way out.
+            "url": redact_url_credentials(url) if url else None,
+        }
+        ac = AuditCtx("git_remote", "local", repo_path, params)
+        try:
+            if action == "list":
+                validate_read_path(repo_path)
+            else:
+                validate_write_path(repo_path)
+            repo = _open_repo(repo_path)
+
+            if action == "list":
+                remotes = [
+                    {"name": r.name, "url": redact_url_credentials(r.url)} for r in repo.remotes
+                ]
+                ac.finish("ok")
+                return {"repo": repo_path, "remotes": remotes}
+
+            if action == "add":
+                validate_remote_name(name)
+                validate_remote_url(url)
+                if name in [r.name for r in repo.remotes]:
+                    raise ValueError(f"Remote '{name}' already exists")
+                remote = repo.create_remote(name, url)
+                ac.finish("ok")
+                return {"added": remote.name, "url": redact_url_credentials(url)}
+
+            if action == "remove":
+                validate_remote_name(name)
+                if name not in [r.name for r in repo.remotes]:
+                    raise ValueError(f"No such remote: '{name}'")
+                repo.delete_remote(name)
+                ac.finish("ok")
+                return {"removed": name}
+
+            raise ValueError(f"Unknown action '{action}'; use list, add, or remove")
+        except RemoteUrlRejected as e:
+            ac.finish("denied:remote_url")
+            return {"error": scrub(str(e))}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": scrub(str(e))}

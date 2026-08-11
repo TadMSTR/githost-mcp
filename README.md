@@ -76,8 +76,16 @@ mirroring how the official GitHub/Gitea servers structure theirs. This adds ~40
 operations without the tool count ballooning past what every agent pays for in context.
 Each `method` still writes its own per-operation audit entry.
 
-### Local Git (11)
-`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`
+### Local Git (12)
+`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*
+
+`git_remote` refuses a URL that embeds credentials rather than redacting it — unlike text
+on its way out to a caller, a remote URL is written to `.git/config`, where a token would
+outlive the call and be reused by every later fetch and push. Only `http(s)://`, `ssh://`,
+`git://` and scp-style `user@host:path` are accepted; `ext::`/`fd::` remote helpers are
+refused because git runs them as commands on the next fetch. URLs returned by `list` have
+any pre-existing userinfo redacted, so a remote added out-of-band cannot leak a token back
+through this tool.
 
 `git_push` reports failure explicitly (as of 0.9.0): if any of `ERROR` / `REJECTED` /
 `REMOTE_REJECTED` / `REMOTE_FAILURE` is set on the push result — including an empty
@@ -88,8 +96,8 @@ rejected push as a success. `flags` are decoded to reason names (e.g. `["REJECTE
 credential-scrubbed (see Credential isolation below). On success, a missing upstream is
 set automatically and reported as `upstream_set: true`.
 
-### GitHub (16)
-`github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
+### GitHub (17)
+`github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
 
 ### Gitea (14)
 `gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_release_update`, `gitea_release_delete`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`, `gitea_pr_review` *(get_diff/get_files/submit_review/dismiss_review)*, `gitea_actions` *(list_runs/get_run/list_jobs/get_job_log/dispatch_workflow/rerun_run/rerun_failed_jobs)*, `gitea_issue_read` *(get/list/comments)*, `gitea_issue_write` *(create/update/add_comment/close/reopen)*
@@ -161,9 +169,10 @@ audit_log_query(agent_id="sysadmin", tool="git_push", since="2026-05-20")
 ### Repo path allowlist
 
 `Config` carries separate `allowed_read_roots` and `allowed_write_roots`. Read tools
-(`git_status`, `git_diff`, `git_log`, `git_show`) validate against the read list; write
-tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`, `git_branch
-create/delete`, `release`) validate against the write list. `allowed_repo_roots` remains
+(`git_status`, `git_diff`, `git_log`, `git_show`, `git_remote list`) validate against the
+read list; write tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`,
+`git_branch create/delete`, `git_remote add/remove`, `release`) validate against the write
+list. `allowed_repo_roots` remains
 as a deprecated alias of `allowed_write_roots` for any caller not yet migrated.
 
 Resolution order (first match wins, see Architecture diagram above):
