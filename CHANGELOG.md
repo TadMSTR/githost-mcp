@@ -2,6 +2,99 @@
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-08-11
+
+Two builds land in this release. The upstream-contribution work below is new; the
+workspace-policy Phase 1/Phase 3 entries after it had been sitting in `[Unreleased]` since
+2026-08-08 and ship here rather than waiting for a release of their own.
+
+### Added — `git_remote` (vikunja #189, id 200)
+
+`git_remote(repo_path, action, name, url)` with `action` in `list | add | remove`. `list`
+validates against the read allowlist, `add`/`remove` against the write allowlist — a
+remote-management tool that skipped the allowlist would be a hole in the boundary this server
+exists to enforce.
+
+Remote URLs that embed credentials are **refused, not redacted**. `redact_url_credentials()`
+exists for text on its way out to a caller; a remote URL is on its way into `.git/config`,
+where a token outlives the call that supplied it and is reused by every later fetch and push —
+redacting there would silently store a broken remote instead. Any userinfo is refused over
+`http(s)`, where `https://<token>@host/…` is how a PAT is normally embedded; `ssh://` and
+scp-style remotes keep their bare `git@` login, which is a username rather than a secret, but
+are refused if they carry a password.
+
+Only `http(s)://`, `ssh://`, `git://` and scp-style `user@host:path` are accepted. `ext::` and
+`fd::` remote helpers are shaped exactly like `host:path` and are executed by git as shell
+commands on the next fetch, so a tool that exists to be the audited write path must not be a
+way to plant one. Names and URLs beginning with `-` are refused so git cannot parse them as
+options. URLs returned by `list` have any pre-existing userinfo redacted, so a remote added
+out-of-band cannot leak a token back out through this tool.
+
+### Added — `github_fork` (vikunja #189, id 200)
+
+`github_fork(owner, repo, org=None)` wraps `POST /repos/{owner}/{repo}/forks` through the
+existing PyGithub client — not `gh`, which is unauthenticated on forge — and returns the
+fork's `clone_url` so it can be handed straight to `git_remote(action="add")`. GitHub's fork
+endpoint is idempotent and asynchronous: it returns an existing fork rather than an error, and
+the repository can take a few seconds to become clonable.
+
+### Changed — `git_commit` selects a public identity for third-party repos (vikunja #310, id 321)
+
+`git_commit` wrote `<agent>-agent <agent@forge>` and an `agent-id:` trailer into every commit,
+including commits destined for third-party public repos, where that names forge's internal
+agents in permanent public git history. Fork commit `e17739f7` in `TadMSTR/claudecodeui`
+carries it. It was caught last time only because someone remembered to run `git show`.
+
+Identity is now resolved from the repo's remotes rather than from a flag the caller must
+remember, since forgetting the flag is how the contamination happened. The rule is **public
+unless every remote is forge-controlled**, not the owner of `origin`: which remote is `origin`
+is an artifact of how the clone was made, so an origin-only rule answers the same situation
+two different ways, and it reads a fork living under a forge-controlled account as internal
+while its commits go to a third-party PR.
+
+Because a project of ours and our fork of someone else's are byte-identical from the remotes
+alone, a repo that resolves as forge-controlled *and* is a GitHub repo under a forge-owned
+account has its fork status checked against GitHub, cached per repo in `.git/config` under
+`githost-mcp.upstream-provenance`. Repos on the `GITEA_URL` host, and repos already resolved
+third-party, never trigger a lookup. An undetermined lookup resolves to the public identity
+and is not cached.
+
+An unparseable remote URL is refused rather than guessed at, and a resolved public identity
+that still looks like an agent identity (`*@forge`, `*-agent`) is refused too. New
+`GIT_PUBLIC_NAME`, `GIT_PUBLIC_EMAIL` and `FORGE_OWNED_OWNERS` settings, all optional — the
+public identity falls back to the repo's own git config.
+
+**The audit trail is unchanged.** `write_audit_entry` reads the process-wide agent ID and never
+consults identity resolution, so both modes record the real acting agent. Public-identity mode
+changes what external maintainers see, not what forge can hold an agent to.
+
+`git_commit(identity=...)` overrides the detection: `auto` (default), `agent`, or `public`.
+
+### Security — unsigned audit entries no longer report as verified (vikunja #301, id 312)
+
+`verify_entry_hmac()` returned `True` when no signing key was configured, so `audit_log_query`
+reported `tamper_detected: false` for entries carrying no `hmac` at all — a false assurance
+rather than a missing one. An operator auditing an agent that had never had a key was told the
+record was intact when nothing had ever been checked.
+
+`verify_entry_integrity()` replaces the bool with four states: `verified`, `tampered`,
+`unsigned`, `unverifiable`. The absence of an `hmac` is treated as a property of the entry, so
+entries written during an unsigned window stay identifiable as such after a key is added.
+`audit_log_query` returns `integrity` per entry plus `integrity_summary` and
+`signing_key_configured`; `tamper_detected` is retained for older callers and is now `null` —
+never `false` — wherever integrity could not be established. Startup logs an
+`audit_signing_key_unset` warning naming the agent.
+
+`verify_entry_hmac()` now returns `False` for unsigned and unverifiable entries where it
+previously returned `True`. Callers needing to distinguish "failed verification" from "nothing
+to verify" must use `verify_entry_integrity()`.
+
+The server still starts without a key: refusing would take an agent offline for a missing
+secret, which is a deployment policy choice and deliberately not made here.
+
+**Expect a visible change on deploy.** Any agent without an `AUDIT_SIGNING_KEY` will have its
+entire audit history report as `unsigned`. That is correct and is the point of the change.
+
 ### Security — `validate_write_globs()` normalizes paths before matching (workspace-policy Phase 3 audit, MEDIUM)
 
 Audit finding: `validate_write_globs()` matched the raw, caller-supplied path string against

@@ -172,6 +172,107 @@ def validate_write_globs(repo_path: str, paths: list[str]) -> None:
         raise WriteGlobDenied(repo_path, denied, config.allowlist_source)
 
 
+# Remote-URL validation for git_remote. A remote URL is not inert data: git will
+# hand it to a remote helper on the next fetch, and `ext::` in particular runs an
+# arbitrary shell command (`git remote add x "ext::sh -c '…'"` executes on fetch).
+# Restricting to the transports forge actually uses keeps a write tool that exists
+# to be the audited path from becoming a command-execution primitive.
+_ALLOWED_REMOTE_SCHEMES = ("http://", "https://", "ssh://", "git://")
+# Schemes where a bare userinfo is a login name rather than a secret. Over http(s)
+# a bare userinfo is how a PAT is normally embedded (`https://<token>@github.com/…`),
+# so there it is refused outright; over ssh/git `git@` is just the SSH user.
+_LOGIN_USERINFO_SCHEMES = ("ssh://", "git://")
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
+# scp-style: [user@]host:path. `git@github.com:owner/repo.git` is the form every
+# forge remote uses, so it has to keep working — but only without a password.
+#
+# The path must not begin with '/' or ':'. The ':' exclusion is what separates this
+# from git's remote-helper syntax: `ext::sh -c '…'` is otherwise shaped exactly like
+# host:path, and would match here and be stored as a remote that runs a shell
+# command on the next fetch.
+_SCP_RE = re.compile(r"^(?P<userinfo>[^/@]+@)?[^/@:]+:(?![/:]).+$")
+_WHITESPACE_RE = re.compile(r"\s")
+# A leading '-' makes git parse the value as an option rather than a name/URL.
+_LEADING_DASH_ERR = "must not start with '-'"
+_REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+
+class RemoteUrlRejected(ValueError):
+    """Raised by validate_remote_url() for a URL git_remote refuses to store."""
+
+
+def validate_remote_name(name: str) -> None:
+    """Raise ValueError unless `name` is a plain remote name."""
+    if not name:
+        raise ValueError("remote name is required")
+    if name.startswith("-"):
+        raise ValueError(f"remote name {_LEADING_DASH_ERR}")
+    if not _REMOTE_NAME_RE.match(name):
+        raise ValueError(f"Invalid remote name '{name}': use letters, digits, '.', '_', '-', '/'")
+
+
+def validate_remote_url(url: str) -> None:
+    """Raise RemoteUrlRejected unless `url` is a credential-free supported remote URL.
+
+    Credentials are **refused, not redacted**. redact_url_credentials() exists for
+    text on its way out to a caller; this is text on its way into `.git/config`,
+    where a token would persist on disk for every later fetch and push, outlive the
+    call that supplied it, and be readable by anything that can read the repo.
+    Redacting it there would silently store a broken remote instead.
+
+    Any userinfo at all is refused for scheme-qualified URLs, not just the
+    `user:token@` form — `https://<token>@github.com/owner/repo` is exactly how a
+    PAT is normally embedded, and it carries no colon. scp-style remotes keep their
+    bare `git@host:path` username, which is a username and not a secret, but are
+    refused if they carry a `user:password@`.
+    """
+    if not url:
+        raise RemoteUrlRejected("remote url is required")
+    if url.startswith("-"):
+        raise RemoteUrlRejected(f"remote url {_LEADING_DASH_ERR}")
+    if _WHITESPACE_RE.search(url):
+        raise RemoteUrlRejected("Remote URL must not contain whitespace")
+
+    if _SCHEME_RE.match(url):
+        if not url.startswith(_ALLOWED_REMOTE_SCHEMES):
+            scheme = url.split("://", 1)[0]
+            raise RemoteUrlRejected(
+                f"Unsupported remote URL scheme '{scheme}://'. "
+                f"Allowed: {', '.join(_ALLOWED_REMOTE_SCHEMES)}, or scp-style user@host:path."
+            )
+        rest = url.split("://", 1)[1]
+        authority = rest.split("/", 1)[0]
+        if "@" in authority:
+            userinfo = authority.rsplit("@", 1)[0]
+            if not url.startswith(_LOGIN_USERINFO_SCHEMES):
+                raise RemoteUrlRejected(
+                    "Remote URL embeds credentials in its userinfo component. Refused rather "
+                    "than redacted: it would persist in .git/config. Use an scp-style SSH "
+                    "remote, or a credential helper."
+                )
+            if ":" in userinfo:
+                raise RemoteUrlRejected(
+                    "Remote URL embeds a password in its user component. Refused rather than "
+                    "redacted: it would persist in .git/config."
+                )
+        return
+
+    if scp_match := _SCP_RE.match(url):
+        if ":" in (scp_match.group("userinfo") or ""):
+            raise RemoteUrlRejected(
+                "Remote URL embeds a password in its user component. Refused rather than "
+                "redacted: it would persist in .git/config."
+            )
+        return
+
+    # Everything else — including bare local paths and `ext::`/`fd::` remote
+    # helpers, which run commands on fetch.
+    raise RemoteUrlRejected(
+        f"Unsupported remote URL form: '{url}'. Use {', '.join(_ALLOWED_REMOTE_SCHEMES)}, "
+        "or scp-style user@host:path."
+    )
+
+
 def mask_credentials(text: str) -> str:
     """Replace known credential values with *** in text."""
     config = get_config()

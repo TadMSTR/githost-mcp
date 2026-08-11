@@ -1,4 +1,4 @@
-"""GitHub tools via PyGithub (10 tools)."""
+"""GitHub tools via PyGithub (11 tools)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,11 @@ log = structlog.get_logger(__name__)
 # GitHub full names are always exactly 'owner/repo' (one slash, no numeric-ID form).
 _REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
+
+# A single owner/org segment — github_fork takes owner and repo separately, and the
+# org it forks into is a bare name with no slash.
+_OWNER_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
+_OWNER_FMT_ERR = "org must be a single name (alphanumeric, hyphens, underscores, dots)"
 
 
 def _err(e: Exception) -> dict:
@@ -272,6 +277,53 @@ def register(mcp) -> None:
                 )
             ac.finish("ok")
             return {"repo": repo, "pr": pr_number, "comments": comments}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return _err(e)
+
+    @mcp.tool
+    def github_fork(owner: str, repo: str, org: str | None = None) -> dict:
+        """Fork a GitHub repository to your account, or to an organization.
+
+        The first step of contributing to a third-party upstream: fork here, then
+        pass the returned clone_url straight to git_remote(action='add') without
+        constructing it by hand.
+
+        GitHub's fork endpoint is idempotent and asynchronous. If the fork already
+        exists it returns that existing repository rather than an error, so a
+        result here is not proof that anything was created — compare created_at if
+        that distinction matters. Forking is also queued: the repository can take a
+        few seconds to become clonable.
+
+        Args:
+            owner: Owner of the upstream repository to fork (user or org).
+            repo: Name of the upstream repository to fork.
+            org: Organization to fork into (default: the authenticated user's account).
+        """
+        full_name = f"{owner}/{repo}"
+        if err := _bad_repo(full_name):
+            return err
+        if org is not None and not _OWNER_RE.match(org):
+            return {"error": _OWNER_FMT_ERR}
+        ac = AuditCtx("github_fork", "github", full_name, {"repo": full_name, "org": org})
+        try:
+            gh = get_github()
+            upstream = github_call(gh.get_repo, full_name)
+            # organization must be omitted entirely rather than passed as None —
+            # PyGithub asserts the parameter is either a string/Organization or its
+            # own NotSet sentinel, and None is neither.
+            kwargs = {"organization": org} if org else {}
+            fork = github_call(upstream.create_fork, **kwargs)
+            ac.finish("ok")
+            return {
+                "fork": fork.full_name,
+                "source": full_name,
+                "clone_url": fork.clone_url,
+                "ssh_url": fork.ssh_url,
+                "url": fork.html_url,
+                "default_branch": fork.default_branch,
+                "created_at": fork.created_at.isoformat() if fork.created_at else None,
+            }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return _err(e)

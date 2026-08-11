@@ -1,6 +1,8 @@
 """Tests for local git tools using real temporary repositories."""
 
+import json
 import pathlib
+from unittest.mock import MagicMock, patch
 
 import git
 import pytest
@@ -758,3 +760,585 @@ def test_git_commit_initial_commit_enforces_write_globs(writer_tools_fresh_repo)
     assert "error" in result, f"out-of-scope path in the initial commit must be denied: {result}"
     assert "src/y.py" in result["error"]
     assert not local.head.is_valid(), "the denied initial commit must not have landed"
+
+
+# ---------------------------------------------------------------------------
+# git_remote (vikunja#189, id 200)
+#
+# Adding a remote was one of the three steps of the upstream-contribution
+# workflow that had no tool and was done via raw shell, outside the audited path.
+# ---------------------------------------------------------------------------
+
+
+def test_git_remote_list_empty(tools):
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="list")
+    assert result["remotes"] == []
+
+
+def test_git_remote_add_then_list(tools):
+    fns, path = tools
+    added = fns["git_remote"](
+        str(path), action="add", name="fork", url="https://github.com/TadMSTR/Hello-World.git"
+    )
+    assert added["added"] == "fork"
+
+    listed = fns["git_remote"](str(path), action="list")
+    assert listed["remotes"] == [
+        {"name": "fork", "url": "https://github.com/TadMSTR/Hello-World.git"}
+    ]
+    # Really in .git/config, not just in the response.
+    assert "fork" in [r.name for r in git.Repo(str(path)).remotes]
+
+
+def test_git_remote_add_scp_style_ssh(tools):
+    fns, path = tools
+    result = fns["git_remote"](
+        str(path), action="add", name="origin", url="git@gitea.example-forge.test:host-forge/x.git"
+    )
+    assert result["added"] == "origin", f"the form every forge remote uses must work: {result}"
+
+
+def test_git_remote_remove(tools):
+    fns, path = tools
+    fns["git_remote"](str(path), action="add", name="fork", url="https://github.com/o/r.git")
+    result = fns["git_remote"](str(path), action="remove", name="fork")
+    assert result["removed"] == "fork"
+    assert fns["git_remote"](str(path), action="list")["remotes"] == []
+
+
+def test_git_remote_add_duplicate_name_rejected(tools):
+    fns, path = tools
+    fns["git_remote"](str(path), action="add", name="fork", url="https://github.com/o/r.git")
+    result = fns["git_remote"](
+        str(path), action="add", name="fork", url="https://github.com/o/s.git"
+    )
+    assert "error" in result
+    assert "already exists" in result["error"]
+
+
+def test_git_remote_remove_unknown_name_rejected(tools):
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="remove", name="nope")
+    assert "error" in result
+    assert "No such remote" in result["error"]
+
+
+def test_git_remote_unknown_action_rejected(tools):
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="rename", name="a")
+    assert "error" in result
+    assert "Unknown action" in result["error"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:ghp_realtokenvalue@github.com/o/r.git",
+        "https://ghp_realtokenvalue@github.com/o/r.git",
+        "ssh://user:pw@host/o/r.git",
+        "user:pw@github.com:o/r.git",
+    ],
+)
+def test_git_remote_add_refuses_embedded_credentials(tools, url):
+    """Refused, not redacted: a credential in a remote URL persists in .git/config
+    and is reused by every later fetch and push."""
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="add", name="fork", url=url)
+    assert "error" in result, f"credential-bearing URL must be refused: {url}"
+    assert git.Repo(str(path)).remotes == [], "the refused remote must not have been created"
+
+
+def test_git_remote_refused_credential_not_written_to_audit_log(tools, tmp_path):
+    """The refusal path must not record the very credential it is refusing."""
+    fns, path = tools
+    fns["git_remote"](
+        str(path),
+        action="add",
+        name="fork",
+        url="https://ghp_sekrittokenvalue123@github.com/o/r.git",
+    )
+    audit = (tmp_path / "audit.jsonl").read_text()
+    assert "ghp_sekrittokenvalue123" not in audit
+    assert "denied:remote_url" in audit
+
+
+def test_git_remote_list_redacts_preexisting_credentials(tools):
+    """A remote added out-of-band must not leak its token back through this tool."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("legacy", "https://ghp_addedbyhand123@github.com/o/r.git")
+    result = fns["git_remote"](str(path), action="list")
+    assert "ghp_addedbyhand123" not in str(result)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ext::sh -c 'touch /tmp/pwned'",
+        "fd::7/repo",
+        "file:///etc",
+        "/some/local/path",
+    ],
+)
+def test_git_remote_add_refuses_unsupported_transports(tools, url):
+    """`ext::` runs a shell command on the next fetch. A tool that exists to be the
+    audited write path must not be a way to plant one."""
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="add", name="x", url=url)
+    assert "error" in result, f"unsupported transport must be refused: {url}"
+    assert git.Repo(str(path)).remotes == []
+
+
+@pytest.mark.parametrize("bad", ["-u", "--upload-pack=evil"])
+def test_git_remote_add_refuses_option_shaped_name(tools, bad):
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="add", name=bad, url="https://github.com/o/r.git")
+    assert "error" in result
+
+
+def test_git_remote_add_refuses_option_shaped_url(tools):
+    fns, path = tools
+    result = fns["git_remote"](str(path), action="add", name="x", url="--upload-pack=evil")
+    assert "error" in result
+
+
+def test_git_remote_write_blocked_outside_allowed_roots(tools, monkeypatch):
+    """A remote-management tool that skipped the allowlist would be a hole in the
+    boundary this server exists to enforce."""
+    fns, path = tools
+    monkeypatch.setenv("ALLOWED_REPO_ROOTS", "/nonexistent/root")
+    reset_config()
+    for kwargs in (
+        {"action": "add", "name": "fork", "url": "https://github.com/o/r.git"},
+        {"action": "remove", "name": "fork"},
+        {"action": "list"},
+    ):
+        result = fns["git_remote"](str(path), **kwargs)
+        assert "error" in result, f"git_remote {kwargs['action']} must respect the allowlist"
+
+
+def test_git_remote_list_allowed_on_read_only_grant(tools, tmp_path, monkeypatch):
+    """list is a read, and must work for an agent with read but no write grant."""
+    import yaml
+
+    fns, path = tools
+    policy_path = tmp_path / "workspace-policy.yml"
+    with open(policy_path, "w") as f:
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "roots": [{"path": str(tmp_path)}],
+                "default_read": "all",
+                "agents": {"research": {"write_roots": []}},
+                "explicit_agents": {},
+            },
+            f,
+        )
+    monkeypatch.delenv("ALLOWED_REPO_ROOTS", raising=False)
+    monkeypatch.setenv("AGENT_ID", "research")
+    monkeypatch.setenv("WORKSPACE_POLICY_PATH", str(policy_path))
+    reset_config()
+
+    assert "error" not in fns["git_remote"](str(path), action="list")
+    assert "error" in fns["git_remote"](
+        str(path), action="add", name="fork", url="https://github.com/o/r.git"
+    )
+
+
+# ---------------------------------------------------------------------------
+# git_commit identity mode (vikunja#310, id 321)
+#
+# Against real repos with real remotes: the bug being fixed was about what ends up
+# in an actual commit object, which a mocked identity would not catch.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def public_identity_env(monkeypatch):
+    monkeypatch.setenv("GIT_PUBLIC_NAME", "TadMSTR")
+    monkeypatch.setenv("GIT_PUBLIC_EMAIL", "69825253+TadMSTR@users.noreply.github.com")
+    monkeypatch.setenv("AGENT_ID", "developer")
+    monkeypatch.delenv("GIT_AGENT_NAME", raising=False)
+    monkeypatch.delenv("GIT_AGENT_EMAIL", raising=False)
+    reset_config()
+
+
+def _stage_a_file(path, name="work.txt"):
+    (path / name).write_text("work")
+    git.Repo(str(path)).git.add("--", name)
+
+
+def test_git_commit_third_party_remote_uses_public_identity(
+    tools, public_identity_env, monkeypatch
+):
+    """The decisive test: a commit bound for a third-party repo must not carry the
+    agent identity or the agent-id trailer into permanent public history."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "fix: a real upstream fix")
+
+    assert result.get("identity") == "public", result
+    commit = git.Repo(str(path)).head.commit
+    assert commit.author.name == "TadMSTR"
+    assert commit.author.email == "69825253+TadMSTR@users.noreply.github.com"
+    assert commit.committer.email == "69825253+TadMSTR@users.noreply.github.com"
+    assert "agent-id" not in commit.message
+    assert "forge" not in commit.message
+    assert "@forge" not in f"{commit.author.name} <{commit.author.email}>"
+
+
+def _seed_provenance(path, verdict):
+    """Pre-populate the provenance cache so no GitHub lookup is attempted.
+
+    Tests must never reach the network: with a real GITHUB_TOKEN in the environment
+    they would silently pass against live GitHub and fail on CI, which has none.
+    """
+    with git.Repo(str(path)).config_writer() as cw:
+        cw.set_value("githost-mcp", "upstream-provenance", verdict)
+
+
+def test_git_commit_forge_owned_remote_keeps_agent_identity(tools, public_identity_env):
+    """The other direction: internal repos must keep per-agent attribution."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _seed_provenance(path, "own")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "internal change")
+
+    assert result.get("identity") == "agent", result
+    commit = git.Repo(str(path)).head.commit
+    assert commit.author.name == "developer-agent"
+    assert commit.author.email == "developer@forge"
+    assert "agent-id: developer" in commit.message
+
+
+def test_git_commit_fork_layout_uses_public_identity(tools, public_identity_env):
+    """origin = our fork under a forge-owned account, upstream = theirs. An
+    owner-of-origin rule would call this forge-controlled and leak."""
+    fns, path = tools
+    repo = git.Repo(str(path))
+    repo.create_remote("origin", "https://github.com/TadMSTR/claudecodeui.git")
+    repo.create_remote("upstream", "https://github.com/siteboon/claudecodeui.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "fix: upstream fix")
+
+    assert result.get("identity") == "public", result
+    assert "agent-id" not in git.Repo(str(path)).head.commit.message
+
+
+def test_git_commit_audit_records_the_real_agent_in_public_mode(
+    tools, public_identity_env, tmp_path
+):
+    """Public-identity mode changes what external maintainers see. It must NOT
+    change what forge's own audit trail records — otherwise a cosmetic disclosure
+    fix becomes an accountability hole."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    _stage_a_file(path)
+    init_logging()  # rebind the audit agent id to 'developer'
+
+    fns["git_commit"](str(path), "upstream fix")
+
+    audit_lines = [
+        line for line in (tmp_path / "audit.jsonl").read_text().splitlines() if "git_commit" in line
+    ]
+    assert audit_lines, "the commit must be audited"
+    entry = json.loads(audit_lines[-1])
+    assert entry["agent_id"] == "developer", (
+        "the audit trail must name the real acting agent, not the public identity"
+    )
+    assert entry["result"] == "ok"
+
+
+def test_git_commit_no_remotes_keeps_agent_identity(tools, public_identity_env):
+    """No publication target — today's behaviour, so local-only repos keep working."""
+    fns, path = tools
+    assert git.Repo(str(path)).remotes == []
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "local work")
+
+    assert result.get("identity") == "agent", result
+    assert "agent-id: developer" in git.Repo(str(path)).head.commit.message
+
+
+def test_git_commit_identity_override_public_on_forge_repo(tools, public_identity_env):
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "manual public", identity="public")
+
+    assert result.get("identity") == "public"
+    assert "agent-id" not in git.Repo(str(path)).head.commit.message
+
+
+def test_git_commit_identity_override_agent_on_third_party_repo(tools, public_identity_env):
+    """The override wins both ways — the caller can still opt back in deliberately."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "deliberate", identity="agent")
+
+    assert result.get("identity") == "agent"
+    assert "agent-id: developer" in git.Repo(str(path)).head.commit.message
+
+
+def test_git_commit_unknown_identity_value_rejected(tools, public_identity_env):
+    fns, path = tools
+    _stage_a_file(path)
+    result = fns["git_commit"](str(path), "x", identity="whatever")
+    assert "error" in result
+    assert git.Repo(str(path)).head.commit.message.strip() == "Initial", (
+        "an unknown identity value must not fall through to a commit"
+    )
+
+
+def test_git_commit_refuses_when_remote_is_unparseable(tools, public_identity_env):
+    """Fail loud: guessing either way is worse than an error."""
+    fns, path = tools
+    repo = git.Repo(str(path))
+    with repo.config_writer() as cw:
+        cw.set_value('remote "odd"', "url", "@@@not-a-url@@@")
+        cw.set_value('remote "odd"', "fetch", "+refs/heads/*:refs/remotes/odd/*")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "ambiguous")
+
+    assert "error" in result, result
+    assert "identity" in result["error"].lower()
+    assert git.Repo(str(path)).head.commit.message.strip() == "Initial", (
+        "the refused commit must not have landed"
+    )
+
+
+def test_git_commit_refuses_when_public_identity_is_an_agent_identity(tools, monkeypatch):
+    """A repo-local user.email=<agent>@forge must not be handed back as 'public'."""
+    fns, path = tools
+    monkeypatch.delenv("GIT_PUBLIC_NAME", raising=False)
+    monkeypatch.delenv("GIT_PUBLIC_EMAIL", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    reset_config()
+    repo = git.Repo(str(path))
+    repo.create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "developer-agent")
+        cw.set_value("user", "email", "developer@forge")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "would have leaked")
+
+    assert "error" in result, result
+    assert "forge agent identity" in result["error"]
+
+
+def test_git_commit_public_identity_falls_back_to_git_config(tools, monkeypatch):
+    """No GIT_PUBLIC_* set: use the identity already in the repo's git config, which
+    is where forge's public identity actually lives."""
+    fns, path = tools
+    monkeypatch.delenv("GIT_PUBLIC_NAME", raising=False)
+    monkeypatch.delenv("GIT_PUBLIC_EMAIL", raising=False)
+    monkeypatch.setenv("AGENT_ID", "developer")
+    reset_config()
+    repo = git.Repo(str(path))
+    repo.create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "TadMSTR")
+        cw.set_value("user", "email", "69825253+TadMSTR@users.noreply.github.com")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "upstream fix")
+
+    assert result.get("identity") == "public", result
+    assert git.Repo(str(path)).head.commit.author.name == "TadMSTR"
+
+
+def test_git_commit_forge_gitea_host_keeps_agent_identity(tools, public_identity_env, monkeypatch):
+    """Anything on forge's own Gitea is forge's, whatever the org name."""
+    fns, path = tools
+    monkeypatch.setenv("GITEA_URL", "https://gitea.example-forge.test")
+    reset_config()
+    git.Repo(str(path)).create_remote("origin", "git@gitea.example-forge.test:host-forge/x.git")
+    _stage_a_file(path)
+
+    result = fns["git_commit"](str(path), "internal doc change")
+
+    assert result.get("identity") == "agent", result
+
+
+# ---------------------------------------------------------------------------
+# Fork provenance (audit HIGH, 2026-08-11)
+#
+# `TadMSTR/githost-mcp` (ours) and `TadMSTR/claudecodeui` (our fork of someone
+# else's) are byte-identical from the remotes alone, so a clone whose only remote
+# is the fork resolved to the agent identity — the disclosure this build exists to
+# prevent. Resolving it needs GitHub's own record of whether the repo is a fork.
+#
+# Every test here controls that lookup explicitly. None may reach the network: a
+# real GITHUB_TOKEN in the environment would otherwise make them pass against live
+# GitHub and fail on CI, which has none.
+# ---------------------------------------------------------------------------
+
+
+def _mock_github(fork: bool, parent_full_name: str | None):
+    gh_repo = MagicMock()
+    gh_repo.fork = fork
+    if parent_full_name:
+        gh_repo.parent = MagicMock()
+        gh_repo.parent.full_name = parent_full_name
+    else:
+        gh_repo.parent = None
+    gh = MagicMock()
+    gh.get_repo.return_value = gh_repo
+    return gh
+
+
+def _patch_lookup(gh):
+    return (
+        patch("githost_mcp.tools.git_local.get_github", return_value=gh),
+        patch(
+            "githost_mcp.tools.git_local.github_call",
+            side_effect=lambda fn, *a, **kw: fn(*a, **kw),
+        ),
+    )
+
+
+def test_git_commit_fork_only_layout_uses_public_identity(tools, public_identity_env):
+    """The audit's HIGH: clone the fork directly, never add an upstream remote. The
+    remotes say forge-controlled; GitHub says it is a fork of siteboon's repo."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/claudecodeui.git")
+    _stage_a_file(path)
+
+    p1, p2 = _patch_lookup(_mock_github(fork=True, parent_full_name="siteboon/claudecodeui"))
+    with p1, p2:
+        result = fns["git_commit"](str(path), "fix: upstream fix")
+
+    assert result.get("identity") == "public", result
+    commit = git.Repo(str(path)).head.commit
+    assert "agent-id" not in commit.message
+    assert commit.author.email == "69825253+TadMSTR@users.noreply.github.com"
+
+
+def test_git_commit_own_github_repo_keeps_agent_identity_after_lookup(tools, public_identity_env):
+    """The lookup must not flip our own projects to public."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _stage_a_file(path)
+
+    p1, p2 = _patch_lookup(_mock_github(fork=False, parent_full_name=None))
+    with p1, p2:
+        result = fns["git_commit"](str(path), "internal change")
+
+    assert result.get("identity") == "agent", result
+    assert "agent-id: developer" in git.Repo(str(path)).head.commit.message
+
+
+def test_git_commit_fork_of_our_own_repo_keeps_agent_identity(tools, public_identity_env):
+    """A fork of another repo we own is still ours."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp-fork.git")
+    _stage_a_file(path)
+
+    p1, p2 = _patch_lookup(_mock_github(fork=True, parent_full_name="TadMSTR/githost-mcp"))
+    with p1, p2:
+        result = fns["git_commit"](str(path), "internal change")
+
+    assert result.get("identity") == "agent", result
+
+
+def test_git_commit_undetermined_provenance_defaults_to_public(tools, public_identity_env):
+    """No token, no network, rate limited: resolve public. The cost is a missing
+    trailer on an internal repo; the alternative is leaking the agent identity into
+    public history. The audit log records the real agent either way."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _stage_a_file(path)
+
+    with patch(
+        "githost_mcp.tools.git_local.get_github", side_effect=ValueError("GITHUB_TOKEN is not set")
+    ):
+        result = fns["git_commit"](str(path), "offline commit")
+
+    assert result.get("identity") == "public", result
+    assert "could not be determined" in result["identity_reason"]
+
+
+def test_git_commit_undetermined_provenance_is_not_cached(tools, public_identity_env):
+    """A transient failure must not pin the answer for the repo's lifetime."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _stage_a_file(path)
+
+    with patch("githost_mcp.tools.git_local.get_github", side_effect=ValueError("offline")):
+        fns["git_commit"](str(path), "offline commit")
+
+    reader = git.Repo(str(path)).config_reader()
+    assert reader.get_value("githost-mcp", "upstream-provenance", "") == "", (
+        "an undetermined lookup must not be cached"
+    )
+
+    # Recovered: the next commit consults GitHub again and gets the right answer.
+    _stage_a_file(path, "second.txt")
+    p1, p2 = _patch_lookup(_mock_github(fork=False, parent_full_name=None))
+    with p1, p2:
+        result = fns["git_commit"](str(path), "back online")
+    assert result.get("identity") == "agent", result
+
+
+def test_git_commit_provenance_lookup_is_cached_per_repo(tools, public_identity_env):
+    """One API call per repo, not one per commit."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/claudecodeui.git")
+    gh = _mock_github(fork=True, parent_full_name="siteboon/claudecodeui")
+
+    p1, p2 = _patch_lookup(gh)
+    with p1, p2:
+        _stage_a_file(path, "one.txt")
+        first = fns["git_commit"](str(path), "first")
+        _stage_a_file(path, "two.txt")
+        second = fns["git_commit"](str(path), "second")
+
+    assert first.get("identity") == "public"
+    assert second.get("identity") == "public", "the cached verdict must survive"
+    assert gh.get_repo.call_count == 1, (
+        f"provenance must be looked up once per repo, not per commit (got {gh.get_repo.call_count})"
+    )
+
+
+def test_git_commit_gitea_host_does_not_trigger_a_lookup(tools, public_identity_env, monkeypatch):
+    """Nothing on forge's own Gitea is a fork of a public upstream we would PR to,
+    so it must not cost an API call."""
+    fns, path = tools
+    monkeypatch.setenv("GITEA_URL", "https://gitea.example-forge.test")
+    reset_config()
+    git.Repo(str(path)).create_remote("origin", "git@gitea.example-forge.test:host-forge/x.git")
+    _stage_a_file(path)
+
+    gh = _mock_github(fork=False, parent_full_name=None)
+    p1, p2 = _patch_lookup(gh)
+    with p1, p2:
+        result = fns["git_commit"](str(path), "internal doc change")
+
+    assert result.get("identity") == "agent", result
+    assert gh.get_repo.call_count == 0, "a Gitea-hosted repo must not trigger a GitHub lookup"
+
+
+def test_git_commit_third_party_remote_does_not_trigger_a_lookup(tools, public_identity_env):
+    """Already decided by the remotes — no reason to spend an API call."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    _stage_a_file(path)
+
+    gh = _mock_github(fork=False, parent_full_name=None)
+    p1, p2 = _patch_lookup(gh)
+    with p1, p2:
+        result = fns["git_commit"](str(path), "fix")
+
+    assert result.get("identity") == "public", result
+    assert gh.get_repo.call_count == 0

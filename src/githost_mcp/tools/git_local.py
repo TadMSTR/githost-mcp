@@ -2,16 +2,35 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import git
 import structlog
 
+from .._providers.github_client import get_github, github_call
 from ..audit import AuditCtx
 from ..config import get_config
 from ..gitflags import evaluate_fetch, evaluate_push
+from ..identity import (
+    IDENTITY_AGENT,
+    IDENTITY_AUTO,
+    IDENTITY_PUBLIC,
+    PROVENANCE_OWN,
+    PROVENANCE_THIRD_PARTY,
+    IdentityUndetermined,
+    classify_fork_provenance,
+    github_forge_owned_repos,
+    resolve_ownership,
+    resolve_public_identity,
+)
 from ..security import (
+    RemoteUrlRejected,
     WriteGlobDenied,
+    redact_url_credentials,
     scrub,
     validate_read_path,
+    validate_remote_name,
+    validate_remote_url,
     validate_write_globs,
     validate_write_path,
 )
@@ -40,6 +59,128 @@ def _staged_paths(repo: git.Repo) -> list[str]:
     if repo.head.is_valid():
         return [item.a_path for item in repo.index.diff("HEAD")]
     return [path for path, _stage in repo.index.entries]
+
+
+def _gitea_host(gitea_url: str) -> str:
+    """Host portion of the configured Gitea URL, or '' if none is configured."""
+    if not gitea_url:
+        return ""
+    return urlsplit(gitea_url).hostname or ""
+
+
+_PROVENANCE_SECTION = "githost-mcp"
+_PROVENANCE_KEY = "upstream-provenance"
+
+
+def _read_cached_provenance(repo: git.Repo) -> str | None:
+    try:
+        value = repo.config_reader().get_value(_PROVENANCE_SECTION, _PROVENANCE_KEY, "")
+    except Exception:
+        return None
+    return str(value) if value in (PROVENANCE_OWN, PROVENANCE_THIRD_PARTY) else None
+
+
+def _write_cached_provenance(repo: git.Repo, verdict: str) -> None:
+    try:
+        with repo.config_writer() as cw:
+            cw.set_value(_PROVENANCE_SECTION, _PROVENANCE_KEY, verdict)
+    except Exception as e:  # a cache we cannot write is a slow path, not a failure
+        log.warning("provenance_cache_write_failed", error=str(e))
+
+
+def _lookup_fork_provenance(
+    repo: git.Repo, full_names: list[str], forge_owners: list[str]
+) -> str | None:
+    """Ask GitHub whether any of these repos is a fork of one we do not own.
+
+    Returns a PROVENANCE_* verdict, or None if it could not be determined — no
+    token, no network, rate limited, repo not visible. Undetermined is deliberately
+    not cached, so a transient failure does not pin the answer for the repo's life.
+
+    Cached in the repo's own .git/config, so this costs one API call per repo rather
+    than one per commit.
+    """
+    cached = _read_cached_provenance(repo)
+    if cached:
+        return cached
+    try:
+        gh = get_github()
+        verdict = PROVENANCE_OWN
+        for full_name in full_names:
+            gh_repo = github_call(gh.get_repo, full_name)
+            parent = getattr(gh_repo, "parent", None)
+            if (
+                classify_fork_provenance(
+                    full_name,
+                    bool(getattr(gh_repo, "fork", False)),
+                    parent.full_name if parent else None,
+                    forge_owners,
+                )
+                == PROVENANCE_THIRD_PARTY
+            ):
+                verdict = PROVENANCE_THIRD_PARTY
+                break
+    except Exception as e:
+        log.warning("fork_provenance_lookup_failed", repos=full_names, error=str(e))
+        return None
+    _write_cached_provenance(repo, verdict)
+    return verdict
+
+
+def _resolve_identity_mode(repo: git.Repo, requested: str, config) -> tuple[str, str]:
+    """Return ``(mode, reason)`` for this commit — an explicit request, or the remotes."""
+    if requested in (IDENTITY_AGENT, IDENTITY_PUBLIC):
+        return requested, f"explicitly requested by caller (identity={requested})"
+    if requested != IDENTITY_AUTO:
+        raise ValueError(f"Unknown identity '{requested}'; use auto, agent, or public")
+
+    remote_urls = {r.name: r.url for r in repo.remotes}
+    ownership = resolve_ownership(
+        remote_urls, config.forge_owned_owners, _gitea_host(config.gitea_url)
+    )
+    if ownership.mode != IDENTITY_AGENT:
+        return ownership.mode, ownership.reason
+
+    # The remotes say forge-controlled. That is not yet an answer for a GitHub repo
+    # under an account we own: our own project and our fork of someone else's are
+    # indistinguishable from the remotes alone, and treating the fork as internal
+    # writes the agent identity into a third-party PR (audit HIGH, 2026-08-11).
+    candidates = github_forge_owned_repos(remote_urls, config.forge_owned_owners)
+    if not candidates:
+        return ownership.mode, ownership.reason
+
+    provenance = _lookup_fork_provenance(repo, candidates, config.forge_owned_owners)
+    if provenance == PROVENANCE_THIRD_PARTY:
+        return IDENTITY_PUBLIC, f"fork of a repo we do not own: {', '.join(candidates)}"
+    if provenance is None:
+        # Undetermined resolves public: the cost is a missing agent-id trailer on an
+        # internal repo, against leaking the agent identity into public history. The
+        # audit log records the real acting agent either way, so this loses a
+        # convenience, not accountability.
+        return IDENTITY_PUBLIC, (
+            "fork provenance could not be determined for "
+            f"{', '.join(candidates)} — defaulting to the public identity"
+        )
+    return ownership.mode, f"{ownership.reason}, and not a fork of a repo we do not own"
+
+
+def _public_identity(repo: git.Repo, config) -> tuple[str, str]:
+    """The public name/email to commit as, falling back to the repo's git config.
+
+    The fallback is what makes this work with no new configuration: forge's global
+    git config already carries the public identity, which is what the manual
+    `git commit --amend --author=…` workaround reached for. resolve_public_identity
+    refuses it if it turns out to be an agent identity after all.
+    """
+    name, email = config.git_public_name, config.git_public_email
+    if not (name and email):
+        try:
+            reader = repo.config_reader()
+            name = name or reader.get_value("user", "name", "")
+            email = email or reader.get_value("user", "email", "")
+        except Exception as e:  # a missing/unreadable git config is just an empty identity
+            log.warning("public_identity_git_config_unreadable", error=str(e))
+    return resolve_public_identity(str(name), str(email))
 
 
 def register(mcp) -> None:
@@ -258,6 +399,80 @@ def register(mcp) -> None:
             return {"error": scrub(str(e))}
 
     @mcp.tool
+    def git_remote(
+        repo_path: str,
+        action: str = "list",
+        name: str | None = None,
+        url: str | None = None,
+    ) -> dict:
+        """List, add, or remove git remotes.
+
+        Adding a remote is what makes the fork-and-contribute workflow possible
+        without leaving this server: pair with github_fork, which returns the
+        clone URL to pass here.
+
+        Remote URLs must not embed credentials. A credential-bearing URL is
+        refused outright rather than redacted — it would otherwise persist in
+        .git/config and be used by every later fetch and push. Returned URLs have
+        any pre-existing userinfo redacted, so a remote added out-of-band cannot
+        leak a token through this tool.
+
+        Args:
+            repo_path: Absolute path to the local git repository.
+            action: 'list', 'add', or 'remove'.
+            name: Remote name (required for add/remove).
+            url: Remote URL (required for add). http(s)/ssh/git or scp-style user@host:path.
+        """
+        params = {
+            "repo_path": repo_path,
+            "action": action,
+            "name": name,
+            # The URL reaches the audit log, so redact before it is recorded — an
+            # add that is about to be refused for embedded credentials must not
+            # write those credentials to the audit trail on its way out.
+            "url": redact_url_credentials(url) if url else None,
+        }
+        ac = AuditCtx("git_remote", "local", repo_path, params)
+        try:
+            if action == "list":
+                validate_read_path(repo_path)
+            else:
+                validate_write_path(repo_path)
+            repo = _open_repo(repo_path)
+
+            if action == "list":
+                remotes = [
+                    {"name": r.name, "url": redact_url_credentials(r.url)} for r in repo.remotes
+                ]
+                ac.finish("ok")
+                return {"repo": repo_path, "remotes": remotes}
+
+            if action == "add":
+                validate_remote_name(name)
+                validate_remote_url(url)
+                if name in [r.name for r in repo.remotes]:
+                    raise ValueError(f"Remote '{name}' already exists")
+                remote = repo.create_remote(name, url)
+                ac.finish("ok")
+                return {"added": remote.name, "url": redact_url_credentials(url)}
+
+            if action == "remove":
+                validate_remote_name(name)
+                if name not in [r.name for r in repo.remotes]:
+                    raise ValueError(f"No such remote: '{name}'")
+                repo.delete_remote(name)
+                ac.finish("ok")
+                return {"removed": name}
+
+            raise ValueError(f"Unknown action '{action}'; use list, add, or remove")
+        except RemoteUrlRejected as e:
+            ac.finish("denied:remote_url")
+            return {"error": scrub(str(e))}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return {"error": scrub(str(e))}
+
+    @mcp.tool
     def git_add(repo_path: str, paths: list[str]) -> dict:
         """Stage files or paths.
 
@@ -286,14 +501,30 @@ def register(mcp) -> None:
             return {"error": scrub(str(e))}
 
     @mcp.tool
-    def git_commit(repo_path: str, message: str) -> dict:
-        """Create a commit. Agent ID is appended to commit metadata.
+    def git_commit(repo_path: str, message: str, identity: str = "auto") -> dict:
+        """Create a commit, choosing the commit identity from the repo's remotes.
+
+        On a repo forge controls, the commit carries the acting agent's identity
+        and an `agent-id:` trailer. On a repo with any third-party remote it
+        carries the public identity and no trailer — that naming is of no use to
+        an external maintainer and discloses forge's internal agent scheme into
+        permanent public git history.
+
+        This changes only what the commit object says. The audit entry records the
+        real acting agent either way.
+
+        Detection is by remote, not by a flag the caller has to remember: forgetting
+        is how the existing contamination in TadMSTR/claudecodeui@e17739f7 happened.
+        `identity` overrides it when needed.
 
         Args:
             repo_path: Absolute path to the local git repository.
             message: Commit message.
+            identity: 'auto' (default, decide from remotes), 'agent', or 'public'.
         """
-        ac = AuditCtx("git_commit", "local", repo_path, {"repo_path": repo_path})
+        ac = AuditCtx(
+            "git_commit", "local", repo_path, {"repo_path": repo_path, "identity": identity}
+        )
         try:
             validate_write_path(repo_path)
             repo = _open_repo(repo_path)
@@ -302,14 +533,25 @@ def register(mcp) -> None:
             # git_add-only enforcement would be bypassable via any other staging path.
             validate_write_globs(repo_path, _staged_paths(repo))
             config = get_config()
-            agent_tag = f"\n\nagent-id: {config.agent_id}" if config.agent_id != "unknown" else ""
-            full_message = message + agent_tag
+            mode, reason = _resolve_identity_mode(repo, identity, config)
 
-            actor = (
-                git.Actor(config.git_agent_name, config.git_agent_email)
-                if config.git_agent_name
-                else None
-            )
+            if mode == IDENTITY_PUBLIC:
+                # No agent-id trailer: it means nothing to an external maintainer
+                # and names forge's internal agents.
+                full_message = message
+                actor = git.Actor(*_public_identity(repo, config))
+            else:
+                agent_tag = (
+                    f"\n\nagent-id: {config.agent_id}" if config.agent_id != "unknown" else ""
+                )
+                full_message = message + agent_tag
+                actor = (
+                    git.Actor(config.git_agent_name, config.git_agent_email)
+                    if config.git_agent_name
+                    else None
+                )
+            log.info("commit_identity_resolved", repo=repo_path, mode=mode, reason=reason)
+
             signing_key = config.git_signing_key
             if signing_key:
                 # gitpython uses -S with GPG key ID (not the key value)
@@ -324,9 +566,18 @@ def register(mcp) -> None:
                 commit = repo.index.commit(full_message, **kwargs)
 
             ac.finish("ok")
-            return {"sha": commit.hexsha[:12], "message": message}
+            return {
+                "sha": commit.hexsha[:12],
+                "message": message,
+                "identity": mode,
+                "identity_reason": reason,
+                "author": f"{commit.author.name} <{commit.author.email}>",
+            }
         except WriteGlobDenied as e:
             ac.finish("denied:write_glob")
+            return {"error": scrub(str(e))}
+        except IdentityUndetermined as e:
+            ac.finish("denied:identity_undetermined")
             return {"error": scrub(str(e))}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")

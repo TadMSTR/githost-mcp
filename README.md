@@ -76,8 +76,16 @@ mirroring how the official GitHub/Gitea servers structure theirs. This adds ~40
 operations without the tool count ballooning past what every agent pays for in context.
 Each `method` still writes its own per-operation audit entry.
 
-### Local Git (11)
-`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`
+### Local Git (12)
+`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*
+
+`git_remote` refuses a URL that embeds credentials rather than redacting it — unlike text
+on its way out to a caller, a remote URL is written to `.git/config`, where a token would
+outlive the call and be reused by every later fetch and push. Only `http(s)://`, `ssh://`,
+`git://` and scp-style `user@host:path` are accepted; `ext::`/`fd::` remote helpers are
+refused because git runs them as commands on the next fetch. URLs returned by `list` have
+any pre-existing userinfo redacted, so a remote added out-of-band cannot leak a token back
+through this tool.
 
 `git_push` reports failure explicitly (as of 0.9.0): if any of `ERROR` / `REJECTED` /
 `REMOTE_REJECTED` / `REMOTE_FAILURE` is set on the push result — including an empty
@@ -88,8 +96,8 @@ rejected push as a success. `flags` are decoded to reason names (e.g. `["REJECTE
 credential-scrubbed (see Credential isolation below). On success, a missing upstream is
 set automatically and reported as `upstream_set: true`.
 
-### GitHub (16)
-`github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
+### GitHub (17)
+`github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
 
 ### Gitea (14)
 `gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_release_update`, `gitea_release_delete`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`, `gitea_pr_review` *(get_diff/get_files/submit_review/dismiss_review)*, `gitea_actions` *(list_runs/get_run/list_jobs/get_job_log/dispatch_workflow/rerun_run/rerun_failed_jobs)*, `gitea_issue_read` *(get/list/comments)*, `gitea_issue_write` *(create/update/add_comment/close/reopen)*
@@ -135,7 +143,20 @@ Every tool call writes a JSONL entry before returning:
 }
 ```
 
-Each entry is HMAC-SHA256 signed with `AUDIT_SIGNING_KEY`. The `audit_log_query` tool verifies every returned entry and includes `tamper_detected: true` on any entry that fails.
+Each entry is HMAC-SHA256 signed **when `AUDIT_SIGNING_KEY` is set** — with no key the `hmac`
+field is simply absent and the entry carries no tamper evidence at all. `audit_log_query`
+classifies every returned entry in an `integrity` field, and reports `integrity_summary` counts
+plus `signing_key_configured` alongside the results:
+
+| `integrity` | `tamper_detected` | Meaning |
+|---|---|---|
+| `verified` | `false` | Signed, and the HMAC matches. |
+| `tampered` | `true` | Signed, but the HMAC does not match — the entry was altered. |
+| `unsigned` | `null` | No `hmac` field. Written while the agent had no key; nothing can be confirmed. |
+| `unverifiable` | `null` | Signed, but this process holds no key to check it against. |
+
+`tamper_detected` is retained for older callers and is `null` — never `false` — whenever
+integrity could not be established. An unsigned entry is not a clean bill of health.
 
 Example — what did the sysadmin agent push last week?
 
@@ -148,9 +169,10 @@ audit_log_query(agent_id="sysadmin", tool="git_push", since="2026-05-20")
 ### Repo path allowlist
 
 `Config` carries separate `allowed_read_roots` and `allowed_write_roots`. Read tools
-(`git_status`, `git_diff`, `git_log`, `git_show`) validate against the read list; write
-tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`, `git_branch
-create/delete`, `release`) validate against the write list. `allowed_repo_roots` remains
+(`git_status`, `git_diff`, `git_log`, `git_show`, `git_remote list`) validate against the
+read list; write tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`,
+`git_branch create/delete`, `git_remote add/remove`, `release`) validate against the write
+list. `allowed_repo_roots` remains
 as a deprecated alias of `allowed_write_roots` for any caller not yet migrated.
 
 Resolution order (first match wins, see Architecture diagram above):
@@ -220,7 +242,80 @@ silently widening a glob-scoped agent's grant again.
 
 ### Per-agent committer identity
 
-`GIT_AGENT_NAME` and `GIT_AGENT_EMAIL` set the git author/committer on commits. Defaults to `{AGENT_ID}-agent` / `{AGENT_ID}@forge` when not explicitly set. Values are sanitized (newlines and null bytes stripped) to prevent git header injection. Each commit also appends `agent-id: {AGENT_ID}` as a trailer.
+`GIT_AGENT_NAME` and `GIT_AGENT_EMAIL` set the git author/committer on commits to repos
+you control. Defaults to `{AGENT_ID}-agent` / `{AGENT_ID}@forge` when not explicitly set.
+Values are sanitized (newlines and null bytes stripped) to prevent git header injection.
+Those commits also append `agent-id: {AGENT_ID}` as a trailer.
+
+### Public identity on third-party repos
+
+An agent identity is useful on repos you control and is a disclosure on ones you don't: it
+names your internal agents in permanent public git history, where an external maintainer
+has no use for it. `git_commit` therefore picks its identity from the repo's remotes.
+
+A repo is **forge-controlled** when *every* remote is either owned by an account listed in
+`FORGE_OWNED_OWNERS` or hosted on the configured `GITEA_URL` host (any org). Those commits
+get the agent identity and the `agent-id:` trailer. If **any** remote is third-party, the
+commit gets `GIT_PUBLIC_NAME`/`GIT_PUBLIC_EMAIL` and no trailer.
+
+Detection is by remote rather than by a flag the caller passes, because the caller
+forgetting the flag is precisely how the existing contamination happened.
+
+It deliberately does not read the owner of `origin` alone. Which remote is `origin` is an
+artifact of how the clone was made — for a fork checkout, `origin=upstream, fork=ours` and
+`origin=ours, upstream=theirs` are both common — so an origin-only rule answers the same
+situation two different ways, and gets the fork-under-your-own-account case wrong in the
+leaking direction.
+
+| Situation | Identity |
+|---|---|
+| No remotes | agent — nothing to publish to |
+| All remotes on the Gitea host | agent + `agent-id:` trailer |
+| GitHub repo under a forge-owned account, **not** a fork of a repo you don't own | agent + trailer |
+| GitHub repo under a forge-owned account that **is** a fork of a repo you don't own | public, no trailer |
+| Fork provenance could not be determined | public, no trailer |
+| Any third-party remote | public, no trailer |
+| A remote URL that cannot be parsed | **refused** |
+| A local filesystem path remote | agent — a path on your own disk |
+
+#### Why the remotes alone are not enough
+
+`TadMSTR/githost-mcp` (a project of yours) and `TadMSTR/claudecodeui` (your fork of someone
+else's project) are byte-identical from the remotes alone. Clone the fork directly and never
+add an upstream remote — a normal thing to do, and a cross-repo PR can be opened from the API
+without one — and remote-parsing alone says "forge-controlled", writing the agent identity
+into a third-party PR.
+
+So when the remotes say forge-controlled *and* a remote is a GitHub repo under a forge-owned
+account, `git_commit` consults GitHub's own record of whether that repo is a fork, and of
+what. The result is cached in the repo's `.git/config` under
+`githost-mcp.upstream-provenance`, so this costs one API call per repo, not one per commit.
+Repos on the Gitea host, and repos already resolved as third-party from their remotes, never
+trigger a lookup.
+
+If the lookup cannot be completed — no `GITHUB_TOKEN`, no network, rate limited — the commit
+resolves to the **public** identity, and the result is not cached, so a transient failure does
+not pin the answer for the repo's lifetime. That direction is deliberate: the cost is a
+missing `agent-id:` trailer on an internal repo, against leaking the agent identity into
+permanent public history. Since the audit log records the real acting agent in both modes,
+what is lost is a convenience, not accountability.
+
+Two refusals, both deliberate. An unparseable remote is refused rather than guessed at:
+defaulting to the agent identity leaks it, defaulting to the public identity breaks
+attribution on internal repos, and an error the caller can resolve with an explicit
+`identity=` argument beats either. A resolved public identity that still looks like an
+agent identity (`*@forge`, `*-agent`) is also refused — a repo-local `user.email` is enough
+to produce one, and it would be the same leak under a different label.
+
+`GIT_PUBLIC_NAME`/`GIT_PUBLIC_EMAIL` fall back to the repo's own git config
+(`user.name`/`user.email`) when unset.
+
+**This changes the commit object only.** Every audit entry records the real acting agent in
+both modes — `write_audit_entry` reads the process-wide agent ID and never consults identity
+resolution. Inverting that would turn a disclosure fix into an accountability hole.
+
+`git_commit(identity=...)` overrides the detection in either direction: `auto` (default),
+`agent`, or `public`.
 
 ### Query limits
 
@@ -254,7 +349,18 @@ Each provider has its own env vars — a compromised GitHub token does not expos
 
 ### HMAC tamper-evidence
 
-`AUDIT_SIGNING_KEY` (required) is a server-side secret set in the launcher. Each JSONL entry includes `hmac: HMAC-SHA256(canonical_json, key)`. The `audit_log_query` tool verifies every returned entry. This is symmetric (same key signs and verifies) — it proves the file wasn't edited after write, not that the agent identity is genuine. Agent identity proof is the scoped-mcp layer's job.
+`AUDIT_SIGNING_KEY` is a server-side secret set in the launcher, per agent. When it is set, each
+JSONL entry includes `hmac: HMAC-SHA256(canonical_json, key)`. This is symmetric (same key signs
+and verifies) — it proves the file wasn't edited after write, not that the agent identity is
+genuine. Agent identity proof is the scoped-mcp layer's job.
+
+The key is **not enforced at startup**: an agent launched without one starts normally, logs an
+`audit_signing_key_unset` warning naming itself, and writes unsigned entries from then on. Those
+entries report as `unsigned` from `audit_log_query` (see [Audit Architecture](#audit-architecture))
+rather than as verified, and stay identifiable as unsigned after a key is later added — the
+absence of an `hmac` is a property of the entry, not of the current config. Refusing to start
+without a key is a deployment policy choice and is deliberately not made here; it would take an
+agent offline for a missing secret rather than degrade visibly.
 
 ### HTTP transport surface
 
@@ -307,6 +413,16 @@ WORKSPACE_POLICY_PATH=/etc/forge/workspace-policy.yml  # optional — checked ah
 ```env
 GIT_AGENT_NAME=dev-agent         # git author/committer name (default: {AGENT_ID}-agent)
 GIT_AGENT_EMAIL=dev@forge        # git author/committer email (default: {AGENT_ID}@forge)
+
+# Identity used instead, on any repo that has a third-party remote. Falls back to the
+# repo's own git config user.name/user.email when unset. See Security Model >
+# Public identity on third-party repos.
+GIT_PUBLIC_NAME=YourAccount
+GIT_PUBLIC_EMAIL=12345+YourAccount@users.noreply.github.com
+
+# Accounts/orgs you control, comma-separated (default: TadMSTR). Repos whose remotes
+# all sit under one of these — or on the GITEA_URL host — keep the agent identity.
+FORGE_OWNED_OWNERS=YourAccount,YourOrg
 ```
 
 ### GitHub
