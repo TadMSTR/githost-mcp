@@ -111,9 +111,16 @@ def _is_forge_controlled(url: str, forge_owners: list[str], gitea_host: str) -> 
         return True
     parsed = _parse_remote(url)
     if parsed is None:
+        # Deliberately does not echo the URL. This string reaches the caller and the
+        # audit log, and this branch is by definition the URLs that did not parse —
+        # so redact_url_credentials, which matches `scheme://userinfo@`, cannot be
+        # relied on to catch a token in whatever shape got it here. The remote's
+        # name is enough to find it in .git/config. (SC-14 shape: scrubbing applied
+        # unevenly across a module's error returns.)
         raise IdentityUndetermined(
-            f"Cannot determine the owner of remote URL '{url}'. Pass identity='agent' or "
-            "identity='public' explicitly rather than having one guessed."
+            "Cannot determine the owner of this repository's remote. Pass "
+            "identity='agent' or identity='public' explicitly rather than having "
+            "one guessed."
         )
     host, owner = parsed
     if gitea_host and host == gitea_host.lower():
@@ -144,13 +151,16 @@ def resolve_ownership(
     if not remote_urls:
         return RepoOwnership(IDENTITY_AGENT, "no remotes configured")
 
-    third_party = tuple(
-        sorted(
-            name
-            for name, url in remote_urls.items()
-            if not _is_forge_controlled(url, forge_owners, gitea_host)
-        )
-    )
+    third_party_list = []
+    for name, url in sorted(remote_urls.items()):
+        try:
+            if not _is_forge_controlled(url, forge_owners, gitea_host):
+                third_party_list.append(name)
+        except IdentityUndetermined as e:
+            # Name the remote so it can be found in .git/config, without echoing
+            # the URL that could not be parsed.
+            raise IdentityUndetermined(f"{e} (remote: '{name}')") from None
+    third_party = tuple(third_party_list)
     if third_party:
         return RepoOwnership(
             IDENTITY_PUBLIC,

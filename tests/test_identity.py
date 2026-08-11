@@ -125,6 +125,17 @@ def test_unparseable_remote_refuses_rather_than_guessing():
         _resolve({"weird": "not a url at all"})
 
 
+def test_unparseable_remote_error_names_the_remote_but_not_the_url():
+    """The message reaches the caller and the audit log. An unparseable URL is
+    exactly the case redact_url_credentials cannot be trusted on, so the URL is not
+    echoed at all — the remote's name is enough to find it in .git/config."""
+    with pytest.raises(IdentityUndetermined) as excinfo:
+        _resolve({"legacy": "ghp_hardcodedtokenvalue@@@garbage"})
+    message = str(excinfo.value)
+    assert "legacy" in message
+    assert "ghp_hardcodedtokenvalue" not in message
+
+
 def test_unparseable_remote_refuses_even_alongside_a_forge_remote():
     with pytest.raises(IdentityUndetermined):
         _resolve(

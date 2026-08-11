@@ -417,7 +417,7 @@ def test_redact_url_credentials_leaves_scp_style_remotes_readable():
     """Every forge remote is scp-style and carries no credential — keep it diagnosable."""
     from githost_mcp.security import redact_url_credentials
 
-    text = "failed to push to git@gitea.tadmstr.me:host-forge/stacks.git"
+    text = "failed to push to git@gitea.example-forge.test:host-forge/stacks.git"
     assert redact_url_credentials(text) == text
 
 
@@ -453,7 +453,7 @@ def test_scrub_catches_unconfigured_credential_that_mask_alone_misses(monkeypatc
         "ssh://git@github.com/owner/repo.git",
         "git://github.com/owner/repo.git",
         "git@github.com:owner/repo.git",
-        "git@gitea.tadmstr.me:host-forge/component-registry.git",
+        "git@gitea.example-forge.test:host-forge/component-registry.git",
     ],
 )
 def test_validate_remote_url_accepts_supported_forms(url):

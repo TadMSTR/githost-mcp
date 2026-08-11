@@ -793,7 +793,7 @@ def test_git_remote_add_then_list(tools):
 def test_git_remote_add_scp_style_ssh(tools):
     fns, path = tools
     result = fns["git_remote"](
-        str(path), action="add", name="origin", url="git@gitea.tadmstr.me:host-forge/x.git"
+        str(path), action="add", name="origin", url="git@gitea.example-forge.test:host-forge/x.git"
     )
     assert result["added"] == "origin", f"the form every forge remote uses must work: {result}"
 
