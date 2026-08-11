@@ -2,6 +2,7 @@
 
 import json
 import pathlib
+from unittest.mock import MagicMock, patch
 
 import git
 import pytest
@@ -988,10 +989,21 @@ def test_git_commit_third_party_remote_uses_public_identity(
     assert "@forge" not in f"{commit.author.name} <{commit.author.email}>"
 
 
+def _seed_provenance(path, verdict):
+    """Pre-populate the provenance cache so no GitHub lookup is attempted.
+
+    Tests must never reach the network: with a real GITHUB_TOKEN in the environment
+    they would silently pass against live GitHub and fail on CI, which has none.
+    """
+    with git.Repo(str(path)).config_writer() as cw:
+        cw.set_value("githost-mcp", "upstream-provenance", verdict)
+
+
 def test_git_commit_forge_owned_remote_keeps_agent_identity(tools, public_identity_env):
     """The other direction: internal repos must keep per-agent attribution."""
     fns, path = tools
     git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _seed_provenance(path, "own")
     _stage_a_file(path)
 
     result = fns["git_commit"](str(path), "internal change")
@@ -1157,3 +1169,176 @@ def test_git_commit_forge_gitea_host_keeps_agent_identity(tools, public_identity
     result = fns["git_commit"](str(path), "internal doc change")
 
     assert result.get("identity") == "agent", result
+
+
+# ---------------------------------------------------------------------------
+# Fork provenance (audit HIGH, 2026-08-11)
+#
+# `TadMSTR/githost-mcp` (ours) and `TadMSTR/claudecodeui` (our fork of someone
+# else's) are byte-identical from the remotes alone, so a clone whose only remote
+# is the fork resolved to the agent identity — the disclosure this build exists to
+# prevent. Resolving it needs GitHub's own record of whether the repo is a fork.
+#
+# Every test here controls that lookup explicitly. None may reach the network: a
+# real GITHUB_TOKEN in the environment would otherwise make them pass against live
+# GitHub and fail on CI, which has none.
+# ---------------------------------------------------------------------------
+
+
+def _mock_github(fork: bool, parent_full_name: str | None):
+    gh_repo = MagicMock()
+    gh_repo.fork = fork
+    if parent_full_name:
+        gh_repo.parent = MagicMock()
+        gh_repo.parent.full_name = parent_full_name
+    else:
+        gh_repo.parent = None
+    gh = MagicMock()
+    gh.get_repo.return_value = gh_repo
+    return gh
+
+
+def _patch_lookup(gh):
+    return (
+        patch("githost_mcp.tools.git_local.get_github", return_value=gh),
+        patch(
+            "githost_mcp.tools.git_local.github_call",
+            side_effect=lambda fn, *a, **kw: fn(*a, **kw),
+        ),
+    )
+
+
+def test_git_commit_fork_only_layout_uses_public_identity(tools, public_identity_env):
+    """The audit's HIGH: clone the fork directly, never add an upstream remote. The
+    remotes say forge-controlled; GitHub says it is a fork of siteboon's repo."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/claudecodeui.git")
+    _stage_a_file(path)
+
+    p1, p2 = _patch_lookup(_mock_github(fork=True, parent_full_name="siteboon/claudecodeui"))
+    with p1, p2:
+        result = fns["git_commit"](str(path), "fix: upstream fix")
+
+    assert result.get("identity") == "public", result
+    commit = git.Repo(str(path)).head.commit
+    assert "agent-id" not in commit.message
+    assert commit.author.email == "69825253+TadMSTR@users.noreply.github.com"
+
+
+def test_git_commit_own_github_repo_keeps_agent_identity_after_lookup(tools, public_identity_env):
+    """The lookup must not flip our own projects to public."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _stage_a_file(path)
+
+    p1, p2 = _patch_lookup(_mock_github(fork=False, parent_full_name=None))
+    with p1, p2:
+        result = fns["git_commit"](str(path), "internal change")
+
+    assert result.get("identity") == "agent", result
+    assert "agent-id: developer" in git.Repo(str(path)).head.commit.message
+
+
+def test_git_commit_fork_of_our_own_repo_keeps_agent_identity(tools, public_identity_env):
+    """A fork of another repo we own is still ours."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp-fork.git")
+    _stage_a_file(path)
+
+    p1, p2 = _patch_lookup(_mock_github(fork=True, parent_full_name="TadMSTR/githost-mcp"))
+    with p1, p2:
+        result = fns["git_commit"](str(path), "internal change")
+
+    assert result.get("identity") == "agent", result
+
+
+def test_git_commit_undetermined_provenance_defaults_to_public(tools, public_identity_env):
+    """No token, no network, rate limited: resolve public. The cost is a missing
+    trailer on an internal repo; the alternative is leaking the agent identity into
+    public history. The audit log records the real agent either way."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _stage_a_file(path)
+
+    with patch(
+        "githost_mcp.tools.git_local.get_github", side_effect=ValueError("GITHUB_TOKEN is not set")
+    ):
+        result = fns["git_commit"](str(path), "offline commit")
+
+    assert result.get("identity") == "public", result
+    assert "could not be determined" in result["identity_reason"]
+
+
+def test_git_commit_undetermined_provenance_is_not_cached(tools, public_identity_env):
+    """A transient failure must not pin the answer for the repo's lifetime."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _stage_a_file(path)
+
+    with patch("githost_mcp.tools.git_local.get_github", side_effect=ValueError("offline")):
+        fns["git_commit"](str(path), "offline commit")
+
+    reader = git.Repo(str(path)).config_reader()
+    assert reader.get_value("githost-mcp", "upstream-provenance", "") == "", (
+        "an undetermined lookup must not be cached"
+    )
+
+    # Recovered: the next commit consults GitHub again and gets the right answer.
+    _stage_a_file(path, "second.txt")
+    p1, p2 = _patch_lookup(_mock_github(fork=False, parent_full_name=None))
+    with p1, p2:
+        result = fns["git_commit"](str(path), "back online")
+    assert result.get("identity") == "agent", result
+
+
+def test_git_commit_provenance_lookup_is_cached_per_repo(tools, public_identity_env):
+    """One API call per repo, not one per commit."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/claudecodeui.git")
+    gh = _mock_github(fork=True, parent_full_name="siteboon/claudecodeui")
+
+    p1, p2 = _patch_lookup(gh)
+    with p1, p2:
+        _stage_a_file(path, "one.txt")
+        first = fns["git_commit"](str(path), "first")
+        _stage_a_file(path, "two.txt")
+        second = fns["git_commit"](str(path), "second")
+
+    assert first.get("identity") == "public"
+    assert second.get("identity") == "public", "the cached verdict must survive"
+    assert gh.get_repo.call_count == 1, (
+        f"provenance must be looked up once per repo, not per commit (got {gh.get_repo.call_count})"
+    )
+
+
+def test_git_commit_gitea_host_does_not_trigger_a_lookup(tools, public_identity_env, monkeypatch):
+    """Nothing on forge's own Gitea is a fork of a public upstream we would PR to,
+    so it must not cost an API call."""
+    fns, path = tools
+    monkeypatch.setenv("GITEA_URL", "https://gitea.example-forge.test")
+    reset_config()
+    git.Repo(str(path)).create_remote("origin", "git@gitea.example-forge.test:host-forge/x.git")
+    _stage_a_file(path)
+
+    gh = _mock_github(fork=False, parent_full_name=None)
+    p1, p2 = _patch_lookup(gh)
+    with p1, p2:
+        result = fns["git_commit"](str(path), "internal doc change")
+
+    assert result.get("identity") == "agent", result
+    assert gh.get_repo.call_count == 0, "a Gitea-hosted repo must not trigger a GitHub lookup"
+
+
+def test_git_commit_third_party_remote_does_not_trigger_a_lookup(tools, public_identity_env):
+    """Already decided by the remotes — no reason to spend an API call."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/siteboon/claudecodeui.git")
+    _stage_a_file(path)
+
+    gh = _mock_github(fork=False, parent_full_name=None)
+    p1, p2 = _patch_lookup(gh)
+    with p1, p2:
+        result = fns["git_commit"](str(path), "fix")
+
+    assert result.get("identity") == "public", result
+    assert gh.get_repo.call_count == 0

@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 import git
 import structlog
 
+from .._providers.github_client import get_github, github_call
 from ..audit import AuditCtx
 from ..config import get_config
 from ..gitflags import evaluate_fetch, evaluate_push
@@ -14,7 +15,11 @@ from ..identity import (
     IDENTITY_AGENT,
     IDENTITY_AUTO,
     IDENTITY_PUBLIC,
+    PROVENANCE_OWN,
+    PROVENANCE_THIRD_PARTY,
     IdentityUndetermined,
+    classify_fork_provenance,
+    github_forge_owned_repos,
     resolve_ownership,
     resolve_public_identity,
 )
@@ -63,6 +68,65 @@ def _gitea_host(gitea_url: str) -> str:
     return urlsplit(gitea_url).hostname or ""
 
 
+_PROVENANCE_SECTION = "githost-mcp"
+_PROVENANCE_KEY = "upstream-provenance"
+
+
+def _read_cached_provenance(repo: git.Repo) -> str | None:
+    try:
+        value = repo.config_reader().get_value(_PROVENANCE_SECTION, _PROVENANCE_KEY, "")
+    except Exception:
+        return None
+    return str(value) if value in (PROVENANCE_OWN, PROVENANCE_THIRD_PARTY) else None
+
+
+def _write_cached_provenance(repo: git.Repo, verdict: str) -> None:
+    try:
+        with repo.config_writer() as cw:
+            cw.set_value(_PROVENANCE_SECTION, _PROVENANCE_KEY, verdict)
+    except Exception as e:  # a cache we cannot write is a slow path, not a failure
+        log.warning("provenance_cache_write_failed", error=str(e))
+
+
+def _lookup_fork_provenance(
+    repo: git.Repo, full_names: list[str], forge_owners: list[str]
+) -> str | None:
+    """Ask GitHub whether any of these repos is a fork of one we do not own.
+
+    Returns a PROVENANCE_* verdict, or None if it could not be determined — no
+    token, no network, rate limited, repo not visible. Undetermined is deliberately
+    not cached, so a transient failure does not pin the answer for the repo's life.
+
+    Cached in the repo's own .git/config, so this costs one API call per repo rather
+    than one per commit.
+    """
+    cached = _read_cached_provenance(repo)
+    if cached:
+        return cached
+    try:
+        gh = get_github()
+        verdict = PROVENANCE_OWN
+        for full_name in full_names:
+            gh_repo = github_call(gh.get_repo, full_name)
+            parent = getattr(gh_repo, "parent", None)
+            if (
+                classify_fork_provenance(
+                    full_name,
+                    bool(getattr(gh_repo, "fork", False)),
+                    parent.full_name if parent else None,
+                    forge_owners,
+                )
+                == PROVENANCE_THIRD_PARTY
+            ):
+                verdict = PROVENANCE_THIRD_PARTY
+                break
+    except Exception as e:
+        log.warning("fork_provenance_lookup_failed", repos=full_names, error=str(e))
+        return None
+    _write_cached_provenance(repo, verdict)
+    return verdict
+
+
 def _resolve_identity_mode(repo: git.Repo, requested: str, config) -> tuple[str, str]:
     """Return ``(mode, reason)`` for this commit — an explicit request, or the remotes."""
     if requested in (IDENTITY_AGENT, IDENTITY_PUBLIC):
@@ -74,7 +138,30 @@ def _resolve_identity_mode(repo: git.Repo, requested: str, config) -> tuple[str,
     ownership = resolve_ownership(
         remote_urls, config.forge_owned_owners, _gitea_host(config.gitea_url)
     )
-    return ownership.mode, ownership.reason
+    if ownership.mode != IDENTITY_AGENT:
+        return ownership.mode, ownership.reason
+
+    # The remotes say forge-controlled. That is not yet an answer for a GitHub repo
+    # under an account we own: our own project and our fork of someone else's are
+    # indistinguishable from the remotes alone, and treating the fork as internal
+    # writes the agent identity into a third-party PR (audit HIGH, 2026-08-11).
+    candidates = github_forge_owned_repos(remote_urls, config.forge_owned_owners)
+    if not candidates:
+        return ownership.mode, ownership.reason
+
+    provenance = _lookup_fork_provenance(repo, candidates, config.forge_owned_owners)
+    if provenance == PROVENANCE_THIRD_PARTY:
+        return IDENTITY_PUBLIC, f"fork of a repo we do not own: {', '.join(candidates)}"
+    if provenance is None:
+        # Undetermined resolves public: the cost is a missing agent-id trailer on an
+        # internal repo, against leaking the agent identity into public history. The
+        # audit log records the real acting agent either way, so this loses a
+        # convenience, not accountability.
+        return IDENTITY_PUBLIC, (
+            "fork provenance could not be determined for "
+            f"{', '.join(candidates)} — defaulting to the public identity"
+        )
+    return ownership.mode, f"{ownership.reason}, and not a fork of a repo we do not own"
 
 
 def _public_identity(repo: git.Repo, config) -> tuple[str, str]:

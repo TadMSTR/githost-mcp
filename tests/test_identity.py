@@ -11,7 +11,11 @@ import pytest
 from githost_mcp.identity import (
     IDENTITY_AGENT,
     IDENTITY_PUBLIC,
+    PROVENANCE_OWN,
+    PROVENANCE_THIRD_PARTY,
     IdentityUndetermined,
+    classify_fork_provenance,
+    github_forge_owned_repos,
     resolve_ownership,
     resolve_public_identity,
 )
@@ -144,6 +148,84 @@ def test_unparseable_remote_refuses_even_alongside_a_forge_remote():
                 "weird": "@@@",
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# Fork provenance (audit HIGH, 2026-08-11)
+#
+# The remotes cannot separate our own project from our fork of someone else's —
+# both are `TadMSTR/<name>` on GitHub. These decide which repos need GitHub's own
+# fork record consulted, and how to read it.
+# ---------------------------------------------------------------------------
+
+
+def test_github_forge_owned_repo_is_a_provenance_candidate():
+    assert github_forge_owned_repos(
+        {"origin": "https://github.com/TadMSTR/claudecodeui.git"}, FORGE_OWNERS
+    ) == ["TadMSTR/claudecodeui"]
+
+
+def test_gitea_hosted_repo_is_not_a_candidate():
+    """Nothing on forge's own Gitea is a fork of a public upstream we would PR to."""
+    assert (
+        github_forge_owned_repos(
+            {"origin": f"git@{GITEA_HOST}:host-forge/component-registry.git"}, FORGE_OWNERS
+        )
+        == []
+    )
+
+
+def test_third_party_github_repo_is_not_a_candidate():
+    """Already decided by the remotes — no lookup needed."""
+    assert (
+        github_forge_owned_repos(
+            {"origin": "https://github.com/siteboon/claudecodeui.git"}, FORGE_OWNERS
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/TadMSTR/claudecodeui.git",
+        "https://github.com/TadMSTR/claudecodeui",
+        "git@github.com:TadMSTR/claudecodeui.git",
+        "ssh://git@github.com/TadMSTR/claudecodeui.git",
+    ],
+)
+def test_candidate_full_name_parsed_across_url_forms(url):
+    """A form we fail to turn into owner/repo silently skips the lookup, which
+    resolves to the agent identity — the leak this exists to close."""
+    assert github_forge_owned_repos({"origin": url}, FORGE_OWNERS) == ["TadMSTR/claudecodeui"]
+
+
+def test_fork_of_a_repo_we_do_not_own_is_third_party():
+    assert (
+        classify_fork_provenance(
+            "TadMSTR/claudecodeui", True, "siteboon/claudecodeui", FORGE_OWNERS
+        )
+        == PROVENANCE_THIRD_PARTY
+    )
+
+
+def test_not_a_fork_is_our_own():
+    assert (
+        classify_fork_provenance("TadMSTR/githost-mcp", False, None, FORGE_OWNERS) == PROVENANCE_OWN
+    )
+
+
+def test_fork_of_our_own_repo_is_still_ours():
+    assert (
+        classify_fork_provenance("TadMSTR/x-fork", True, "TadMSTR/x", FORGE_OWNERS)
+        == PROVENANCE_OWN
+    )
+
+
+def test_fork_flag_without_parent_is_treated_as_our_own():
+    """GitHub can report fork=true with no parent visible to this token. Not enough
+    to call it third-party; the undetermined path in git_commit covers the risk."""
+    assert classify_fork_provenance("TadMSTR/x", True, None, FORGE_OWNERS) == PROVENANCE_OWN
 
 
 # ---------------------------------------------------------------------------

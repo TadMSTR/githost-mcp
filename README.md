@@ -270,10 +270,35 @@ leaking direction.
 | Situation | Identity |
 |---|---|
 | No remotes | agent — nothing to publish to |
-| All remotes forge-owned or on the Gitea host | agent + `agent-id:` trailer |
+| All remotes on the Gitea host | agent + `agent-id:` trailer |
+| GitHub repo under a forge-owned account, **not** a fork of a repo you don't own | agent + trailer |
+| GitHub repo under a forge-owned account that **is** a fork of a repo you don't own | public, no trailer |
+| Fork provenance could not be determined | public, no trailer |
 | Any third-party remote | public, no trailer |
 | A remote URL that cannot be parsed | **refused** |
 | A local filesystem path remote | agent — a path on your own disk |
+
+#### Why the remotes alone are not enough
+
+`TadMSTR/githost-mcp` (a project of yours) and `TadMSTR/claudecodeui` (your fork of someone
+else's project) are byte-identical from the remotes alone. Clone the fork directly and never
+add an upstream remote — a normal thing to do, and a cross-repo PR can be opened from the API
+without one — and remote-parsing alone says "forge-controlled", writing the agent identity
+into a third-party PR.
+
+So when the remotes say forge-controlled *and* a remote is a GitHub repo under a forge-owned
+account, `git_commit` consults GitHub's own record of whether that repo is a fork, and of
+what. The result is cached in the repo's `.git/config` under
+`githost-mcp.upstream-provenance`, so this costs one API call per repo, not one per commit.
+Repos on the Gitea host, and repos already resolved as third-party from their remotes, never
+trigger a lookup.
+
+If the lookup cannot be completed — no `GITHUB_TOKEN`, no network, rate limited — the commit
+resolves to the **public** identity, and the result is not cached, so a transient failure does
+not pin the answer for the repo's lifetime. That direction is deliberate: the cost is a
+missing `agent-id:` trailer on an internal repo, against leaking the agent identity into
+permanent public history. Since the audit log records the real acting agent in both modes,
+what is lost is a convenience, not accountability.
 
 Two refusals, both deliberate. An unparseable remote is refused rather than guessed at:
 defaulting to the agent identity leaks it, defaulting to the public identity breaks

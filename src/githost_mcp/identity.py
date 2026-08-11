@@ -57,6 +57,14 @@ class RepoOwnership:
     third_party_remotes: tuple[str, ...] = ()
 
 
+GITHUB_HOST = "github.com"
+
+# Written into the repo's own .git/config so the GitHub lookup behind it happens
+# once per repo rather than once per commit.
+PROVENANCE_THIRD_PARTY = "third-party"
+PROVENANCE_OWN = "own"
+
+
 def _parse_remote(url: str) -> tuple[str, str] | None:
     """Return ``(host, owner)`` for a remote URL, or None if it cannot be parsed.
 
@@ -168,6 +176,67 @@ def resolve_ownership(
             third_party,
         )
     return RepoOwnership(IDENTITY_AGENT, "all remotes are forge-controlled")
+
+
+def _repo_full_name(url: str) -> str | None:
+    """``owner/repo`` for a remote URL, without the .git suffix."""
+    if _SCHEME_REMOTE_RE.match(url):
+        path = urlsplit(url).path.lstrip("/")
+    elif scp_match := _SCP_REMOTE_RE.match(url):
+        path = scp_match.group("path").lstrip("/")
+    else:
+        return None
+    parts = path.removesuffix(".git").split("/")
+    if len(parts) < 2 or not all(parts[:2]):
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+
+def github_forge_owned_repos(
+    remote_urls: dict[str, str],
+    forge_owners: list[str],
+) -> list[str]:
+    """GitHub repos among these remotes that sit under a forge-owned account.
+
+    These are the only ambiguous ones. `TadMSTR/githost-mcp` (a project of ours)
+    and `TadMSTR/claudecodeui` (our fork of someone else's project) are byte-identical
+    from the remotes alone, so no amount of URL parsing separates them — resolving it
+    needs GitHub's own record of whether the repo is a fork. Repos on forge's own
+    Gitea are not ambiguous and are not returned: nothing hosted there is a fork of a
+    public upstream we would open a PR against.
+    """
+    owners = {o.lower() for o in forge_owners}
+    full_names = []
+    for url in sorted(remote_urls.values()):
+        parsed = _parse_remote(url)
+        if parsed is None:
+            continue
+        host, owner = parsed
+        if host != GITHUB_HOST or owner.lower() not in owners:
+            continue
+        if full_name := _repo_full_name(url):
+            full_names.append(full_name)
+    return full_names
+
+
+def classify_fork_provenance(
+    full_name: str,
+    is_fork: bool,
+    parent_full_name: str | None,
+    forge_owners: list[str],
+) -> str:
+    """Classify one GitHub repo from its fork metadata.
+
+    A fork of a repo we do not own is third-party regardless of who owns the fork:
+    its commits are bound for the parent's PR queue, which is where the disclosure
+    lands. A fork of another of our own repos is still ours.
+    """
+    del full_name  # for the caller's readability at the call site
+    if not is_fork or not parent_full_name:
+        return PROVENANCE_OWN
+    parent_owner = parent_full_name.split("/", 1)[0]
+    owners = {o.lower() for o in forge_owners}
+    return PROVENANCE_OWN if parent_owner.lower() in owners else PROVENANCE_THIRD_PARTY
 
 
 def resolve_public_identity(name: str, email: str) -> tuple[str, str]:
