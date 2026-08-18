@@ -57,6 +57,19 @@ const AGENTS = {
   writer: { httpPort: 8623, metricsPort: 9623 },
   research: { httpPort: 8624, metricsPort: 9624 },
   harlock: { httpPort: 8625, metricsPort: 9625 },
+  // steward — the config-owning agent (vikunja#350, build
+  // steward-config-agent-2026-08). Its git job is narrow by design: branch,
+  // commit, push and open a PR on host-forge-scripts carrying a config
+  // proposal. It holds no merge, release, tag or publish verb — enforced by a
+  // tool_allowlist in steward-agent.yml rather than a denylist, so a future
+  // githost-mcp release cannot add a write verb steward silently inherits.
+  //
+  // 8627/9627, not the contiguous 8626: that is backrest-mcp. 8625/9625 stay
+  // reserved to harlock rather than being reclaimed here — harlock's
+  // decommission (vikunja#270) is only through Phase 0 and reassigning a port
+  // out from under a half-removed agent is how two services end up racing for
+  // one bind. Renumber both together when that decommission finishes.
+  steward: { httpPort: 8627, metricsPort: 9627 },
 };
 
 function buildApp(agentId, ports) {
