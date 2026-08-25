@@ -367,9 +367,7 @@ async def test_woodpecker_get_logs_step_not_found(tools):
     with respx.mock:
         _lookup_mock()
         respx.get(f"{REPO_URL}/pipelines/1").mock(
-            return_value=httpx.Response(
-                200, json=_pipeline_detail([{"id": 10, "name": "build"}])
-            )
+            return_value=httpx.Response(200, json=_pipeline_detail([{"id": 10, "name": "build"}]))
         )
         result = await tools["woodpecker_get_logs"]("owner/repo", 1, step_name="deploy")
     assert "error" in result
