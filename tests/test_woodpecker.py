@@ -1,5 +1,6 @@
 """Tests for Woodpecker tools with respx HTTP mocks (Woodpecker 3.x API)."""
 
+import base64
 import json
 
 import httpx
@@ -113,6 +114,19 @@ async def test_woodpecker_list_pipelines_status_filter(tools):
     assert result["pipelines"][0]["status"] == "success"
 
 
+def _b64_entry(text: str, **extra) -> dict:
+    """A Woodpecker 3.x log entry: text lives in base64 "data", not plaintext "out"."""
+    return {"data": base64.b64encode(text.encode()).decode(), **extra}
+
+
+def _pipeline_detail(steps: list[dict]) -> dict:
+    """A pipeline-detail response shape. Steps are nested under
+    workflows[].children[], not a separate /pipelines/{n}/steps endpoint — that
+    route also matches nothing and 200s with the Woodpecker SPA's HTML index,
+    confirmed live 2026-08-25 (a defect the build plan didn't catch)."""
+    return {"id": 1, "number": 1, "workflows": [{"id": 1, "name": "woodpecker", "children": steps}]}
+
+
 @pytest.mark.asyncio
 async def test_woodpecker_get_logs_by_step_name(tools):
     mock_steps = [
@@ -120,40 +134,128 @@ async def test_woodpecker_get_logs_by_step_name(tools):
         {"id": 11, "name": "build"},
     ]
     mock_logs = [
-        {"out": "step output line 1", "pos": 0, "time": 1000},
-        {"out": "step output line 2", "pos": 1, "time": 1001},
+        _b64_entry("step output line 1\n", pos=0, time=1000),
+        _b64_entry("step output line 2\n", pos=1, time=1001),
     ]
     with respx.mock:
         _lookup_mock()
-        respx.get(f"{REPO_URL}/pipelines/1/steps").mock(
-            return_value=httpx.Response(200, json=mock_steps)
+        respx.get(f"{REPO_URL}/pipelines/1").mock(
+            return_value=httpx.Response(200, json=_pipeline_detail(mock_steps))
         )
-        respx.get(f"{REPO_URL}/pipelines/1/11/logs").mock(
+        # Correct route is /repos/{id}/logs/{pipeline}/{step}, not
+        # /repos/{id}/pipelines/{pipeline}/{step}/logs — the old path matched no
+        # Woodpecker route and 200'd with the SPA's HTML index (vikunja #478).
+        # respx raises on an unmatched route, so mocking only this path is itself
+        # part of the assertion; route.called below makes it explicit.
+        logs_route = respx.get(f"{REPO_URL}/logs/1/11").mock(
             return_value=httpx.Response(200, json=mock_logs)
         )
         result = await tools["woodpecker_get_logs"]("owner/repo", 1, step_name="build")
+    assert logs_route.called
     assert result["step"] == "build"
     assert len(result["lines"]) == 2
     assert result["lines"][0] == "step output line 1"
+    assert result["lines"][1] == "step output line 2"
     assert "truncated" not in result
 
 
 @pytest.mark.asyncio
 async def test_woodpecker_get_logs_truncation(tools):
     mock_steps = [{"id": 10, "name": "build"}]
-    mock_logs = [{"out": f"line {i}", "pos": i, "time": i} for i in range(600)]
+    mock_logs = [_b64_entry(f"line {i}\n", pos=i, time=i) for i in range(600)]
     with respx.mock:
         _lookup_mock()
-        respx.get(f"{REPO_URL}/pipelines/1/steps").mock(
-            return_value=httpx.Response(200, json=mock_steps)
+        respx.get(f"{REPO_URL}/pipelines/1").mock(
+            return_value=httpx.Response(200, json=_pipeline_detail(mock_steps))
         )
-        respx.get(f"{REPO_URL}/pipelines/1/10/logs").mock(
+        logs_route = respx.get(f"{REPO_URL}/logs/1/10").mock(
             return_value=httpx.Response(200, json=mock_logs)
         )
         result = await tools["woodpecker_get_logs"]("owner/repo", 1)
+    assert logs_route.called
     assert len(result["lines"]) == 500
+    assert result["lines"][0] == "line 0"
     assert result["truncated"] is True
     assert "notice" in result
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_get_logs_decodes_multiple_entries_with_newline_join(tools):
+    """Entries carry no trailing newline of their own; each decoded entry becomes
+    exactly one line, not a run-on concatenation (vikunja #478 defect 2)."""
+    mock_steps = [{"id": 10, "name": "build"}]
+    mock_logs = [
+        _b64_entry("+ python --version"),
+        _b64_entry("Python 3.12.13"),
+        _b64_entry("+ apt-get update"),
+    ]
+    with respx.mock:
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/1").mock(
+            return_value=httpx.Response(200, json=_pipeline_detail(mock_steps))
+        )
+        respx.get(f"{REPO_URL}/logs/1/10").mock(return_value=httpx.Response(200, json=mock_logs))
+        result = await tools["woodpecker_get_logs"]("owner/repo", 1)
+    assert result["lines"] == ["+ python --version", "Python 3.12.13", "+ apt-get update"]
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_get_logs_null_data_is_blank_line(tools):
+    """A present-but-null "data" is a real blank output line, not the missing-key
+    bug shape — confirmed live 2026-08-25 (149 of 2219 entries on one step)."""
+    mock_steps = [{"id": 10, "name": "build"}]
+    mock_logs = [
+        _b64_entry("+ echo hi"),
+        {"id": 1, "step_id": 10, "time": 0, "line": 1, "data": None, "type": 0},
+        _b64_entry("hi"),
+    ]
+    with respx.mock:
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/1").mock(
+            return_value=httpx.Response(200, json=_pipeline_detail(mock_steps))
+        )
+        respx.get(f"{REPO_URL}/logs/1/10").mock(return_value=httpx.Response(200, json=mock_logs))
+        result = await tools["woodpecker_get_logs"]("owner/repo", 1)
+    assert result["lines"] == ["+ echo hi", "", "hi"]
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_get_logs_missing_data_field_errors(tools):
+    """A dict entry without "data" is the shape of the old bug reappearing — it must
+    raise, not silently dump str(entry) as a garbage "line" (vikunja #478 defect 2)."""
+    mock_steps = [{"id": 10, "name": "build"}]
+    mock_logs = [{"out": "unexpected 1.x shape", "pos": 0, "time": 0}]
+    with respx.mock:
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/1").mock(
+            return_value=httpx.Response(200, json=_pipeline_detail(mock_steps))
+        )
+        respx.get(f"{REPO_URL}/logs/1/10").mock(return_value=httpx.Response(200, json=mock_logs))
+        result = await tools["woodpecker_get_logs"]("owner/repo", 1)
+    assert "error" in result
+    assert "data" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_woodpecker_get_logs_html_response_errors_clearly(tools):
+    """A 200 with an HTML body (Woodpecker's SPA fallback for an unmatched route)
+    must fail with a named routing error, not an opaque JSONDecodeError."""
+    mock_steps = [{"id": 10, "name": "build"}]
+    with respx.mock:
+        _lookup_mock()
+        respx.get(f"{REPO_URL}/pipelines/1").mock(
+            return_value=httpx.Response(200, json=_pipeline_detail(mock_steps))
+        )
+        respx.get(f"{REPO_URL}/logs/1/10").mock(
+            return_value=httpx.Response(
+                200, text="<!doctype html><html>...</html>", headers={"content-type": "text/html"}
+            )
+        )
+        result = await tools["woodpecker_get_logs"]("owner/repo", 1)
+    assert "error" in result
+    assert "non-JSON" in result["error"]
+    assert "text/html" in result["error"]
+    assert "logs/1/10" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -252,7 +354,9 @@ async def test_woodpecker_status_success(tools):
 async def test_woodpecker_get_logs_no_steps(tools):
     with respx.mock:
         _lookup_mock()
-        respx.get(f"{REPO_URL}/pipelines/1/steps").mock(return_value=httpx.Response(200, json=[]))
+        respx.get(f"{REPO_URL}/pipelines/1").mock(
+            return_value=httpx.Response(200, json=_pipeline_detail([]))
+        )
         result = await tools["woodpecker_get_logs"]("owner/repo", 1)
     assert "error" in result
     assert "No steps" in result["error"]
@@ -262,8 +366,8 @@ async def test_woodpecker_get_logs_no_steps(tools):
 async def test_woodpecker_get_logs_step_not_found(tools):
     with respx.mock:
         _lookup_mock()
-        respx.get(f"{REPO_URL}/pipelines/1/steps").mock(
-            return_value=httpx.Response(200, json=[{"id": 10, "name": "build"}])
+        respx.get(f"{REPO_URL}/pipelines/1").mock(
+            return_value=httpx.Response(200, json=_pipeline_detail([{"id": 10, "name": "build"}]))
         )
         result = await tools["woodpecker_get_logs"]("owner/repo", 1, step_name="deploy")
     assert "error" in result

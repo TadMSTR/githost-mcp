@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-25
+
+### Fixed — `woodpecker_get_logs` never returned logs (vikunja #478, id 526)
+
+Every call returned `{"error": "Expecting value: line 1 column 1 (char 0)"}`, on every
+pipeline, with or without `step_name`. Three stacked defects, two beyond what #478 diagnosed:
+
+- **Steps request hit a nonexistent route.** `/repos/{id}/pipelines/{n}/steps` matches no
+  Woodpecker API path; the SPA fallback served the frontend `index.html` with a **200**. Steps
+  are nested under the pipeline-detail response instead, as `workflows[].children[]` — the same
+  endpoint `woodpecker_status` already calls successfully. This defect predates the log-decode
+  bug in the call chain and was not caught by the build plan, which had verified only the
+  downstream log URL live.
+- **Log request hit a nonexistent route.** `/repos/{id}/pipelines/{n}/{step}/logs` — same
+  SPA-fallback failure mode. Corrected to `/repos/{id}/logs/{n}/{step}`.
+- **Log entries were decoded with the wrong field.** Woodpecker 3.x returns each line as
+  base64 in `data`; the code read `out`, the Woodpecker 1.x field name, and silently fell back
+  to dumping the raw dict as a "line" when the key was absent. A `data` value of `null` is a
+  real blank output line (149 of 2219 entries on one verified step) and decodes to `""`; a
+  missing `data` key is now a hard error instead of silent garbage.
+
+`_check_response` now rejects any non-`4xx` response whose `content-type` isn't JSON, naming
+the received type and the requested URL — a 200 serving HTML means the route didn't match, and
+now says so instead of surfacing as an opaque `JSONDecodeError` at the `.json()` call.
+
+Verified against a live pipeline (`host-forge/scripts` #55, step `python`, 2219 real log
+entries) post-fix: correct step resolution, correct decode, 500-line truncation, and a clean
+"not found" error for a bad `step_name` — no decode errors.
+
+### Docs
+
+Corrected the `ecosystem.config.js` header comment: `GITHOST_MCP_AUTH_TOKEN` is fleet-wide via
+`~/.secrets/forge.env`, not per-agent — `buildApp()` applies the shared value after the
+per-agent file, silently overwriting anything set there. No behavior change; tracked fix for
+making it actually per-agent is vikunja #408.
+
 ## [0.11.0] — 2026-08-11
 
 Two builds land in this release. The upstream-contribution work below is new; the
