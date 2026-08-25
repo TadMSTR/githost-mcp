@@ -14,9 +14,17 @@
 // GITEA_TOKEN / GITLAB_TOKEN / GITHOST_MCP_AUTH_TOKEN) and
 // ~/.secrets/githost-mcp-<agent>.env (GITEA_URL / GITHUB_URL, GIT_AGENT_NAME /
 // GIT_AGENT_EMAIL, AUDIT_SIGNING_KEY, LOG_FILE / AUDIT_LOG_FILE /
-// AUDIT_LOG_MAX_BYTES / AUDIT_LOG_BACKUP_COUNT / LOG_LEVEL, WOODPECKER_URL and
-// any agent-specific token overrides; ALLOWED_REPO_ROOTS only where an agent
-// still overrides the manifest allowlist).
+// AUDIT_LOG_MAX_BYTES / AUDIT_LOG_BACKUP_COUNT / LOG_LEVEL, WOODPECKER_URL;
+// ALLOWED_REPO_ROOTS only where an agent still overrides the manifest
+// allowlist).
+//
+// GITHOST_MCP_AUTH_TOKEN is fleet-wide, not per-agent: buildApp() below reads
+// it from the per-agent file first but then applies the shared forge.env value
+// unconditionally, overwriting anything set there. A per-agent value in
+// githost-mcp-<agent>.env is read and silently discarded — see vikunja #408
+// for the tracked fix (would need new per-agent secrets, `headers:` blocks in
+// six manifests, and a coordinated restart of six githost-mcp + six scoped-mcp
+// processes).
 //
 // AGENT_ID does NOT come from that file and never has — buildApp() below injects
 // it, along with TRANSPORT, HTTP_HOST, HTTP_PORT, AGENT_MANIFEST_PATH and

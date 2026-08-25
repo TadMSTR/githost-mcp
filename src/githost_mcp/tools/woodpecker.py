@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import re
 
 import httpx
@@ -47,6 +48,20 @@ def _check_response(resp: httpx.Response) -> None:
         detail = scrub(resp.text[:300]).strip()
         raise ValueError(
             f"Woodpecker API error {resp.status_code}" + (f": {detail}" if detail else "")
+        )
+    content_type = resp.headers.get("content-type", "")
+    # Bodyless responses (204 from cancel) carry no content-type worth checking —
+    # only reject a body that arrived and isn't JSON.
+    if resp.content and "json" not in content_type.lower():
+        # A route that doesn't match any Woodpecker API path still gets a 200 — the
+        # SPA fallback serves the frontend index. That HTML then fails json() with an
+        # opaque JSONDecodeError that reads like a data problem, not a routing one
+        # (vikunja #478). Name the actual cause here instead.
+        detail = scrub(resp.text[:300]).strip()
+        raise ValueError(
+            f"Woodpecker returned non-JSON content-type '{content_type or 'unknown'}' for "
+            f"{resp.request.method} {resp.request.url} (status {resp.status_code})"
+            + (f": {detail}" if detail else "")
         )
 
 
@@ -205,13 +220,24 @@ def register(mcp) -> None:
             headers = _woodpecker_headers()
             async with httpx.AsyncClient(timeout=30.0) as client:
                 repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
-                steps_resp = await client.get(
-                    f"{base}/repos/{repo_id}/pipelines/{pipeline_id}/steps",
+                # /repos/{id}/pipelines/{n}/steps also matches no Woodpecker route
+                # (confirmed live 2026-08-25 — 200 with the SPA's HTML index, same
+                # failure mode as the log URL below, and not caught by the build plan
+                # that scoped this fix). Steps live nested under the pipeline detail
+                # response instead, as workflows[].children[] — the same endpoint
+                # woodpecker_status already calls successfully.
+                pipeline_resp = await client.get(
+                    f"{base}/repos/{repo_id}/pipelines/{pipeline_id}",
                     headers=headers,
                 )
-                _check_response(steps_resp)
-                steps = steps_resp.json()
-                if not isinstance(steps, list) or not steps:
+                _check_response(pipeline_resp)
+                pipeline_data = pipeline_resp.json()
+                steps = [
+                    step
+                    for workflow in (pipeline_data.get("workflows") or [])
+                    for step in (workflow.get("children") or [])
+                ]
+                if not steps:
                     ac.finish("error:no_steps")
                     return {"error": "No steps found for pipeline"}
 
@@ -226,18 +252,41 @@ def register(mcp) -> None:
                 step_id = int(step.get("id"))
                 step_label = step.get("name", str(step_id))
 
+                # /repos/{id}/pipelines/{n}/{step}/logs matches no Woodpecker route —
+                # the correct path is /repos/{id}/logs/{n}/{step}. The old path 200'd
+                # with the SPA's HTML index, which _check_response now catches
+                # explicitly instead of failing json() with an opaque decode error
+                # (vikunja #478).
                 log_resp = await client.get(
-                    f"{base}/repos/{repo_id}/pipelines/{pipeline_id}/{step_id}/logs",
+                    f"{base}/repos/{repo_id}/logs/{pipeline_id}/{step_id}",
                     headers=headers,
                 )
                 _check_response(log_resp)
                 log_data = log_resp.json()
 
             if isinstance(log_data, list):
-                lines = [
-                    entry.get("out", str(entry)) if isinstance(entry, dict) else str(entry)
-                    for entry in log_data
-                ]
+                lines = []
+                for entry in log_data:
+                    if not isinstance(entry, dict):
+                        lines.append(str(entry))
+                        continue
+                    # Woodpecker 3.x carries log text as base64 in "data" — "out" was
+                    # the 1.x field name. A missing "data" key means the response
+                    # shape isn't what's expected here; raise rather than dumping the
+                    # raw dict, which is how defect #2 shipped invisibly under #478.
+                    if "data" not in entry:
+                        raise ValueError(
+                            f"Unexpected Woodpecker log entry shape (no 'data' field): "
+                            f"{sorted(entry.keys())}"
+                        )
+                    # A present-but-null "data" is a real blank output line — confirmed
+                    # live 2026-08-25, 149 of 2219 entries on one step. Distinct from a
+                    # missing key: this is documented shape, not a bug signature.
+                    if entry["data"] is None:
+                        lines.append("")
+                        continue
+                    decoded = base64.b64decode(entry["data"]).decode("utf-8", "replace")
+                    lines.append(decoded.rstrip("\n"))
             else:
                 lines = [str(log_data)]
 
