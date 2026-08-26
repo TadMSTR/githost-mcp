@@ -122,6 +122,14 @@ as a per-repo number, not Woodpecker's global id. The global id is still returne
 other three tools 404 on — chaining `trigger` into `status`/`get_logs`/`cancel` never
 worked prior to this fix.
 
+`woodpecker_get_logs(repo, pipeline_id, step_name=None)` returns `{"step": <name>,
+"lines": [...]}`. `step_name` defaults to the pipeline's first step when omitted. Output
+is base64-decoded from Woodpecker's log entries and truncates at 500 lines, adding
+`truncated: true` and a `notice` field when the cap is hit. As of 0.12.0 this tool
+actually works — three stacked defects (two mismatched API routes and a Woodpecker
+1.x/3.x log-field mismatch) meant every call failed with an opaque JSON-decode error
+since the tool was first added; see CHANGELOG.md `[0.12.0]` for the fix.
+
 ### Audit (1)
 `audit_log_query` — query the JSONL audit log by agent, tool, repo, or time range
 
