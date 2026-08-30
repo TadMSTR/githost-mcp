@@ -88,6 +88,16 @@ def evaluate_push(push_info) -> RemoteOutcome:
 
     An empty result means the remote acknowledged nothing at all — the ref did not
     move, so it is not a success.
+
+    ``PushInfoList.error`` is checked as well as the per-ref flags, and it is not
+    redundant with them. GitPython raises only when it parsed *no* porcelain lines
+    at all (``remote.py:_get_push_info`` — ``if not output: raise``); when some
+    lines parsed and git still exited non-zero, it swallows the exception onto
+    ``push_info.error`` and returns the list. A push whose rejected ref is one git
+    porcelain line GitPython cannot parse — a delete refspec rejection is exactly
+    that, see ``git_branch_delete_remote`` — then yields a list holding only the
+    *successful* entries, every one of them error-free. Reading flags alone would
+    call that a success and recreate vikunja #265 in a third shape.
     """
     decoded: list[str] = []
     summaries: list[str] = []
@@ -103,6 +113,13 @@ def evaluate_push(push_info) -> RemoteOutcome:
     if not decoded:
         failed = True
         summaries.append("remote reported no ref updates")
+
+    # getattr, not attribute access: evaluate_push is also handed plain lists by
+    # callers and tests, and only a real PushInfoList carries `error`.
+    list_error = getattr(push_info, "error", None)
+    if list_error is not None:
+        failed = True
+        summaries.append(str(list_error))
 
     return RemoteOutcome(flags=decoded, summary=scrub("; ".join(summaries)), failed=failed)
 

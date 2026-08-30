@@ -130,3 +130,54 @@ def test_evaluate_push_scrubs_the_summary():
     leaked = "https://ted:ghp_LEAKED_TOKEN@github.com/o/r.git"
     outcome = evaluate_push([FakeInfo(git.remote.PushInfo.ERROR, summary=f"failed to {leaked}")])
     assert "ghp_LEAKED_TOKEN" not in outcome.summary
+
+
+# --- evaluate_push honours PushInfoList.error --------------------------------
+#
+# GitPython raises only when it parsed no porcelain lines at all
+# (remote.py:_get_push_info — `if not output: raise`). When *some* lines parsed
+# and git still exited non-zero it swallows the exception onto the list's `error`
+# attribute and returns normally. Every surviving PushInfo can then be error-free
+# while the push as a whole failed, so flags alone are not enough.
+
+
+class FakePushInfoList(list):
+    """A list that carries `error`, the way git.remote.PushInfoList does."""
+
+    def __init__(self, items, error=None):
+        super().__init__(items)
+        self.error = error
+
+
+def test_evaluate_push_list_error_is_a_failure_despite_clean_flags():
+    """The regression that matters: a partially-rejected push whose rejected ref
+    is a line GitPython could not parse leaves only the successful entries behind.
+    Reading flags alone calls that a success — vikunja #265 in a third shape."""
+    clean = FakeInfo(git.remote.PushInfo.FAST_FORWARD, summary="abc..def")
+    outcome = evaluate_push(FakePushInfoList([clean], error=Exception("push rejected some refs")))
+    assert outcome.failed is True, "a list-level error must not be overridden by clean flags"
+    assert "push rejected some refs" in outcome.summary
+
+
+def test_evaluate_push_no_list_error_still_succeeds():
+    """Guards against 'fail whenever the attribute exists' — an unset error is the
+    normal case for every successful push and must stay a success."""
+    clean = FakeInfo(git.remote.PushInfo.FAST_FORWARD, summary="abc..def")
+    assert evaluate_push(FakePushInfoList([clean], error=None)).failed is False
+
+
+def test_evaluate_push_plain_list_without_error_attribute_still_works():
+    """evaluate_push is handed plain lists by callers and tests; the lookup must
+    not require the attribute to exist."""
+    clean = FakeInfo(git.remote.PushInfo.FAST_FORWARD, summary="abc..def")
+    assert evaluate_push([clean]).failed is False
+
+
+def test_evaluate_push_list_error_is_scrubbed():
+    """The swallowed exception is a GitCommandError whose cmdline can carry a
+    credential-bearing remote URL."""
+    leaked = "https://ted:ghp_LISTERROR_TOKEN@github.com/o/r.git"
+    clean = FakeInfo(git.remote.PushInfo.FAST_FORWARD, summary="abc..def")
+    outcome = evaluate_push(FakePushInfoList([clean], error=Exception(f"failed pushing {leaked}")))
+    assert outcome.failed is True
+    assert "ghp_LISTERROR_TOKEN" not in outcome.summary

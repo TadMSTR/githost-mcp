@@ -28,6 +28,7 @@ from ..security import (
     WriteGlobDenied,
     redact_url_credentials,
     scrub,
+    validate_branch_name,
     validate_read_path,
     validate_remote_name,
     validate_remote_url,
@@ -326,6 +327,7 @@ def register(mcp) -> None:
         repo_path: str,
         action: str = "list",
         branch_name: str | None = None,
+        force: bool = False,
     ) -> dict:
         """List, create, or delete branches.
 
@@ -334,12 +336,30 @@ def register(mcp) -> None:
         which branch a following commit would land on; pair with git_checkout to
         switch.
 
+        `force` applies to 'delete' only. Without it, deletion uses `git branch -d`
+        semantics, which require the branch to be an ancestor of HEAD. **A
+        squash-merged branch never is** — squash rewrites the work into one new
+        commit and leaves the original tip unreachable — so an unforced delete fails
+        for essentially every branch merged the way this fleet merges. Pass
+        force=True once you know the work landed; the tool will not guess on your
+        behalf, and the deleted tip stays recoverable from the reflog.
+
+        This deletes the *local* branch only. The remote ref is a separate tool,
+        git_branch_delete_remote.
+
         Args:
             repo_path: Absolute path to the local git repository.
             action: 'list', 'create', or 'delete'.
             branch_name: Branch name for create/delete actions.
+            force: Delete even if not merged into HEAD ('delete' only, ignored
+                otherwise). Required for squash-merged branches.
         """
-        params = {"repo_path": repo_path, "action": action, "branch_name": branch_name}
+        params = {
+            "repo_path": repo_path,
+            "action": action,
+            "branch_name": branch_name,
+            "force": force,
+        }
         ac = AuditCtx("git_branch", "local", repo_path, params)
         try:
             if action == "list":
@@ -370,11 +390,146 @@ def register(mcp) -> None:
             elif action == "delete":
                 if not branch_name:
                     raise ValueError("branch_name required for delete")
-                repo.delete_head(branch_name)
+                # Captured before the delete: once the head is gone the sha is only
+                # reachable from the reflog, and it is the one thing that makes a
+                # forced delete recoverable.
+                try:
+                    deleted_sha = repo.heads[branch_name].commit.hexsha
+                except (IndexError, KeyError):
+                    deleted_sha = None
+                repo.delete_head(branch_name, force=force)
                 ac.finish("ok")
-                return {"deleted": branch_name}
+                return {
+                    "deleted": branch_name,
+                    "deleted_sha": deleted_sha,
+                    "forced": force,
+                }
             else:
                 raise ValueError(f"Unknown action '{action}'; use list, create, or delete")
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}")
+            return {"error": scrub(str(e))}
+
+    @mcp.tool
+    def git_branch_delete_remote(
+        repo_path: str,
+        branch_name: str,
+        remote: str = "origin",
+    ) -> dict:
+        """Delete a branch on the remote (push a delete refspec).
+
+        A separate tool rather than a `remote=` flag on git_branch, deliberately.
+        Every scoped-mcp enforcement layer keys on the tool *name* and never on
+        arguments — HITL matches tool_name by fnmatch, the proxy allow/denylist is
+        exact-string set membership, and argument_filters is a single regex over a
+        field list with no conjunction. As a parameter this would be ungateable:
+        restricting it would mean denying git_branch outright and losing `list` and
+        `create` with it. Do not fold it back in.
+
+        Deleting a ref that is already absent is a no-op *at the git level* — git
+        exits 0 and prints `[deleted]` for a branch that never existed. That would
+        make a typo'd branch name indistinguishable from a real deletion, so this
+        checks the remote first and reports `already_absent` instead of claiming a
+        delete it did not perform. The result then carries neither `deleted` nor
+        `error`: nothing was destroyed and nothing went wrong.
+
+        Args:
+            repo_path: Absolute path to the local git repository.
+            branch_name: Branch to delete on the remote. Not the local branch —
+                use git_branch(action='delete') for that.
+            remote: Remote name (default: origin).
+        """
+        params = {"repo_path": repo_path, "branch_name": branch_name, "remote": remote}
+        ac = AuditCtx("git_branch_delete_remote", "local", repo_path, params)
+        try:
+            validate_write_path(repo_path)
+            validate_remote_name(remote)
+            validate_branch_name(branch_name)
+            repo = _open_repo(repo_path)
+            if remote not in [r.name for r in repo.remotes]:
+                raise ValueError(f"No such remote '{remote}' in {repo_path}")
+
+            # Authoritative existence check against the remote itself. repo.remotes
+            # [remote].refs is the local cache of remote-tracking refs and goes stale
+            # the moment anyone else pushes; ls-remote is a live query.
+            listing = repo.git.ls_remote("--heads", remote, f"refs/heads/{branch_name}")
+            if not listing.strip():
+                ac.finish("ok:already_absent")
+                return {
+                    "already_absent": True,
+                    "branch": branch_name,
+                    "remote": remote,
+                    "note": (
+                        f"'{branch_name}' is not present on {remote}; nothing was deleted. "
+                        f"Check the branch name if you expected it to be there."
+                    ),
+                }
+            deleted_sha = listing.split()[0]
+
+            try:
+                push_info = repo.remotes[remote].push(refspec=f":refs/heads/{branch_name}")
+            except git.GitCommandError as e:
+                # A *rejected* delete lands here rather than in evaluate_push, and
+                # that is a GitPython parsing limitation, not a choice. Git's
+                # porcelain line for a denied deletion is
+                # `!\t:refs/heads/<name>\t[remote rejected] (deletion prohibited)`.
+                # Control character `!` means ERROR, so PushInfo._from_line does not
+                # take its `flags & DELETED` branch (remote.py:230) and instead calls
+                # Reference.from_path(repo, "") on the empty source side, which raises
+                # ValueError. _get_push_info swallows that, is left with no parsed
+                # lines, and re-raises the process error (`if not output: raise`).
+                # So there is no PushInfo to evaluate — the rejection is only ever
+                # visible as this exception. Answering the build plan's open question:
+                # flag reporting is reliable for a *successful* delete and absent for
+                # a rejected one.
+                reason = scrub(str(e))
+                log.warning(
+                    "remote_branch_delete_rejected",
+                    remote=remote,
+                    branch=branch_name,
+                    error=reason,
+                )
+                ac.finish("error:PushRejected")
+                # No "deleted" key on failure — a result carrying both would be
+                # vikunja #265 in a new shape.
+                return {
+                    "error": f"delete of {remote}/{branch_name} failed: {reason}",
+                    "remote": remote,
+                    "branch": branch_name,
+                }
+
+            outcome = evaluate_push(push_info)
+            if outcome.failed:
+                # PushInfo.summary is the remote's raw text and can carry a
+                # credential-bearing remote URL straight to the caller (SC-14);
+                # evaluate_push has already scrubbed it.
+                reason = outcome.summary or "delete rejected by remote"
+                log.warning(
+                    "remote_branch_delete_failed",
+                    remote=remote,
+                    branch=branch_name,
+                    flags=outcome.flags,
+                    summary=reason,
+                )
+                ac.finish("error:PushRejected")
+                return {
+                    "error": f"delete of {remote}/{branch_name} failed: {reason}",
+                    "remote": remote,
+                    "branch": branch_name,
+                    "flags": outcome.flags,
+                    "summary": reason,
+                }
+
+            ac.finish("ok")
+            # deleted_sha is what the remote ref pointed at immediately before the
+            # delete — the only handle left for recovering the branch, since the
+            # remote keeps no reflog the caller can reach.
+            return {
+                "deleted": branch_name,
+                "deleted_sha": deleted_sha,
+                "remote": remote,
+                "flags": outcome.flags,
+            }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}")
             return {"error": scrub(str(e))}

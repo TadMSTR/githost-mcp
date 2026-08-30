@@ -1342,3 +1342,309 @@ def test_git_commit_third_party_remote_does_not_trigger_a_lookup(tools, public_i
 
     assert result.get("identity") == "public", result
     assert gh.get_repo.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Squash-merged local delete + remote branch deletion
+# (vikunja #383, id 402 — githost-mcp-remote-branch-deletion-2026-08)
+#
+# Same real-bare-remote treatment as the git_push block above. A mocked PushInfo
+# would accept whatever shape the code produces, and the delete-refspec rejection
+# path in particular does not behave the way a mock would suggest.
+# ---------------------------------------------------------------------------
+
+
+def _squash_merged_branch(repo: git.Repo, name: str) -> str:
+    """Create `name`, commit on it, squash-merge it into the default branch.
+
+    Returns the branch tip sha. Built as a real squash rather than a plain merge
+    on purpose: after a squash the branch tip is *not* an ancestor of HEAD, which
+    is the entire reason the unforced delete fails. A test that force-deletes an
+    ordinarily-merged branch passes whether or not `force` is wired up at all.
+    """
+    base = repo.active_branch.name
+    repo.create_head(name)
+    repo.git.checkout(name)
+    _commit_file(repo, f"{name}-work.txt", "feature work")
+    tip = repo.head.commit.hexsha
+    repo.git.checkout(base)
+    repo.git.merge(name, "--squash")
+    repo.index.commit(f"squash merge {name}")
+    return tip
+
+
+def test_squash_merged_branch_is_not_an_ancestor(tools):
+    """The premise the force flag exists for. If this ever fails, the two tests
+    below stop testing anything and would silently pass."""
+    _fns, path = tools
+    local = git.Repo(str(path))
+    tip = _squash_merged_branch(local, "feature-premise")
+    assert not local.is_ancestor(tip, local.head.commit), (
+        "squash merge left the branch reachable from HEAD — fixture is not a squash"
+    )
+
+
+def test_git_branch_delete_refuses_squash_merged_branch_without_force(tools):
+    """`git branch -d` semantics reject a squash-merged branch. This is the bug."""
+    fns, path = tools
+    local = git.Repo(str(path))
+    _squash_merged_branch(local, "feature-unforced")
+
+    result = fns["git_branch"](str(path), action="delete", branch_name="feature-unforced")
+
+    assert "error" in result, f"unforced delete of a squash-merged branch must fail: {result}"
+    assert "deleted" not in result, "failure result must not also claim a deletion"
+    assert "feature-unforced" in [b.name for b in local.branches], (
+        "branch must survive a failed delete"
+    )
+
+
+def test_git_branch_delete_force_removes_squash_merged_branch(tools):
+    """force=True is the whole point: it must actually delete the same branch."""
+    fns, path = tools
+    local = git.Repo(str(path))
+    tip = _squash_merged_branch(local, "feature-forced")
+
+    result = fns["git_branch"](str(path), action="delete", branch_name="feature-forced", force=True)
+
+    assert "error" not in result, f"forced delete failed: {result}"
+    assert result["deleted"] == "feature-forced"
+    assert result["forced"] is True
+    assert result["deleted_sha"] == tip, "the recoverable sha must be the branch tip"
+    assert "feature-forced" not in [b.name for b in local.branches]
+
+
+def test_git_branch_delete_default_is_still_unforced(tools):
+    """The default must not silently become force=True. An unmerged branch is the
+    case `git branch -d` is designed to protect, and it must stay protected."""
+    fns, path = tools
+    local = git.Repo(str(path))
+    base = local.active_branch.name
+    local.create_head("feature-unmerged")
+    local.git.checkout("feature-unmerged")
+    _commit_file(local, "unmerged.txt", "never merged")
+    local.git.checkout(base)
+
+    result = fns["git_branch"](str(path), action="delete", branch_name="feature-unmerged")
+
+    assert "error" in result, f"default delete must not force: {result}"
+    assert "feature-unmerged" in [b.name for b in local.branches]
+
+
+def test_git_branch_delete_force_is_audited(tools, tmp_path):
+    """A destructive, policy-relevant flag that never reaches the trail is not
+    auditable — the entry must record that force was used."""
+    fns, path = tools
+    local = git.Repo(str(path))
+    _squash_merged_branch(local, "feature-audited")
+
+    fns["git_branch"](str(path), action="delete", branch_name="feature-audited", force=True)
+
+    lines = [
+        line
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+        if "git_branch" in line and "feature-audited" in line
+    ]
+    assert lines, "the forced delete must be audited"
+    entry = json.loads(lines[-1])
+    assert entry["params"]["force"] is True, f"force must appear in the audit params: {entry}"
+    assert entry["result"] == "ok"
+
+
+# --- git_branch_delete_remote ----------------------------------------------
+
+
+@pytest.fixture()
+def remote_with_throwaway(tmp_path, repo_path, bare_remote):
+    """bare_remote, plus a throwaway branch pushed to it and ready to delete."""
+    bare, base = bare_remote
+    local = git.Repo(str(repo_path))
+    local.create_head("throwaway")
+    local.remotes.origin.push("throwaway")
+    assert "throwaway" in [r.name for r in bare.refs]
+    return bare, base
+
+
+def test_git_branch_delete_remote_removes_the_ref(tools, remote_with_throwaway):
+    """The end state is what matters: the ref is gone from the remote itself."""
+    fns, path = tools
+    bare, _base = remote_with_throwaway
+
+    result = fns["git_branch_delete_remote"](str(path), "throwaway")
+
+    assert "error" not in result, f"genuine remote delete reported failure: {result}"
+    assert result["deleted"] == "throwaway"
+    assert result["remote"] == "origin"
+    assert "DELETED" in result["flags"], f"delete flags not decoded: {result}"
+    assert "throwaway" not in [r.name for r in bare.refs], "ref survived a reported delete"
+
+
+def test_git_branch_delete_remote_reports_the_deleted_sha(tools, remote_with_throwaway):
+    """The remote keeps no reflog the caller can reach, so the pre-delete sha is
+    the only handle left for recovering the branch."""
+    fns, path = tools
+    bare, _base = remote_with_throwaway
+    expected = bare.refs["throwaway"].commit.hexsha
+
+    result = fns["git_branch_delete_remote"](str(path), "throwaway")
+
+    assert result["deleted_sha"] == expected, result
+
+
+def test_git_branch_delete_remote_sends_a_delete_refspec(tools, remote_with_throwaway):
+    """Assert the refspec string, not merely that push was called — the leading
+    colon is the entire difference between deleting a ref and pushing to it."""
+    fns, path = tools
+    local = git.Repo(str(path))
+    real_push = local.remotes.origin.push
+    seen = {}
+
+    def capture(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return real_push(*args, **kwargs)
+
+    with patch.object(git.Remote, "push", side_effect=capture, autospec=False):
+        fns["git_branch_delete_remote"](str(path), "throwaway")
+
+    assert seen["kwargs"].get("refspec") == ":refs/heads/throwaway", seen
+
+
+def test_git_branch_delete_remote_rejected_reports_failure(tools, remote_with_throwaway):
+    """A remote that refuses the deletion must produce an error result with no
+    success key. This is the #265-class regression test: without it the failure
+    mode is silent, and the rejection does NOT arrive as PushInfo flags — GitPython
+    cannot parse git's porcelain line for a denied delete and raises instead."""
+    fns, path = tools
+    bare, _base = remote_with_throwaway
+    bare.config_writer().set_value("receive", "denyDeletes", "true").release()
+
+    result = fns["git_branch_delete_remote"](str(path), "throwaway")
+
+    assert "error" in result, f"rejected delete reported success: {result}"
+    assert "deleted" not in result, "failure result must not also claim a deletion"
+    assert "throwaway" in [r.name for r in bare.refs], (
+        "the ref must genuinely still be on the remote"
+    )
+
+
+def test_git_branch_delete_remote_rejection_is_audited_as_a_rejection(
+    tools, remote_with_throwaway, tmp_path
+):
+    """A rejected delete must not be filed under a generic exception — the trail
+    should say the remote refused, not that some GitCommandError happened."""
+    fns, path = tools
+    bare, _base = remote_with_throwaway
+    bare.config_writer().set_value("receive", "denyDeletes", "true").release()
+
+    fns["git_branch_delete_remote"](str(path), "throwaway")
+
+    lines = [
+        line
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+        if "git_branch_delete_remote" in line
+    ]
+    assert lines, "the attempted delete must be audited"
+    assert json.loads(lines[-1])["result"] == "error:PushRejected"
+
+
+def test_git_branch_delete_remote_absent_branch_is_not_a_reported_deletion(
+    tools, remote_with_throwaway
+):
+    """git exits 0 and prints `[deleted]` for a ref that never existed. Passing
+    that through would make a typo'd branch name look like a successful cleanup
+    while the real branch survives untouched."""
+    fns, path = tools
+    bare, _base = remote_with_throwaway
+
+    result = fns["git_branch_delete_remote"](str(path), "thrownaway")  # typo
+
+    assert "deleted" not in result, f"claimed to delete a branch that was never there: {result}"
+    assert result["already_absent"] is True
+    assert "throwaway" in [r.name for r in bare.refs], "the real branch must be untouched"
+
+
+def test_git_branch_delete_remote_is_audited(tools, remote_with_throwaway, tmp_path):
+    """Routing this through githost-mcp instead of raw git buys exactly one thing:
+    the signed audit entry. Verify it is written and that the HMAC is valid."""
+    from githost_mcp.audit import verify_entry_hmac
+
+    fns, path = tools
+    fns["git_branch_delete_remote"](str(path), "throwaway")
+
+    lines = [
+        line
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+        if "git_branch_delete_remote" in line
+    ]
+    assert lines, "the remote delete must be audited"
+    entry = json.loads(lines[-1])
+    assert entry["result"] == "ok"
+    assert entry["params"]["branch_name"] == "throwaway"
+    assert verify_entry_hmac(entry) is True, "audit entry must carry a valid HMAC"
+
+
+def test_git_branch_delete_remote_respects_write_path_gate(
+    tools, remote_with_throwaway, tmp_path, monkeypatch
+):
+    """It is a write. The path gate is the boundary and must apply here too.
+
+    Takes remote_with_throwaway deliberately: without a real origin and a real
+    deletable branch this passes on the 'no such remote' error instead, and goes
+    on passing with validate_write_path deleted outright. Confirmed by mutation.
+    """
+    fns, path = tools
+    bare, _base = remote_with_throwaway
+    monkeypatch.setenv("ALLOWED_REPO_ROOTS", str(tmp_path / "somewhere-else"))
+    reset_config()
+
+    result = fns["git_branch_delete_remote"](str(path), "throwaway")
+
+    assert "error" in result, "remote delete outside allowed roots must be blocked"
+    assert "deleted" not in result
+    assert "allowed_write_roots" in result["error"], (
+        f"must fail on the path gate, not incidentally: {result}"
+    )
+    assert "throwaway" in [r.name for r in bare.refs], "the blocked delete must not have landed"
+
+
+def test_git_branch_delete_remote_rejects_refspec_splitting_branch_name(
+    tools, remote_with_throwaway
+):
+    """A colon would re-point the delete at a ref the caller never named, and the
+    caller could not tell from the result."""
+    fns, path = tools
+    bare, base = remote_with_throwaway
+
+    result = fns["git_branch_delete_remote"](str(path), f"throwaway:refs/heads/{base}")
+
+    assert "error" in result, result
+    assert "deleted" not in result
+    assert base in [r.name for r in bare.refs], "the default branch must be untouched"
+    assert "throwaway" in [r.name for r in bare.refs]
+
+
+def test_git_branch_delete_remote_unknown_remote_is_a_clean_error(tools, remote_with_throwaway):
+    fns, path = tools
+    result = fns["git_branch_delete_remote"](str(path), "throwaway", remote="nope")
+    assert "error" in result
+    assert "deleted" not in result
+
+
+def test_git_branch_delete_remote_failure_does_not_leak_credentials(
+    tools, repo_path, tmp_path, bare_remote
+):
+    """PushInfo.summary and GitCommandError both carry the remote's raw text, which
+    can include a credential-bearing URL (SC-14). Neither the result nor the audit
+    trail may become the bypass."""
+    fns, path = tools
+    local = git.Repo(str(path))
+    local.delete_remote("origin")
+    local.create_remote("origin", "https://user:ghp_deletetokenvalue999@127.0.0.1:1/o/r.git")
+
+    result = fns["git_branch_delete_remote"](str(path), "throwaway")
+
+    assert "error" in result, result
+    assert "ghp_deletetokenvalue999" not in str(result), f"credential leaked to caller: {result}"
+    audit = (tmp_path / "audit.jsonl").read_text()
+    assert "ghp_deletetokenvalue999" not in audit, "credential leaked to the audit trail"
