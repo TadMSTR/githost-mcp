@@ -2,6 +2,93 @@
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-30
+
+### Added — remote branch deletion, and `force` for squash-merged local branches (vikunja #383, id 402)
+
+githost-mcp had **no way to delete a remote branch at all**, and its local delete refused
+squash-merged branches. `repo.delete_head()` defaults to `git branch -d` semantics, which
+require the branch be an ancestor of HEAD; a squash merge rewrites the work into one new
+commit and leaves the original tip unreachable, so it never is. Squash is the standard
+merge method on this fleet, which made the local delete fail for essentially every branch
+worth removing after a merge. Both gaps forced a `system-ops` fallback outside the audited
+path, losing the HMAC entry that is the whole reason for routing git through this server.
+
+- **`git_branch` takes `force`** (`delete` only; ignored for `list`/`create`). Default
+  stays `False` — the caller knows whether the work landed and the tool will not guess.
+  The result now carries `deleted_sha`, captured before the delete, since afterwards the
+  tip is only reachable from the reflog.
+- **`git_branch_delete_remote`** — new tool. Pushes a delete refspec, validates the write
+  path, and writes its own audit entry.
+
+**⚠️ This tool ships UNGATED for five of the six agents.** #383's title calls it
+"HITL-gated"; that is **not** true as of this release. `developer` and `sysadmin` have no
+`tool_allowlist` and no `tool_denylist` on githost-mcp at all, and `research`, `security`
+and `writer` have denylists that do not name it. Only `steward` is excluded, and only
+incidentally — its allowlist is exact-match and so fails closed. The per-agent grants that
+make the gate meaningful are deliberately **out of scope here** and tracked in
+**vikunja #526 (id 609)**. Until that lands, this is a destructive capability reachable by
+default.
+
+It is a separate tool rather than a `remote=` flag on `git_branch`, and that is a design
+constraint rather than a preference: every scoped-mcp enforcement layer keys on the tool
+**name** and never on arguments — HITL matches `tool_name` by fnmatch (`hitl.py:166`), the
+proxy allow/denylist is exact-string set membership (`mcp_proxy.py:239`), and
+`argument_filters` is a single regex over a field list with no conjunction. As a parameter
+it would be structurally ungateable: restricting it would mean denying `git_branch`
+outright and losing `list` and `create` with it. Do not fold it back in.
+
+#### GitPython cannot report a rejected delete through `PushInfo`
+
+The build plan asked whether GitPython's flag reporting is reliable for delete refspecs.
+It is reliable for a **successful** delete (`DELETED`, flag 64, `local_ref` None) and
+**absent** for a rejected one. Git's porcelain line for a denied deletion carries control
+character `!`, so `PushInfo._from_line` does not take its `flags & DELETED` branch
+(`remote.py:230`) and instead calls `Reference.from_path(repo, "")` on the empty source
+side, raising `ValueError`. `_get_push_info` swallows that, is left with no parsed lines,
+and re-raises the process error (`if not output: raise`). The rejection is therefore only
+ever visible as a `GitCommandError`, which the new tool catches explicitly and audits as
+`error:PushRejected` rather than letting it fall through to a generic exception.
+
+#### An already-absent ref is no longer reported as a deletion
+
+Git exits 0 and prints `[deleted]` for a branch that never existed. Passing that through
+would make a typo'd branch name indistinguishable from a successful cleanup, while the
+branch the caller meant survives untouched. The tool queries the remote with `ls-remote`
+first and returns `already_absent` instead — carrying neither `deleted` nor `error`,
+because nothing was destroyed and nothing went wrong.
+
+### Fixed — `evaluate_push` could call a partially-rejected push a success
+
+Found while implementing the above; affects `git_push`, not only the new tool. GitPython
+raises only when it parsed **no** porcelain lines at all; when some lines parsed and git
+still exited non-zero, it swallows the exception onto `PushInfoList.error` and returns the
+list normally. A push whose rejected ref is a line GitPython cannot parse — a delete
+refspec rejection is exactly that — then yields a list holding only the *successful*
+entries, every one of them error-free. `evaluate_push` read the per-ref flags alone and
+would have reported success. It now honours the list-level error too, scrubbed like every
+other remote-supplied string.
+
+This is the same class as vikunja #265 (`git_push` reported success on a rejected push)
+and #274 (`git_pull` discarded `FetchInfo` error bits), in a third shape.
+
+### Added — `validate_branch_name`
+
+`git_branch_delete_remote` builds `":refs/heads/" + branch_name`. GitPython passes that as
+a single argv element, so this is not a shell-injection boundary — but a refspec is
+`src:dst`, so an embedded colon would silently retarget the deletion at a ref the caller
+never named, with nothing in the result to show it. Rejects empty names, a leading `-`,
+colons, whitespace, control characters, glob/revision metacharacters, `..`, `@{`, and the
+trailing forms git itself refuses. Written as a denylist rather than a character allowlist
+so legitimate names like `fix/#383` and `release/v1.2.0+build` still work.
+
+### Fixed — README tool count was stale
+
+The headline claimed 63 tools while 65 were registered, even though every per-section
+count beneath it was correct: three places record this one fact and only the un-derived
+one had drifted. Corrected to 66, and both the headline and the sum of the section counts
+are now asserted against the registered tools in `tests/test_server.py`.
+
 ## [0.12.0] — 2026-08-25
 
 ### Fixed — `woodpecker_get_logs` never returned logs (vikunja #478, id 526)

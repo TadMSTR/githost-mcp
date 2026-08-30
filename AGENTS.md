@@ -1,6 +1,6 @@
 # githost-mcp
 
-FastMCP server providing 63 tools across local git, GitHub, Gitea, GitLab, Woodpecker CI, release orchestration, registry publishing, and audit log queries. PR/MR review, CI control, and issues are exposed as method-dispatch tools (one tool, a `method` argument, per-operation audit).
+FastMCP server providing 66 tools across local git, GitHub, Gitea, GitLab, Woodpecker CI, release orchestration, registry publishing, and audit log queries. PR/MR review, CI control, and issues are exposed as method-dispatch tools (one tool, a `method` argument, per-operation audit).
 
 ## Structure
 

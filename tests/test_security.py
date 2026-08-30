@@ -9,6 +9,7 @@ from githost_mcp.security import (
     RemoteUrlRejected,
     WriteGlobDenied,
     clean_env,
+    validate_branch_name,
     validate_read_path,
     validate_remote_name,
     validate_remote_url,
@@ -510,3 +511,66 @@ def test_validate_remote_name_accepts_plain_names(name):
 def test_validate_remote_name_refuses_option_shaped_or_odd(name):
     with pytest.raises(ValueError):
         validate_remote_name(name)
+
+
+# --- validate_branch_name ----------------------------------------------------
+#
+# git_branch_delete_remote builds ":refs/heads/" + name. GitPython passes that as
+# one argv element, so this is not a shell boundary — but a refspec is src:dst,
+# and a name that splits it retargets a destructive call at a ref the caller never
+# named, invisibly.
+
+
+def test_validate_branch_name_accepts_ordinary_names():
+    for name in (
+        "main",
+        "feature/remote-branch-deletion",
+        "fix/#383-squash-delete",
+        "release/v1.2.0+build",
+        "dependabot/pip/urllib3-2.0.7",
+        "user.name/topic_1",
+    ):
+        validate_branch_name(name)  # must not raise
+
+
+def test_validate_branch_name_rejects_colon_that_would_retarget_the_refspec():
+    """The one that actually changes which ref gets destroyed."""
+    with pytest.raises(ValueError, match="refspec"):
+        validate_branch_name("throwaway:refs/heads/main")
+
+
+def test_validate_branch_name_rejects_empty():
+    with pytest.raises(ValueError):
+        validate_branch_name("")
+
+
+def test_validate_branch_name_rejects_leading_dash():
+    with pytest.raises(ValueError):
+        validate_branch_name("--force")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "has space",
+        "has\ttab",
+        "has\nnewline",
+        "glob*",
+        "glob?",
+        "glob[ab]",
+        "tilde~1",
+        "caret^",
+        "back\\slash",
+        "dot..dot",
+        "ref@{0}",
+        "topic.lock",
+        "trailing/",
+        "trailing.",
+        "/leading",
+        "double//slash",
+        "ctrl\x01char",
+    ],
+)
+def test_validate_branch_name_rejects_unsafe_shapes(name):
+    with pytest.raises(ValueError):
+        validate_branch_name(name)

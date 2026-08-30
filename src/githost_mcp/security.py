@@ -211,6 +211,45 @@ def validate_remote_name(name: str) -> None:
         raise ValueError(f"Invalid remote name '{name}': use letters, digits, '.', '_', '-', '/'")
 
 
+def validate_branch_name(name: str) -> None:
+    """Raise ValueError unless `name` is safe to interpolate into a push refspec.
+
+    ``git_branch_delete_remote`` builds ``":refs/heads/" + name``. GitPython passes
+    that as one argv element, so this is not a shell-injection boundary — but a
+    refspec is ``src:dst``, so an embedded colon silently re-points the delete at a
+    ref the caller never named, and the leading ``:`` means git parses the whole
+    thing rather than rejecting it. Deleting the wrong remote ref is not a failure
+    the caller can notice from a success result.
+
+    The checks are git's own refname rules (``git check-ref-format``) restricted to
+    the ones that matter for a destructive call, expressed as a denylist rather than
+    a character allowlist so legitimate names like ``fix/#383`` or
+    ``release/v1.2.0+build`` are not rejected for no reason.
+    """
+    if not name:
+        raise ValueError("branch name is required")
+    if name.startswith("-"):
+        raise ValueError(f"branch name {_LEADING_DASH_ERR}")
+    if ":" in name:
+        raise ValueError(
+            f"Invalid branch name '{name}': ':' would split the push refspec and "
+            f"retarget the deletion at a different ref"
+        )
+    if _WHITESPACE_RE.search(name):
+        raise ValueError(f"Invalid branch name '{name}': must not contain whitespace")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
+        raise ValueError(f"Invalid branch name '{name!r}': must not contain control characters")
+    for bad in ("*", "?", "[", "~", "^", "\\"):
+        if bad in name:
+            raise ValueError(f"Invalid branch name '{name}': must not contain '{bad}'")
+    if ".." in name or "@{" in name:
+        raise ValueError(f"Invalid branch name '{name}': must not contain '..' or '@{{'")
+    if name.endswith(".lock") or name.endswith("/") or name.endswith("."):
+        raise ValueError(f"Invalid branch name '{name}': must not end with '.lock', '/' or '.'")
+    if name.startswith("/") or "//" in name:
+        raise ValueError(f"Invalid branch name '{name}': must not start with '/' or contain '//'")
+
+
 def validate_remote_url(url: str) -> None:
     """Raise RemoteUrlRejected unless `url` is a credential-free supported remote URL.
 

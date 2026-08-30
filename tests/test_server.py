@@ -1,6 +1,8 @@
 """Tests for the FastMCP server module (import-time registration, lifespan, main)."""
 
 import importlib
+import pathlib
+import re
 from unittest.mock import patch
 
 import pytest
@@ -150,3 +152,65 @@ def test_auth_is_static_token_verifier_when_token_set(monkeypatch, tmp_path):
     # session default to unauthenticated stdio, matching a fresh process.
     monkeypatch.delenv("GITHOST_MCP_AUTH_TOKEN", raising=False)
     _reload_server(monkeypatch, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Documented tool count
+#
+# Added with git_branch_delete_remote (0.13.0), which found the README headline
+# already stale by two: it claimed 63 while 65 were registered, even though every
+# per-section count under it was correct. Three places record this one fact —
+# the README headline, its section headers, and the code — and only the headline
+# had drifted, silently, because nothing re-derived it.
+# ---------------------------------------------------------------------------
+
+
+def _registered_tool_names() -> set[str]:
+    """Every @mcp.tool function across the tool modules.
+
+    Counted by importing and registering rather than by grepping decorators, so
+    a tool that stops being registered stops counting.
+    """
+    import importlib
+
+    names: set[str] = set()
+
+    class CountingMCP:
+        def tool(self, fn):
+            names.add(fn.__name__)
+            return fn
+
+    for mod in (
+        "git_local",
+        "github",
+        "gitea",
+        "gitlab",
+        "woodpecker",
+        "release",
+        "registry",
+        "audit_query",
+    ):
+        importlib.import_module(f"githost_mcp.tools.{mod}").register(CountingMCP())
+    return names
+
+
+def test_readme_headline_tool_count_matches_the_code():
+    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
+    match = re.search(r"^## Tools \((\d+) total\)", readme, re.MULTILINE)
+    assert match, "README must carry a '## Tools (N total)' headline"
+    assert int(match.group(1)) == len(_registered_tool_names()), (
+        f"README headline says {match.group(1)} tools, code registers "
+        f"{len(_registered_tool_names())}"
+    )
+
+
+def test_readme_section_counts_sum_to_the_headline():
+    """The headline drifted while the sections stayed right, so check both ends."""
+    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
+    headline = int(re.search(r"^## Tools \((\d+) total\)", readme, re.MULTILINE).group(1))
+    tools_section = readme.split("## Tools (", 1)[1].split("\n## ", 1)[0]
+    sections = [int(n) for n in re.findall(r"^### .+ \((\d+)\)", tools_section, re.MULTILINE)]
+    assert sections, "expected per-capability '### Name (N)' headers under ## Tools"
+    assert sum(sections) == headline, (
+        f"section counts {sections} sum to {sum(sections)}, headline says {headline}"
+    )
