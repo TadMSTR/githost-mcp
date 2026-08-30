@@ -1631,12 +1631,16 @@ def test_git_branch_delete_remote_unknown_remote_is_a_clean_error(tools, remote_
     assert "deleted" not in result
 
 
-def test_git_branch_delete_remote_failure_does_not_leak_credentials(
+def test_git_branch_delete_remote_unreachable_remote_does_not_leak_credentials(
     tools, repo_path, tmp_path, bare_remote
 ):
-    """PushInfo.summary and GitCommandError both carry the remote's raw text, which
-    can include a credential-bearing URL (SC-14). Neither the result nor the audit
-    trail may become the bypass."""
+    """The existence pre-check runs `git ls-remote`, whose error text carries the
+    remote URL — and therefore any credential embedded in it (SC-14).
+
+    Named for the path it actually covers. It reaches the ls-remote failure and
+    never gets as far as the push, so it says nothing about the rejection branch;
+    that one is covered separately below.
+    """
     fns, path = tools
     local = git.Repo(str(path))
     local.delete_remote("origin")
@@ -1645,6 +1649,54 @@ def test_git_branch_delete_remote_failure_does_not_leak_credentials(
     result = fns["git_branch_delete_remote"](str(path), "throwaway")
 
     assert "error" in result, result
+    assert "ls-remote" in result["error"], (
+        f"expected this to fail at the existence pre-check: {result}"
+    )
     assert "ghp_deletetokenvalue999" not in str(result), f"credential leaked to caller: {result}"
     audit = (tmp_path / "audit.jsonl").read_text()
     assert "ghp_deletetokenvalue999" not in audit, "credential leaked to the audit trail"
+
+
+def test_git_branch_delete_remote_precheck_error_is_scrubbed(tools, remote_with_throwaway):
+    """The catch-all handler must scrub too, and its scrub needs its own test.
+
+    The unreachable-remote case above passes either way: GitPython redacts the URL
+    in its own cmdline, and git strips credentials from the URL it echoes to
+    stderr, so no token reaches the handler to begin with. Mutation confirmed the
+    scrub() call there was unconstrained. This raises from the pre-check with a
+    token GitPython has no reason to touch, so only our own scrub can remove it.
+    """
+    fns, path = tools
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("ls-remote failed for https://ted:ghp_PRECHECKTOKEN99@example.invalid/r")
+
+    with patch.object(git.Git, "ls_remote", create=True, side_effect=boom, autospec=False):
+        result = fns["git_branch_delete_remote"](str(path), "throwaway")
+
+    assert "error" in result, result
+    assert "ghp_PRECHECKTOKEN99" not in str(result), f"credential leaked to caller: {result}"
+
+
+def test_git_branch_delete_remote_rejection_does_not_leak_credentials(
+    tools, remote_with_throwaway, tmp_path
+):
+    """The rejection branch specifically. A rejected delete arrives as a
+    GitCommandError whose stderr is the remote's raw text, and GitPython's own
+    redaction covers the cmdline but not what the server said back. The ref exists
+    and the remote is reachable here, so this genuinely reaches the push."""
+    fns, path = tools
+    leaked = "https://ted:ghp_REJECTTOKEN12345@example.invalid/o/r.git"
+
+    def boom(*_args, **_kwargs):
+        raise git.GitCommandError(["git", "push"], 1, f"remote: denying ref deletion; see {leaked}")
+
+    with patch.object(git.Remote, "push", side_effect=boom, autospec=False):
+        result = fns["git_branch_delete_remote"](str(path), "throwaway")
+
+    assert "error" in result, result
+    assert "deleted" not in result
+    assert "ghp_REJECTTOKEN12345" not in str(result), f"credential leaked to caller: {result}"
+    audit = (tmp_path / "audit.jsonl").read_text()
+    assert "ghp_REJECTTOKEN12345" not in audit, "credential leaked to the audit trail"
+    assert "error:PushRejected" in audit
