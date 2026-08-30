@@ -68,7 +68,7 @@ flowchart TD
 
 **githost-mcp fills the gap:** local git + multi-provider remote via native APIs + per-agent structured audit trail. As of the Tier-1 parity release it matches the single-provider servers on PR/MR review + diff, CI trigger/rerun/cancel, full release CRUD, and issues — across all three providers behind one audited server.
 
-## Tools (63 total)
+## Tools (66 total)
 
 Higher-verb-count capabilities (PR/MR review, CI control, issues) are exposed as
 **method-dispatch** tools — one tool takes a `method` argument and routes internally —
@@ -76,8 +76,46 @@ mirroring how the official GitHub/Gitea servers structure theirs. This adds ~40
 operations without the tool count ballooning past what every agent pays for in context.
 Each `method` still writes its own per-operation audit entry.
 
-### Local Git (12)
-`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*
+### Local Git (13)
+`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_branch_delete_remote`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*
+
+`git_branch` takes `force` (as of 0.13.0), which applies to `delete` only. Without it,
+deletion uses `git branch -d` semantics, which require the branch be an ancestor of HEAD.
+**A squash-merged branch never is** — squash rewrites the work into one new commit and
+leaves the original tip unreachable — so an unforced delete fails for essentially every
+branch merged the way this fleet merges. The default stays `False`: the caller knows
+whether the work landed and the tool will not guess. The result carries `deleted_sha`,
+captured before the delete, because after it the tip is only reachable from the reflog.
+
+`git_branch_delete_remote` deletes a branch on the remote by pushing a delete refspec. It
+is a separate tool rather than a `remote=` flag on `git_branch`, deliberately: every
+scoped-mcp enforcement layer keys on the tool **name** and never on arguments — HITL
+matches `tool_name` by fnmatch, the proxy allow/denylist is exact-string set membership,
+and `argument_filters` is a single regex over a field list with no conjunction. As a
+parameter it would be ungateable, since restricting it would mean denying `git_branch`
+outright and losing `list` and `create` with it.
+
+Two behaviours worth knowing before you call it:
+
+- **A ref that is already absent is not reported as a deletion.** Git exits 0 and prints
+  `[deleted]` for a branch that never existed, which would make a typo'd branch name
+  indistinguishable from a successful cleanup while the real branch survives. The tool
+  queries the remote with `ls-remote` first and returns `already_absent` instead —
+  carrying neither `deleted` nor `error`, because nothing was destroyed and nothing went
+  wrong.
+- **A rejected delete surfaces as an error result with no `deleted` key**, the same
+  contract `git_push` uses. Note that GitPython cannot report this one through
+  `PushInfo` flags: git's porcelain line for a denied deletion carries control character
+  `!`, so `PushInfo._from_line` does not take its `flags & DELETED` branch and instead
+  calls `Reference.from_path(repo, "")` on the empty source side, raising `ValueError`.
+  `_get_push_info` swallows that, is left with no parsed lines, and re-raises the process
+  error. The rejection is therefore only ever visible as a `GitCommandError`, which this
+  tool catches explicitly and audits as `error:PushRejected`.
+
+Branch names are validated before being interpolated into the refspec. GitPython passes
+the refspec as one argv element, so this is not a shell boundary — but a refspec is
+`src:dst`, and an embedded colon would silently retarget the deletion at a ref the caller
+never named.
 
 `git_remote` refuses a URL that embeds credentials rather than redacting it — unlike text
 on its way out to a caller, a remote URL is written to `.git/config`, where a token would
@@ -179,7 +217,8 @@ audit_log_query(agent_id="sysadmin", tool="git_push", since="2026-05-20")
 `Config` carries separate `allowed_read_roots` and `allowed_write_roots`. Read tools
 (`git_status`, `git_diff`, `git_log`, `git_show`, `git_remote list`) validate against the
 read list; write tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`,
-`git_branch create/delete`, `git_remote add/remove`, `release`) validate against the write
+`git_branch create/delete`, `git_branch_delete_remote`, `git_remote add/remove`, `release`)
+validate against the write
 list. `allowed_repo_roots` remains
 as a deprecated alias of `allowed_write_roots` for any caller not yet migrated.
 
