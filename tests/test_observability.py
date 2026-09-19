@@ -7,6 +7,7 @@ driven here — it sets global providers and background threads that would leak
 across tests; it is covered by the `[otel]` extra's own suite.
 """
 
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -64,9 +65,18 @@ def test_init_loki_parses_url_and_labels(monkeypatch):
 
 
 def test_init_prometheus_missing_dep_is_swallowed(monkeypatch):
+    """prometheus_client is an optional extra; a deployment without it must still start.
+
+    This used to assert the behaviour by relying on the package being absent from the
+    test environment, which meant it proved nothing once it was installed — and it
+    bound a real port when it was. Absence is now simulated: a None entry in
+    sys.modules makes `import prometheus_client` raise ImportError.
+    """
     monkeypatch.setenv("METRICS_PORT", "9185")
+    monkeypatch.setitem(sys.modules, "prometheus_client", None)
+    monkeypatch.setattr(obs, "_prom_tool_calls", None)
     reset_config()
-    obs._init_prometheus()  # prometheus_client absent -> except path, no port bound
+    obs._init_prometheus()  # import fails -> except path, no port bound
     assert obs._prom_tool_calls is None
 
 

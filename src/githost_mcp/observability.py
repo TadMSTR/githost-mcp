@@ -27,12 +27,14 @@ METRICS_BIND_ADDR = "127.0.0.1"
 _tracer: Any = None
 _meter: Any = None
 _tool_calls_counter: Any = None
+_tool_denied_counter: Any = None
 _tool_duration_histogram: Any = None
 _release_targets_counter: Any = None
 
 
 def _init_otel() -> None:
-    global _tracer, _meter, _tool_calls_counter, _tool_duration_histogram, _release_targets_counter
+    global _tracer, _meter, _tool_calls_counter, _tool_denied_counter
+    global _tool_duration_histogram, _release_targets_counter
     config = get_config()
     if not config.otel_endpoint:
         return
@@ -82,6 +84,10 @@ def _init_otel() -> None:
             "githost.tool.calls",
             description="Number of githost-mcp tool calls",
         )
+        _tool_denied_counter = meter.create_counter(
+            "githost.tool.denied",
+            description="githost-mcp tool calls that did not succeed, by reason class",
+        )
         _tool_duration_histogram = meter.create_histogram(
             "githost.tool.duration",
             unit="ms",
@@ -101,12 +107,13 @@ def _init_otel() -> None:
 # ---------------------------------------------------------------------------
 
 _prom_tool_calls: Any = None
+_prom_tool_denied: Any = None
 _prom_tool_duration: Any = None
 _prom_release_targets: Any = None
 
 
 def _init_prometheus() -> None:
-    global _prom_tool_calls, _prom_tool_duration, _prom_release_targets
+    global _prom_tool_calls, _prom_tool_denied, _prom_tool_duration, _prom_release_targets
     config = get_config()
     if not config.metrics_port:
         return
@@ -117,6 +124,15 @@ def _init_prometheus() -> None:
             "githost_tool_calls_total",
             "Total githost-mcp tool calls",
             ["tool", "provider", "agent_id", "result"],
+        )
+        # reason_class is bounded by construction: classify_reason() can only return a
+        # member of errors.REASON_CLASSES. The unbounded detail (exception messages,
+        # which carry repo paths and branch names) stays in the audit record's `reason`
+        # field and is deliberately never a label here.
+        _prom_tool_denied = Counter(
+            "githost_tool_denied_total",
+            "Total githost-mcp tool calls that did not succeed, by reason class",
+            ["tool", "agent_id", "reason_class"],
         )
         _prom_tool_duration = Histogram(
             "githost_tool_duration_ms",
@@ -219,30 +235,44 @@ async def _publish_nats(subject_suffix: str, data: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def emit_tool_event(
+def emit_tool_event_sync(
     tool: str,
     provider: str,
     repo_basename: str,
     result: str,
     duration_ms: int,
+    reason_class: str | None = None,
 ) -> None:
+    """Span, OTel metrics and Prometheus for one finished tool call.
+
+    Split out of emit_tool_event() because this is the half that AuditCtx.finish()
+    can call: finish() is sync, and 45 of githost-mcp's 65 tools are sync functions
+    that FastMCP runs on a worker thread where there is no running event loop to
+    await into. Every backend touched here has a synchronous, thread-safe API.
+
+    `reason_class` is set only for a call that did not succeed, and must be a member
+    of errors.REASON_CLASSES — it is a Prometheus label.
+
+    Each backend is guarded independently: telemetry must never be able to fail a
+    tool call that otherwise worked.
+    """
     config = get_config()
     agent_id = config.agent_id
 
-    # OTEL span + metrics
     if _tracer is not None:
         try:
             with _tracer.start_as_current_span(f"githost.{tool}") as span:
-                span.set_attributes(
-                    {
-                        "githost.tool": tool,
-                        "githost.provider": provider,
-                        "githost.agent_id": agent_id,
-                        "githost.repo": repo_basename,
-                        "githost.result": result,
-                        "githost.duration_ms": duration_ms,
-                    }
-                )
+                attrs = {
+                    "githost.tool": tool,
+                    "githost.provider": provider,
+                    "githost.agent_id": agent_id,
+                    "githost.repo": repo_basename,
+                    "githost.result": result,
+                    "githost.duration_ms": duration_ms,
+                }
+                if reason_class is not None:
+                    attrs["githost.reason_class"] = reason_class
+                span.set_attributes(attrs)
         except Exception as exc:
             log.warning("otel_span_failed", error=str(exc))
 
@@ -255,7 +285,14 @@ async def emit_tool_event(
         except Exception as exc:
             log.warning("otel_metric_failed", error=str(exc))
 
-    # Prometheus
+    if reason_class is not None and _tool_denied_counter is not None:
+        try:
+            _tool_denied_counter.add(
+                1, {"tool": tool, "agent_id": agent_id, "reason_class": reason_class}
+            )
+        except Exception as exc:
+            log.warning("otel_denied_metric_failed", error=str(exc))
+
     if _prom_tool_calls is not None:
         try:
             _prom_tool_calls.labels(
@@ -265,27 +302,63 @@ async def emit_tool_event(
         except Exception as exc:
             log.warning("prometheus_record_failed", error=str(exc))
 
+    if reason_class is not None and _prom_tool_denied is not None:
+        try:
+            _prom_tool_denied.labels(tool=tool, agent_id=agent_id, reason_class=reason_class).inc()
+        except Exception as exc:
+            log.warning("prometheus_denied_failed", error=str(exc))
+
+
+def loki_or_nats_configured() -> bool:
+    """True if either async-only backend has anything to send to.
+
+    AuditCtx.finish() uses this to decide whether the async tail is worth dispatching
+    at all. Neither is configured for githost-mcp on forge today, so the common path
+    does no event-loop work whatsoever.
+    """
+    return bool(_loki_url) or _nats_client is not None
+
+
+async def emit_tool_event(
+    tool: str,
+    provider: str,
+    repo_basename: str,
+    result: str,
+    duration_ms: int,
+    reason_class: str | None = None,
+) -> None:
+    """Full emit: the sync backends above, then the two that need an event loop."""
+    emit_tool_event_sync(tool, provider, repo_basename, result, duration_ms, reason_class)
+
+    config = get_config()
+    agent_id = config.agent_id
+
     # Loki
     if _loki_url:
         loki_labels = {"agent_id": agent_id, "tool": tool, "provider": provider}
-        msg = json.dumps(
-            {"tool": tool, "provider": provider, "result": result, "duration_ms": duration_ms}
-        )
-        await _push_loki(loki_labels, msg)
+        payload = {
+            "tool": tool,
+            "provider": provider,
+            "result": result,
+            "duration_ms": duration_ms,
+        }
+        if reason_class is not None:
+            payload["reason_class"] = reason_class
+        await _push_loki(loki_labels, json.dumps(payload))
 
     # NATS
     if _nats_client is not None:
-        await _publish_nats(
-            f"tool.{tool}",
-            {
-                "tool": tool,
-                "provider": provider,
-                "agent_id": agent_id,
-                "repo": repo_basename,
-                "result": result,
-                "duration_ms": duration_ms,
-            },
-        )
+        body = {
+            "tool": tool,
+            "provider": provider,
+            "agent_id": agent_id,
+            "repo": repo_basename,
+            "result": result,
+            "duration_ms": duration_ms,
+        }
+        if reason_class is not None:
+            body["reason_class"] = reason_class
+        await _publish_nats(f"tool.{tool}", body)
 
 
 def emit_release_target(target: str, result: str) -> None:

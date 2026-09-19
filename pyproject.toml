@@ -43,6 +43,11 @@ observability = [
     "githost-mcp[otel,loki,prometheus,nats]",
 ]
 dev = [
+    # prometheus-client is an *optional* runtime extra but a *required* test dep:
+    # the denial-counter tests assert on real Counter label behaviour, and a stubbed
+    # module cannot show that reason_class is bounded. Without it here those tests
+    # would skip in CI while still reporting green.
+    "prometheus-client>=0.20",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",

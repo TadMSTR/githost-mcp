@@ -8,7 +8,7 @@ import re
 import httpx
 import structlog
 
-from ..audit import AuditCtx
+from ..audit import AuditCtx, audit_rejection
 from ..config import get_config
 from ..security import scrub
 
@@ -93,7 +93,9 @@ def register(mcp) -> None:
             branch: Branch to trigger (default: repo default branch).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "woodpecker_trigger", "woodpecker", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         ac = AuditCtx("woodpecker_trigger", "woodpecker", repo, {"repo": repo, "branch": branch})
         try:
             owner, name = repo.split("/", 1)
@@ -128,7 +130,7 @@ def register(mcp) -> None:
                 "branch": data.get("branch"),
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -145,7 +147,9 @@ def register(mcp) -> None:
             status: Optional filter by status (e.g. pending/running/success/failure/error).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "woodpecker_list_pipelines", "woodpecker", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         limit = min(limit, 100)
         ac = AuditCtx(
             "woodpecker_list_pipelines",
@@ -184,7 +188,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "pipelines": pipelines}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -205,7 +209,9 @@ def register(mcp) -> None:
             step_name: Step name to fetch (default: first step).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "woodpecker_get_logs", "woodpecker", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         # NOTE: Only metadata is logged here — step output may contain secrets from
         # pipeline environment variables and must not appear in the audit trail.
         ac = AuditCtx(
@@ -238,13 +244,13 @@ def register(mcp) -> None:
                     for step in (workflow.get("children") or [])
                 ]
                 if not steps:
-                    ac.finish("error:no_steps")
+                    ac.finish("error:no_steps", "no steps found for pipeline")
                     return {"error": "No steps found for pipeline"}
 
                 if step_name:
                     step = next((s for s in steps if s.get("name") == step_name), None)
                     if step is None:
-                        ac.finish("error:step_not_found")
+                        ac.finish("error:step_not_found", f"step {step_name!r} not found")
                         return {"error": f"Step '{step_name}' not found"}
                 else:
                     step = steps[0]
@@ -301,7 +307,7 @@ def register(mcp) -> None:
                 result["notice"] = "Output truncated at 500 lines"
             return result
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -316,7 +322,9 @@ def register(mcp) -> None:
             pipeline_id: Pipeline number (as returned by woodpecker_trigger).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "woodpecker_pipeline_cancel", "woodpecker", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         ac = AuditCtx(
             "woodpecker_pipeline_cancel",
             "woodpecker",
@@ -334,13 +342,16 @@ def register(mcp) -> None:
                     headers=headers,
                 )
                 if resp.status_code == 409:
-                    ac.finish("error:already_finished")
+                    ac.finish(
+                        "error:already_finished",
+                        "pipeline is already finished and cannot be cancelled",
+                    )
                     return {"error": "Pipeline is already finished and cannot be cancelled"}
                 _check_response(resp)
             ac.finish("ok")
             return {"cancelled": True, "id": pipeline_id}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -352,7 +363,9 @@ def register(mcp) -> None:
             pipeline_id: Pipeline number (as returned by woodpecker_trigger).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "woodpecker_status", "woodpecker", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         ac = AuditCtx(
             "woodpecker_status", "woodpecker", repo, {"repo": repo, "pipeline_id": pipeline_id}
         )
@@ -377,5 +390,5 @@ def register(mcp) -> None:
                 "finished_at": data.get("finished"),
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}

@@ -8,7 +8,7 @@ from itertools import islice
 import structlog
 
 from .._providers.github_client import get_github, github_call
-from ..audit import AuditCtx
+from ..audit import AuditCtx, audit_rejection
 from ..security import scrub
 
 log = structlog.get_logger(__name__)
@@ -67,7 +67,7 @@ def register(mcp) -> None:
             generate_release_notes: Auto-generate release notes from commits (default False).
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_create_release", "github", repo, "bad_repo_format", err)
         ac = AuditCtx("github_create_release", "github", repo, {"repo": repo, "tag": tag})
         try:
             gh = get_github()
@@ -84,7 +84,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"id": release.id, "tag": tag, "url": release.html_url, "draft": draft}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -96,7 +96,7 @@ def register(mcp) -> None:
             tag: Tag name.
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_get_release", "github", repo, "bad_repo_format", err)
         ac = AuditCtx("github_get_release", "github", repo, {"repo": repo, "tag": tag})
         try:
             gh = get_github()
@@ -113,7 +113,7 @@ def register(mcp) -> None:
                 "published_at": release.published_at.isoformat() if release.published_at else None,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -125,7 +125,7 @@ def register(mcp) -> None:
             limit: Max releases to return (default 10).
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_list_releases", "github", repo, "bad_repo_format", err)
         ac = AuditCtx("github_list_releases", "github", repo, {"repo": repo, "limit": limit})
         try:
             gh = get_github()
@@ -145,7 +145,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "releases": releases}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -158,7 +158,7 @@ def register(mcp) -> None:
             limit: Max runs to return (default 10).
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_workflow_list", "github", repo, "bad_repo_format", err)
         ac = AuditCtx("github_workflow_list", "github", repo, {"repo": repo, "ref": ref})
         try:
             gh = get_github()
@@ -182,7 +182,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "runs": runs}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -194,7 +194,7 @@ def register(mcp) -> None:
             run_id: Workflow run ID from github_workflow_list.
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_workflow_status", "github", repo, "bad_repo_format", err)
         ac = AuditCtx("github_workflow_status", "github", repo, {"repo": repo, "run_id": run_id})
         try:
             gh = get_github()
@@ -211,7 +211,7 @@ def register(mcp) -> None:
                 "url": run.html_url,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -224,7 +224,7 @@ def register(mcp) -> None:
             limit: Max PRs to return (default 20).
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_pr_list", "github", repo, "bad_repo_format", err)
         ac = AuditCtx("github_pr_list", "github", repo, {"repo": repo, "state": state})
         try:
             gh = get_github()
@@ -246,7 +246,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "prs": prs}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -258,7 +258,7 @@ def register(mcp) -> None:
             pr_number: PR number.
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_pr_comments", "github", repo, "bad_repo_format", err)
         ac = AuditCtx("github_pr_comments", "github", repo, {"repo": repo, "pr_number": pr_number})
         try:
             gh = get_github()
@@ -278,7 +278,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "pr": pr_number, "comments": comments}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -302,9 +302,11 @@ def register(mcp) -> None:
         """
         full_name = f"{owner}/{repo}"
         if err := _bad_repo(full_name):
-            return err
+            return audit_rejection("github_fork", "github", full_name, "bad_repo_format", err)
         if org is not None and not _OWNER_RE.match(org):
-            return {"error": _OWNER_FMT_ERR}
+            return audit_rejection(
+                "github_fork", "github", full_name, "invalid_argument", _OWNER_FMT_ERR
+            )
         ac = AuditCtx("github_fork", "github", full_name, {"repo": full_name, "org": org})
         try:
             gh = get_github()
@@ -325,7 +327,7 @@ def register(mcp) -> None:
                 "created_at": fork.created_at.isoformat() if fork.created_at else None,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -348,7 +350,7 @@ def register(mcp) -> None:
             draft: Create as draft PR (default False).
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_pr_create", "github", repo, "bad_repo_format", err)
         ac = AuditCtx(
             "github_pr_create", "github", repo, {"repo": repo, "head": head, "base": base}
         )
@@ -372,7 +374,7 @@ def register(mcp) -> None:
                 "url": pr.html_url,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -384,7 +386,7 @@ def register(mcp) -> None:
             pr_number: Pull request number.
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_pr_get", "github", repo, "bad_repo_format", err)
         ac = AuditCtx("github_pr_get", "github", repo, {"repo": repo, "pr_number": pr_number})
         try:
             gh = get_github()
@@ -406,7 +408,7 @@ def register(mcp) -> None:
                 "labels": [lb.name for lb in pr.labels],
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -429,10 +431,16 @@ def register(mcp) -> None:
             commit_title: Optional merge commit title.
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_pr_merge", "github", repo, "bad_repo_format", err)
         valid_methods = {"merge", "squash", "rebase"}
         if merge_method not in valid_methods:
-            return {"error": f"merge_method must be one of: {', '.join(sorted(valid_methods))}"}
+            return audit_rejection(
+                "github_pr_merge",
+                "github",
+                repo,
+                "invalid_argument",
+                f"merge_method must be one of: {', '.join(sorted(valid_methods))}",
+            )
         ac = AuditCtx(
             "github_pr_merge",
             "github",
@@ -450,7 +458,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"merged": status.merged, "sha": status.sha, "message": status.message}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -488,10 +496,16 @@ def register(mcp) -> None:
             message: Dismissal reason (dismiss_review).
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_pr_review", "github", repo, "bad_repo_format", err)
         valid = {"get_diff", "get_files", "get_reviews", "submit_review", "dismiss_review"}
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "github_pr_review",
+                "github",
+                repo,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         ac = AuditCtx(
             "github_pr_review",
             "github",
@@ -568,7 +582,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "pr": pr_number, "review_id": review_id, "dismissed": True}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -608,7 +622,7 @@ def register(mcp) -> None:
             inputs: Optional workflow_dispatch inputs mapping (run_workflow).
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_actions", "github", repo, "bad_repo_format", err)
         valid = {
             "run_workflow",
             "rerun_workflow",
@@ -617,7 +631,13 @@ def register(mcp) -> None:
             "get_run_logs",
         }
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "github_actions",
+                "github",
+                repo,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         ac = AuditCtx("github_actions", "github", repo, {"repo": repo, "method": method})
         try:
             gh = get_github()
@@ -670,7 +690,7 @@ def register(mcp) -> None:
                 "note": "GitHub Actions raw logs are a zip archive; use each job's url to view.",
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -695,7 +715,7 @@ def register(mcp) -> None:
             prerelease: New prerelease flag (unchanged if omitted).
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_release_update", "github", repo, "bad_repo_format", err)
         ac = AuditCtx("github_release_update", "github", repo, {"repo": repo, "tag": tag})
         try:
             gh = get_github()
@@ -718,7 +738,7 @@ def register(mcp) -> None:
                 "prerelease": updated.prerelease,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -733,7 +753,7 @@ def register(mcp) -> None:
             tag: Tag name of the release to delete.
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_release_delete", "github", repo, "bad_repo_format", err)
         ac = AuditCtx("github_release_delete", "github", repo, {"repo": repo, "tag": tag})
         try:
             gh = get_github()
@@ -743,7 +763,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "tag": tag, "deleted": True}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -769,10 +789,16 @@ def register(mcp) -> None:
             limit: Max issues to return for list (default 20).
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_issue_read", "github", repo, "bad_repo_format", err)
         valid = {"get", "list", "comments"}
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "github_issue_read",
+                "github",
+                repo,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         ac = AuditCtx("github_issue_read", "github", repo, {"repo": repo, "method": method})
         try:
             gh = get_github()
@@ -829,7 +855,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "issue": issue_number, "comments": comments}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -866,10 +892,16 @@ def register(mcp) -> None:
             comment: Comment body (add_comment).
         """
         if err := _bad_repo(repo):
-            return err
+            return audit_rejection("github_issue_write", "github", repo, "bad_repo_format", err)
         valid = {"create", "update", "add_comment", "close", "reopen"}
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "github_issue_write",
+                "github",
+                repo,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         ac = AuditCtx("github_issue_write", "github", repo, {"repo": repo, "method": method})
         try:
             gh = get_github()
@@ -927,5 +959,5 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "number": issue_number, "state": "open"}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)

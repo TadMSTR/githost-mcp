@@ -7,7 +7,7 @@ import re
 import structlog
 
 from .._providers.gitlab_client import get_gitlab, gitlab_call
-from ..audit import AuditCtx
+from ..audit import AuditCtx, audit_rejection
 from ..security import scrub
 
 log = structlog.get_logger(__name__)
@@ -52,7 +52,9 @@ def register(mcp) -> None:
             description: Release notes markdown.
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection(
+                "gitlab_create_release", "gitlab", project, "bad_repo_format", err
+            )
         ac = AuditCtx("gitlab_create_release", "gitlab", project, {"project": project, "tag": tag})
         try:
             gl = get_gitlab()
@@ -72,7 +74,7 @@ def register(mcp) -> None:
                 "url": getattr(release, "_links", {}).get("self", ""),
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -84,7 +86,7 @@ def register(mcp) -> None:
             tag: Tag name.
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection("gitlab_get_release", "gitlab", project, "bad_repo_format", err)
         ac = AuditCtx("gitlab_get_release", "gitlab", project, {"project": project, "tag": tag})
         try:
             gl = get_gitlab()
@@ -98,7 +100,7 @@ def register(mcp) -> None:
                 "released_at": release.released_at,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -110,7 +112,9 @@ def register(mcp) -> None:
             limit: Max releases to return (default 10).
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection(
+                "gitlab_list_releases", "gitlab", project, "bad_repo_format", err
+            )
         ac = AuditCtx(
             "gitlab_list_releases", "gitlab", project, {"project": project, "limit": limit}
         )
@@ -129,7 +133,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"project": project, "releases": releases}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -142,7 +146,7 @@ def register(mcp) -> None:
             limit: Max MRs to return (default 20).
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection("gitlab_mr_list", "gitlab", project, "bad_repo_format", err)
         ac = AuditCtx("gitlab_mr_list", "gitlab", project, {"project": project, "state": state})
         try:
             gl = get_gitlab()
@@ -164,7 +168,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"project": project, "mrs": mrs}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -185,7 +189,7 @@ def register(mcp) -> None:
             description: MR description (optional).
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection("gitlab_mr_create", "gitlab", project, "bad_repo_format", err)
         ac = AuditCtx(
             "gitlab_mr_create",
             "gitlab",
@@ -214,7 +218,7 @@ def register(mcp) -> None:
                 "web_url": mr.web_url,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -226,7 +230,7 @@ def register(mcp) -> None:
             mr_iid: Merge request internal ID (iid), not the global id.
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection("gitlab_mr_get", "gitlab", project, "bad_repo_format", err)
         ac = AuditCtx("gitlab_mr_get", "gitlab", project, {"project": project, "mr_iid": mr_iid})
         try:
             gl = get_gitlab()
@@ -247,7 +251,7 @@ def register(mcp) -> None:
                 "labels": mr.labels,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -270,7 +274,7 @@ def register(mcp) -> None:
             squash: Squash commits into a single commit on merge (default False).
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection("gitlab_mr_merge", "gitlab", project, "bad_repo_format", err)
         ac = AuditCtx(
             "gitlab_mr_merge",
             "gitlab",
@@ -288,7 +292,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"iid": mr.iid, "state": mr.state, "merged": True, "web_url": mr.web_url}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -312,10 +316,16 @@ def register(mcp) -> None:
             method: get_diffs | get_changed_files | approve | unapprove | get_approval_state.
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection("gitlab_mr_review", "gitlab", project, "bad_repo_format", err)
         valid = {"get_diffs", "get_changed_files", "approve", "unapprove", "get_approval_state"}
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "gitlab_mr_review",
+                "gitlab",
+                project,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         ac = AuditCtx(
             "gitlab_mr_review",
             "gitlab",
@@ -381,7 +391,7 @@ def register(mcp) -> None:
                 "approved_by": approved_by,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -416,10 +426,16 @@ def register(mcp) -> None:
             limit: Max pipelines to return for list (default 20).
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection("gitlab_pipeline", "gitlab", project, "bad_repo_format", err)
         valid = {"list", "get", "create", "retry", "cancel", "get_job_log"}
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "gitlab_pipeline",
+                "gitlab",
+                project,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         ac = AuditCtx("gitlab_pipeline", "gitlab", project, {"project": project, "method": method})
         try:
             gl = get_gitlab()
@@ -486,7 +502,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"project": project, "id": pipeline_id, "cancelled": True}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -507,7 +523,9 @@ def register(mcp) -> None:
             description: New release notes markdown (unchanged if omitted).
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection(
+                "gitlab_release_update", "gitlab", project, "bad_repo_format", err
+            )
         ac = AuditCtx("gitlab_release_update", "gitlab", project, {"project": project, "tag": tag})
         try:
             gl = get_gitlab()
@@ -525,7 +543,7 @@ def register(mcp) -> None:
                 "description": release.description,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -540,7 +558,9 @@ def register(mcp) -> None:
             tag: Tag name of the release to delete.
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection(
+                "gitlab_release_delete", "gitlab", project, "bad_repo_format", err
+            )
         ac = AuditCtx("gitlab_release_delete", "gitlab", project, {"project": project, "tag": tag})
         try:
             gl = get_gitlab()
@@ -549,7 +569,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"project": project, "tag": tag, "deleted": True}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -575,10 +595,16 @@ def register(mcp) -> None:
             limit: Max issues to return for list (default 20).
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection("gitlab_issue_read", "gitlab", project, "bad_repo_format", err)
         valid = {"get", "list", "comments"}
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "gitlab_issue_read",
+                "gitlab",
+                project,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         ac = AuditCtx(
             "gitlab_issue_read", "gitlab", project, {"project": project, "method": method}
         )
@@ -634,7 +660,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"project": project, "issue_iid": issue_iid, "comments": comments}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -669,10 +695,16 @@ def register(mcp) -> None:
             comment: Comment body (add_comment).
         """
         if err := _bad_project(project):
-            return err
+            return audit_rejection("gitlab_issue_write", "gitlab", project, "bad_repo_format", err)
         valid = {"create", "update", "add_comment", "close", "reopen"}
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "gitlab_issue_write",
+                "gitlab",
+                project,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         ac = AuditCtx(
             "gitlab_issue_write", "gitlab", project, {"project": project, "method": method}
         )
@@ -732,5 +764,5 @@ def register(mcp) -> None:
                 "state": "closed" if method == "close" else "opened",
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
