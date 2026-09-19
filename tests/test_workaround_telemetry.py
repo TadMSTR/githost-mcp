@@ -321,3 +321,100 @@ def test_audit_rejection_accepts_an_error_dict(audit_env):
     out = audit_rejection("github_pr_get", "github", "o/r", "bad_repo_format", {"error": "nope"})
     assert out == {"error": "nope"}
     assert _entries()[0]["reason"] == "nope"
+
+
+# ---------------------------------------------------------------------------
+# 4. Audit-record field bounds (security audit, LOW)
+# ---------------------------------------------------------------------------
+
+
+def test_repo_is_bounded_in_the_audit_record(audit_env):
+    """`repo` at an audit_rejection() site is the string that just FAILED validation —
+    arbitrary agent-supplied text, landing in a durable signed log nothing prunes."""
+    from githost_mcp.audit import MAX_AUDIT_FIELD_CHARS
+
+    huge = "x" * (MAX_AUDIT_FIELD_CHARS * 3)
+    audit_rejection("gitea_pr_list", "gitea", huge, "bad_repo_format", "nope")
+    (entry,) = _entries()
+    assert len(entry["repo"]) < MAX_AUDIT_FIELD_CHARS + 100
+    assert "truncated" in entry["repo"]
+    assert len(entry["params"]["repo"]) < MAX_AUDIT_FIELD_CHARS + 100
+
+
+def test_reason_is_bounded(audit_env):
+    from githost_mcp.audit import MAX_AUDIT_FIELD_CHARS
+
+    AuditCtx("git_push", "local", "/repo", {}).finish(
+        "error:ValueError", ValueError("y" * (MAX_AUDIT_FIELD_CHARS * 3))
+    )
+    (entry,) = _entries()
+    assert len(entry["reason"]) < MAX_AUDIT_FIELD_CHARS + 100
+    assert "truncated" in entry["reason"]
+
+
+def test_truncation_reports_the_original_length(audit_env):
+    """Silently dropping the tail would make a bloat attempt invisible in the log."""
+    from githost_mcp.audit import MAX_AUDIT_FIELD_CHARS
+
+    n = MAX_AUDIT_FIELD_CHARS * 2
+    AuditCtx("git_push", "local", "/repo", {}).finish("error:X", "z" * n)
+    assert str(n) in _entries()[0]["reason"]
+
+
+def test_a_normal_reason_is_not_truncated(audit_env):
+    """The bound must not touch real messages — otherwise it is a coverage regression
+    dressed as a fix."""
+    msg = "Path '/srv/repos/some/deep/path' is not under any allowed root (allowed_write_roots)"
+    AuditCtx("git_push", "local", "/srv/repos/some/deep/path", {}).finish(
+        "error:PathNotAllowed", msg
+    )
+    (entry,) = _entries()
+    assert entry["reason"] == msg
+    assert "truncated" not in entry["reason"]
+
+
+def test_configured_loki_warns_that_it_is_unreachable(audit_env, monkeypatch, caplog):
+    """A configured backend that silently receives nothing is the same failure this
+    build removed from the metrics path."""
+    import logging
+
+    from githost_mcp import observability as obs
+
+    monkeypatch.setenv("LOKI_URL", "http://127.0.0.1:3100")
+    reset_config()
+    with caplog.at_level(logging.WARNING):
+        obs._warn_if_async_only_backend_configured()
+    assert any("async_backend_not_wired_to_tool_events" in r.getMessage() for r in caplog.records)
+
+
+def test_no_warning_when_no_async_backend_is_configured(audit_env, caplog):
+    """Both directions — otherwise a function that always warned would pass."""
+    import logging
+
+    from githost_mcp import observability as obs
+
+    with caplog.at_level(logging.WARNING):
+        obs._warn_if_async_only_backend_configured()
+    assert not any(
+        "async_backend_not_wired_to_tool_events" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_truncation_happens_after_scrubbing_not_before(audit_env):
+    """A credential straddling the truncation boundary must still be masked.
+
+    Truncate-then-scrub would cut the token in half, leaving a prefix that
+    mask_credentials() no longer recognises — a partial secret, durably logged. This is
+    the ordering bug the compounding-truncation test surfaced.
+    """
+    from githost_mcp.audit import MAX_AUDIT_FIELD_CHARS
+
+    # Place the token so it spans the cut point exactly.
+    pad = "p" * (MAX_AUDIT_FIELD_CHARS - len(FAKE_TOKEN) // 2)
+    AuditCtx("git_push", "local", "/repo", {}).finish(
+        "error:GitCommandError", RuntimeError(f"{pad}{FAKE_TOKEN} trailing")
+    )
+    (entry,) = _entries()
+    assert FAKE_TOKEN not in entry["reason"]
+    # and no partial prefix of it survives either
+    assert FAKE_TOKEN[: len(FAKE_TOKEN) // 2] not in entry["reason"]

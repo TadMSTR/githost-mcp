@@ -20,6 +20,14 @@ from .errors import classify_reason
 from .observability import emit_tool_event_sync
 from .security import scrub
 
+#: Cap on any single string written into an audit record. `repo` at an audit_rejection()
+#: call site is precisely the string that just FAILED validation — arbitrary agent-supplied
+#: text — and it lands in a durable, HMAC-signed log that nothing prunes. json.dumps()
+#: escaping keeps it from breaking the JSONL framing, so this is bloat rather than
+#: corruption, but there was no bound anywhere in the write path. Generous enough that no
+#: real repo path, branch name or exception message is touched.
+MAX_AUDIT_FIELD_CHARS = 2048
+
 # Bound at init_logging() time
 _agent_id: str = "unknown"
 _audit_log_path: str = ""
@@ -53,8 +61,33 @@ def _config_tokens() -> list[str]:
     ]
 
 
+def _truncate(text: str) -> str:
+    """Bound a single audit field, saying so rather than silently losing the tail."""
+    if len(text) <= MAX_AUDIT_FIELD_CHARS:
+        return text
+    return text[:MAX_AUDIT_FIELD_CHARS] + f"…[truncated, {len(text)} chars]"
+
+
+def _truncate_deep(val: Any) -> Any:
+    """Apply _truncate() to every string in a nested structure. Run it last."""
+    if isinstance(val, str):
+        return _truncate(val)
+    if isinstance(val, dict):
+        return {k: _truncate_deep(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_truncate_deep(i) for i in val]
+    if isinstance(val, tuple):
+        return tuple(_truncate_deep(i) for i in val)
+    return val
+
+
 def _scrub_value(val: Any, tokens: list[str]) -> Any:
-    """Replace every configured token anywhere in a nested structure."""
+    """Replace every configured token anywhere in a nested structure.
+
+    Deliberately does NOT truncate. Length bounding happens after every scrubbing pass
+    has run — cutting a string first can split a credential across the boundary, leaving
+    a prefix that mask_credentials() no longer recognises and therefore no longer masks.
+    """
     if isinstance(val, str):
         for tok in tokens:
             val = val.replace(tok, "***")
@@ -326,7 +359,7 @@ def write_audit_entry(
     """
     # Scrub credentials from params and result before writing
     tokens = _config_tokens()
-    safe_params = {k: _scrub_value(v, tokens) for k, v in params.items()}
+    safe_params = {k: _truncate_deep(_scrub_value(v, tokens)) for k, v in params.items()}
     safe_result = _scrub_value(result, tokens)
 
     entry: dict = {
@@ -334,13 +367,13 @@ def write_audit_entry(
         "agent_id": _agent_id,
         "tool": tool,
         "provider": provider,
-        "repo": repo,
+        "repo": _truncate(_scrub_value(repo, tokens)),
         "params": safe_params,
         "result": safe_result,
         "duration_ms": duration_ms,
     }
     if reason is not None:
-        entry["reason"] = scrub(_scrub_value(reason, tokens))
+        entry["reason"] = _truncate(scrub(_scrub_value(reason, tokens)))
     if _signing_key:
         entry["hmac"] = _compute_hmac(entry)
 

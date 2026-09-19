@@ -384,6 +384,38 @@ def init_sync() -> None:
     _init_otel()
     _init_prometheus()
     _init_loki()
+    _warn_if_async_only_backend_configured()
+
+
+def _warn_if_async_only_backend_configured() -> None:
+    """Say so if Loki or NATS is configured but cannot be reached from the live path.
+
+    Tool events are emitted from AuditCtx.finish(), which is sync — 45 of the 65 tools
+    are sync functions that FastMCP runs on a worker thread with no event loop to await
+    into, so only emit_tool_event_sync() runs in production. Loki and NATS live on the
+    async tail, which has no production caller.
+
+    Neither is configured for githost-mcp on forge, so nothing is lost today. But a
+    backend that is configured and silently receives nothing is exactly the failure this
+    build existed to remove from the metrics path, and it would be indistinguishable
+    from an idle server. Warn rather than let it be discovered by an audit later.
+    """
+    config = get_config()
+    unreachable = [
+        name
+        for name, configured in (("loki", bool(config.loki_url)), ("nats", bool(config.nats_url)))
+        if configured
+    ]
+    if unreachable:
+        log.warning(
+            "async_backend_not_wired_to_tool_events",
+            backends=unreachable,
+            detail=(
+                "configured, but tool events are emitted from a sync path that cannot "
+                "reach them; they will receive nothing until emit_tool_event()'s async "
+                "tail has a production caller"
+            ),
+        )
 
 
 async def init_async() -> None:
