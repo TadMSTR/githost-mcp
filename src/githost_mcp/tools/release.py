@@ -55,7 +55,7 @@ def register(mcp) -> None:
         try:
             validate_write_path(repo_path)
         except ValueError as e:
-            ac.finish("error:ValueError")
+            ac.finish("error:ValueError", e)
             return {"error": scrub(str(e))}
 
         # Resolve targets
@@ -87,15 +87,15 @@ def register(mcp) -> None:
         try:
             repo = git.Repo(repo_path, search_parent_directories=False)
         except Exception as e:
-            ac.finish("error:git")
+            ac.finish("error:git", e)
             return {"error": f"Cannot open repo: {e}"}
 
         if repo.is_dirty(untracked_files=False):
-            ac.finish("error:dirty")
+            ac.finish("error:dirty", "working tree is dirty")
             return {"error": "Working tree is dirty — commit or stash changes before releasing"}
 
         if tag in [t.name for t in repo.tags]:
-            ac.finish("error:tag_exists")
+            ac.finish("error:tag_exists", f"tag {tag!r} already exists")
             return {"error": f"Tag '{tag}' already exists"}
 
         urls: dict = {}
@@ -118,7 +118,7 @@ def register(mcp) -> None:
                 reason = outcome.summary or "tag push rejected by remote"
                 log.warning("release_tag_push_failed", tag=tag, flags=outcome.flags, summary=reason)
                 await _rollback(repo, tag, created, urls)
-                ac.finish("error:git_tag_push")
+                ac.finish("error:git_tag_push", reason)
                 return {
                     "error": f"Failed to push tag {tag}: {reason}",
                     "tag": tag,
@@ -128,7 +128,7 @@ def register(mcp) -> None:
             log.info("release_tag_created", tag=tag)
         except Exception as e:
             await _rollback(repo, tag, created, urls)
-            ac.finish("error:git_tag")
+            ac.finish("error:git_tag", e)
             return {"error": f"Failed to create/push tag: {scrub(str(e))}"}
 
         # Step 2: GitHub release
@@ -141,7 +141,7 @@ def register(mcp) -> None:
             except Exception as e:
                 emit_release_target("github", "error")
                 await _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
-                ac.finish("error:github")
+                ac.finish("error:github", e)
                 return {"error": f"GitHub release failed: {e}", "rolled_back": True}
 
         # Step 3: Gitea release
@@ -160,7 +160,7 @@ def register(mcp) -> None:
             except Exception as e:
                 emit_release_target("gitea", "error")
                 await _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
-                ac.finish("error:gitea")
+                ac.finish("error:gitea", e)
                 return {"error": f"Gitea release failed: {e}", "rolled_back": True}
 
         # Step 4: GitLab release
@@ -180,7 +180,7 @@ def register(mcp) -> None:
             except Exception as e:
                 emit_release_target("gitlab", "error")
                 await _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
-                ac.finish("error:gitlab")
+                ac.finish("error:gitlab", e)
                 return {"error": f"GitLab release failed: {e}", "rolled_back": True}
 
         # Step 5: PyPI (immutable — no rollback)

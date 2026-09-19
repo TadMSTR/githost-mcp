@@ -14,7 +14,7 @@ from .._providers.gitea_client import (
     gitea_post,
     gitea_post_void,
 )
-from ..audit import AuditCtx
+from ..audit import AuditCtx, audit_rejection
 from ..config import get_config
 from ..security import scrub
 
@@ -71,7 +71,9 @@ def register(mcp) -> None:
             prerelease: Mark as pre-release (default False).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_create_release", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -88,7 +90,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"id": result.get("id"), "tag": tag, "url": result.get("html_url")}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -100,7 +102,9 @@ def register(mcp) -> None:
             tag: Tag name.
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_get_release", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -121,7 +125,7 @@ def register(mcp) -> None:
                     }
             raise ValueError(f"Release for tag '{tag}' not found in {repo}")
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -133,7 +137,9 @@ def register(mcp) -> None:
             limit: Max releases to return (default 10, max 100).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_list_releases", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         limit = min(limit, 100)
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
@@ -155,7 +161,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "releases": releases}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -168,7 +174,7 @@ def register(mcp) -> None:
             limit: Max PRs to return (default 20, max 100).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection("gitea_pr_list", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR)
         limit = min(limit, 100)
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
@@ -192,7 +198,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "prs": prs}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -215,7 +221,9 @@ def register(mcp) -> None:
             draft: Create as draft PR (default False).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_pr_create", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -231,7 +239,7 @@ def register(mcp) -> None:
                 "state": result.get("state"),
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -243,7 +251,7 @@ def register(mcp) -> None:
             pr_number: Pull request number.
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection("gitea_pr_get", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR)
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -264,7 +272,7 @@ def register(mcp) -> None:
                 "labels": [lb.get("name") for lb in (result.get("labels") or [])],
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -277,7 +285,9 @@ def register(mcp) -> None:
             body: Comment text (markdown supported).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_pr_comment", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -294,7 +304,7 @@ def register(mcp) -> None:
                 "created_at": result.get("created_at"),
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -317,10 +327,18 @@ def register(mcp) -> None:
             message: Optional merge commit message title.
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_pr_merge", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         valid_styles = {"merge", "squash", "rebase"}
         if merge_style not in valid_styles:
-            return {"error": f"merge_style must be one of: {', '.join(sorted(valid_styles))}"}
+            return audit_rejection(
+                "gitea_pr_merge",
+                "gitea",
+                repo,
+                "invalid_argument",
+                f"merge_style must be one of: {', '.join(sorted(valid_styles))}",
+            )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -338,7 +356,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"merged": True, "pr_number": pr_number}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -374,10 +392,18 @@ def register(mcp) -> None:
             message: Dismissal reason (dismiss_review).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_pr_review", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         valid = {"get_diff", "get_files", "submit_review", "dismiss_review"}
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "gitea_pr_review",
+                "gitea",
+                repo,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -443,7 +469,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "pr": pr_number, "review_id": review_id, "dismissed": True}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -486,7 +512,7 @@ def register(mcp) -> None:
             limit: Max runs to return for list_runs (default 20, max 100).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection("gitea_actions", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR)
         valid = {
             "list_runs",
             "get_run",
@@ -497,7 +523,13 @@ def register(mcp) -> None:
             "rerun_failed_jobs",
         }
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "gitea_actions",
+                "gitea",
+                repo,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -588,7 +620,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "run_id": run_id, method: True}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -613,9 +645,11 @@ def register(mcp) -> None:
             prerelease: New prerelease flag (unchanged if omitted).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_release_update", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         if err := _bad_tag(tag):
-            return err
+            return audit_rejection("gitea_release_update", "gitea", repo, "invalid_argument", err)
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -644,7 +678,7 @@ def register(mcp) -> None:
                 "prerelease": result.get("prerelease"),
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -659,9 +693,11 @@ def register(mcp) -> None:
             tag: Tag name of the release to delete.
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_release_delete", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         if err := _bad_tag(tag):
-            return err
+            return audit_rejection("gitea_release_delete", "gitea", repo, "invalid_argument", err)
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -671,7 +707,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "tag": tag, "deleted": True}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -697,10 +733,18 @@ def register(mcp) -> None:
             limit: Max issues to return for list (default 20, max 100).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_issue_read", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         valid = {"get", "list", "comments"}
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "gitea_issue_read",
+                "gitea",
+                repo,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -758,7 +802,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "issue": issue_number, "comments": comments}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)
 
     @mcp.tool
@@ -796,10 +840,18 @@ def register(mcp) -> None:
             comment: Comment body (add_comment).
         """
         if not _REPO_RE.match(repo):
-            return {"error": _REPO_FMT_ERR}
+            return audit_rejection(
+                "gitea_issue_write", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
         valid = {"create", "update", "add_comment", "close", "reopen"}
         if method not in valid:
-            return {"error": f"method must be one of: {', '.join(sorted(valid))}"}
+            return audit_rejection(
+                "gitea_issue_write",
+                "gitea",
+                repo,
+                "invalid_argument",
+                f"method must be one of: {', '.join(sorted(valid))}",
+            )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
@@ -856,5 +908,5 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo, "number": issue_number, "state": new_state}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)

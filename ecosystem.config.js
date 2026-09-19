@@ -124,6 +124,27 @@ function buildApp(agentId, ports) {
   // which interface it is on, and that confusion is how the 0.0.0.0 bind shipped.
   env.METRICS_PORT = String(ports.metricsPort);
 
+  // OTLP export to the SigNoz collector (signoz-otel-collector, 4317 gRPC /
+  // 4318 HTTP). Until this was set, githost-mcp's telemetry reached nothing:
+  // _init_otel() returns immediately when OTEL_EXPORTER_OTLP_ENDPOINT is unset,
+  // and the Prometheus endpoint on metricsPort was scraped by no job — 9620-9627
+  // are not among prometheus.yml's targets.
+  //
+  // The protocol is set EXPLICITLY even though "grpc" is already config.py's
+  // default. An exporter that is correct only because a variable is unset is the
+  // vikunja#865 failure mode: pair :4318 with the grpc default and the gRPC
+  // exporter talks to an HTTP port, fails, and says nothing at all. Naming both
+  // halves here makes the pairing checkable by reading one place, and survives a
+  // future change to that default.
+  env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:4317";
+  env.OTEL_EXPORTER_OTLP_PROTOCOL = "grpc";
+  // Per-agent, or all seven processes register as one service named "githost-mcp"
+  // (config.py's default) and collapse into a single row in SigNoz — which would
+  // make "which agent hit this limit" unanswerable from traces, the one question
+  // this telemetry exists to answer. Matches the scoped-mcp-<agent> convention
+  // already visible in list_services.
+  env.OTEL_SERVICE_NAME = `githost-mcp-${agentId}`;
+
   return {
     name: `githost-mcp-${agentId}`,
     script: "/opt/venvs/githost-mcp/bin/python3",

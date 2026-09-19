@@ -16,6 +16,17 @@ from typing import Any
 import structlog
 
 from .config import get_config
+from .errors import classify_reason
+from .observability import emit_tool_event_sync
+from .security import scrub
+
+#: Cap on any single string written into an audit record. `repo` at an audit_rejection()
+#: call site is precisely the string that just FAILED validation — arbitrary agent-supplied
+#: text — and it lands in a durable, HMAC-signed log that nothing prunes. json.dumps()
+#: escaping keeps it from breaking the JSONL framing, so this is bloat rather than
+#: corruption, but there was no bound anywhere in the write path. Generous enough that no
+#: real repo path, branch name or exception message is touched.
+MAX_AUDIT_FIELD_CHARS = 2048
 
 # Bound at init_logging() time
 _agent_id: str = "unknown"
@@ -50,8 +61,33 @@ def _config_tokens() -> list[str]:
     ]
 
 
+def _truncate(text: str) -> str:
+    """Bound a single audit field, saying so rather than silently losing the tail."""
+    if len(text) <= MAX_AUDIT_FIELD_CHARS:
+        return text
+    return text[:MAX_AUDIT_FIELD_CHARS] + f"…[truncated, {len(text)} chars]"
+
+
+def _truncate_deep(val: Any) -> Any:
+    """Apply _truncate() to every string in a nested structure. Run it last."""
+    if isinstance(val, str):
+        return _truncate(val)
+    if isinstance(val, dict):
+        return {k: _truncate_deep(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_truncate_deep(i) for i in val]
+    if isinstance(val, tuple):
+        return tuple(_truncate_deep(i) for i in val)
+    return val
+
+
 def _scrub_value(val: Any, tokens: list[str]) -> Any:
-    """Replace every configured token anywhere in a nested structure."""
+    """Replace every configured token anywhere in a nested structure.
+
+    Deliberately does NOT truncate. Length bounding happens after every scrubbing pass
+    has run — cutting a string first can split a credential across the boundary, leaving
+    a prefix that mask_credentials() no longer recognises and therefore no longer masks.
+    """
     if isinstance(val, str):
         for tok in tokens:
             val = val.replace(tok, "***")
@@ -306,10 +342,24 @@ def write_audit_entry(
     params: dict,
     result: str,
     duration_ms: int,
+    reason: str | None = None,
 ) -> None:
+    """Append one signed audit record.
+
+    `reason` is the human-readable detail behind a non-ok `result` — usually an
+    exception message. It is an audit-record field and deliberately NOT a metric
+    label: messages carry repo paths and branch names, which would make Prometheus
+    cardinality unbounded. The bounded counterpart is `reason_class`, emitted to the
+    metrics backends by AuditCtx.finish().
+
+    It is scrubbed harder than `result` is. `_scrub_value()` only replaces token
+    values githost-mcp has in its own config, so a one-off PAT a human embedded in a
+    git remote by hand survives it; security.scrub() additionally strips URL userinfo
+    by shape. Exception text is exactly where such a URL surfaces, so both run.
+    """
     # Scrub credentials from params and result before writing
     tokens = _config_tokens()
-    safe_params = {k: _scrub_value(v, tokens) for k, v in params.items()}
+    safe_params = {k: _truncate_deep(_scrub_value(v, tokens)) for k, v in params.items()}
     safe_result = _scrub_value(result, tokens)
 
     entry: dict = {
@@ -317,11 +367,13 @@ def write_audit_entry(
         "agent_id": _agent_id,
         "tool": tool,
         "provider": provider,
-        "repo": repo,
+        "repo": _truncate(_scrub_value(repo, tokens)),
         "params": safe_params,
         "result": safe_result,
         "duration_ms": duration_ms,
     }
+    if reason is not None:
+        entry["reason"] = _truncate(scrub(_scrub_value(reason, tokens)))
     if _signing_key:
         entry["hmac"] = _compute_hmac(entry)
 
@@ -357,6 +409,74 @@ class AuditCtx:
         self.params = params
         self._t0 = time.perf_counter()
 
-    def finish(self, result: str = "ok") -> None:
+    def finish(self, result: str = "ok", reason: str | BaseException | None = None) -> None:
+        """Write the audit record and emit the metrics for this call.
+
+        `reason` takes the exception itself wherever one is in scope, not just its
+        message: the type is what classify_reason() maps to a bounded reason_class,
+        and a string would throw that away. A plain string is accepted for the call
+        sites that reject before any exception exists.
+
+        This is also the only place tool metrics are produced. They previously had no
+        producer at all — emit_tool_event() was defined and called by nothing, so
+        githost_tool_calls_total had never incremented in production and the metrics
+        ports served zero githost series.
+        """
         duration_ms = int((time.perf_counter() - self._t0) * 1000)
-        write_audit_entry(self.tool, self.provider, self.repo, self.params, result, duration_ms)
+        exc = reason if isinstance(reason, BaseException) else None
+        reason_text = None if reason is None else str(reason)
+
+        write_audit_entry(
+            self.tool,
+            self.provider,
+            self.repo,
+            self.params,
+            result,
+            duration_ms,
+            reason=reason_text,
+        )
+
+        # Any result that is not a success is a denial for counting purposes —
+        # `denied:*` policy refusals and `error:*` failures alike. The question the
+        # counter answers is "which githost-mcp limits do agents actually hit", and
+        # an error the caller cannot get past is a limit regardless of which prefix
+        # it carries. "ok:already_absent" and friends are successes.
+        reason_class = None if result.startswith("ok") else classify_reason(result, exc)
+
+        try:
+            emit_tool_event_sync(
+                self.tool,
+                self.provider,
+                os.path.basename(self.repo.rstrip("/")) if self.repo else "",
+                result,
+                duration_ms,
+                reason_class,
+            )
+        except Exception as exc_emit:  # pragma: no cover - defence in depth
+            # Telemetry must never fail a tool call that otherwise succeeded.
+            log.warning("tool_event_emit_failed", error=str(exc_emit))
+
+
+def audit_rejection(
+    tool: str,
+    provider: str,
+    repo: str,
+    reason_class: str,
+    err: dict | str,
+) -> dict:
+    """Record a pre-flight validation rejection, and return the caller-facing error.
+
+    Tools validate `repo`/`project`/`tag`/enum arguments *before* they build their
+    AuditCtx, and until now those guards simply returned an error dict: no audit
+    record, no metric, no trace. An agent hitting one of those limits left nothing
+    behind at all — which is the single case this telemetry exists to make visible.
+
+    `tool`, `provider` and `repo` are taken from the same expressions the tool's own
+    AuditCtx uses, so a rejected call and a successful call of the same tool produce
+    comparably-shaped records.
+
+    Returns the error dict so the guard stays a one-liner at the call site.
+    """
+    message = err["error"] if isinstance(err, dict) else err
+    AuditCtx(tool, provider, repo, {"repo": repo}).finish(f"denied:{reason_class}", message)
+    return {"error": message}

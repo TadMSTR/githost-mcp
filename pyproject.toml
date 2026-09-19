@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "githost-mcp"
-version = "0.13.0"
+version = "0.14.0"
 description = "Unified local + multi-provider git MCP server with per-agent audit trail"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,6 +43,11 @@ observability = [
     "githost-mcp[otel,loki,prometheus,nats]",
 ]
 dev = [
+    # prometheus-client is an *optional* runtime extra but a *required* test dep:
+    # the denial-counter tests assert on real Counter label behaviour, and a stubbed
+    # module cannot show that reason_class is bounded. Without it here those tests
+    # would skip in CI while still reporting green.
+    "prometheus-client>=0.20",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",

@@ -10,6 +10,7 @@ import structlog
 from .._providers.github_client import get_github, github_call
 from ..audit import AuditCtx
 from ..config import get_config
+from ..errors import NoSuchRemote, RepoNotFound
 from ..gitflags import evaluate_fetch, evaluate_push
 from ..identity import (
     IDENTITY_AGENT,
@@ -43,9 +44,9 @@ def _open_repo(repo_path: str) -> git.Repo:
     try:
         return git.Repo(repo_path, search_parent_directories=False)
     except git.InvalidGitRepositoryError:
-        raise ValueError(f"Not a git repository: {repo_path}") from None
+        raise RepoNotFound(f"Not a git repository: {repo_path}") from None
     except git.NoSuchPathError:
-        raise ValueError(f"Path does not exist: {repo_path}") from None
+        raise RepoNotFound(f"Path does not exist: {repo_path}") from None
 
 
 def _staged_paths(repo: git.Repo) -> list[str]:
@@ -214,7 +215,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return result
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -259,7 +260,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo_path, "staged": staged, "patches": patches}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -290,7 +291,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"repo": repo_path, "branch": ref, "commits": commits}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -319,7 +320,7 @@ def register(mcp) -> None:
                 },
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -407,7 +408,7 @@ def register(mcp) -> None:
             else:
                 raise ValueError(f"Unknown action '{action}'; use list, create, or delete")
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -447,7 +448,7 @@ def register(mcp) -> None:
             validate_branch_name(branch_name)
             repo = _open_repo(repo_path)
             if remote not in [r.name for r in repo.remotes]:
-                raise ValueError(f"No such remote '{remote}' in {repo_path}")
+                raise NoSuchRemote(f"No such remote '{remote}' in {repo_path}")
 
             # Authoritative existence check against the remote itself. repo.remotes
             # [remote].refs is the local cache of remote-tracking refs and goes stale
@@ -489,7 +490,7 @@ def register(mcp) -> None:
                     branch=branch_name,
                     error=reason,
                 )
-                ac.finish("error:PushRejected")
+                ac.finish("error:PushRejected", reason)
                 # No "deleted" key on failure — a result carrying both would be
                 # vikunja #265 in a new shape.
                 return {
@@ -511,7 +512,7 @@ def register(mcp) -> None:
                     flags=outcome.flags,
                     summary=reason,
                 )
-                ac.finish("error:PushRejected")
+                ac.finish("error:PushRejected", reason)
                 return {
                     "error": f"delete of {remote}/{branch_name} failed: {reason}",
                     "remote": remote,
@@ -531,7 +532,7 @@ def register(mcp) -> None:
                 "flags": outcome.flags,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -550,7 +551,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"checked_out": ref, "detached": repo.head.is_detached}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -614,17 +615,17 @@ def register(mcp) -> None:
             if action == "remove":
                 validate_remote_name(name)
                 if name not in [r.name for r in repo.remotes]:
-                    raise ValueError(f"No such remote: '{name}'")
+                    raise NoSuchRemote(f"No such remote: '{name}'")
                 repo.delete_remote(name)
                 ac.finish("ok")
                 return {"removed": name}
 
             raise ValueError(f"Unknown action '{action}'; use list, add, or remove")
         except RemoteUrlRejected as e:
-            ac.finish("denied:remote_url")
+            ac.finish("denied:remote_url", e)
             return {"error": scrub(str(e))}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -649,10 +650,10 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"staged": staged}
         except WriteGlobDenied as e:
-            ac.finish("denied:write_glob")
+            ac.finish("denied:write_glob", e)
             return {"error": scrub(str(e))}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -729,13 +730,13 @@ def register(mcp) -> None:
                 "author": f"{commit.author.name} <{commit.author.email}>",
             }
         except WriteGlobDenied as e:
-            ac.finish("denied:write_glob")
+            ac.finish("denied:write_glob", e)
             return {"error": scrub(str(e))}
         except IdentityUndetermined as e:
-            ac.finish("denied:identity_undetermined")
+            ac.finish("denied:identity_undetermined", e)
             return {"error": scrub(str(e))}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -779,7 +780,7 @@ def register(mcp) -> None:
                 log.warning(
                     "push_failed", remote=remote, branch=branch_name, flags=decoded, summary=reason
                 )
-                ac.finish("error:PushRejected")
+                ac.finish("error:PushRejected", reason)
                 # No "pushed" key on failure — a result carrying both would be the
                 # same bug in a new shape.
                 return {
@@ -814,7 +815,7 @@ def register(mcp) -> None:
                 "upstream_set": upstream_set,
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -837,7 +838,7 @@ def register(mcp) -> None:
                 # scrubbed by evaluate_fetch.
                 reason = outcome.summary or "pull rejected by remote"
                 log.warning("pull_failed", remote=remote, flags=outcome.flags, note=reason)
-                ac.finish("error:FetchRejected")
+                ac.finish("error:FetchRejected", reason)
                 # No success-shaped key alongside the error.
                 return {
                     "error": f"pull from {remote} failed: {reason}",
@@ -852,7 +853,7 @@ def register(mcp) -> None:
                 result["note"] = outcome.summary
             return result
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -891,7 +892,7 @@ def register(mcp) -> None:
                         flags=outcome.flags,
                         summary=reason,
                     )
-                    ac.finish("error:PushRejected")
+                    ac.finish("error:PushRejected", reason)
                     # No "pushed" key on failure. The local tag exists by now, so
                     # the caller is left holding state the remote does not have —
                     # say so rather than making it infer that.
@@ -912,5 +913,5 @@ def register(mcp) -> None:
             ac.finish("ok")
             return result
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}

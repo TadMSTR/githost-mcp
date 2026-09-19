@@ -189,6 +189,26 @@ Every tool call writes a JSONL entry before returning:
 }
 ```
 
+A call that did not succeed also carries a `reason` — the exception message, scrubbed
+through `security.scrub()`:
+
+```json
+{
+  "tool": "git_add",
+  "result": "denied:write_glob",
+  "reason": "Write denied by policy write_globs scope for '/srv/repo': ['secrets.env'] (source: policy)",
+  "duration_ms": 4
+}
+```
+
+`reason` exists because `result` carries the exception *type* and not its message, so
+allowlist rejection, bad repo format and missing remote were all indistinguishable inside
+one `error:ValueError` bucket. It is an audit-record field and deliberately **never** a
+metric label — messages contain repo paths and branch names, which is unbounded
+cardinality. The bounded counterpart is `reason_class` on `githost_tool_denied_total`,
+drawn from a closed vocabulary in `errors.py` and derived from the exception type rather
+than from a regex over its message.
+
 Each entry is HMAC-SHA256 signed **when `AUDIT_SIGNING_KEY` is set** — with no key the `hmac`
 field is simply absent and the entry carries no tamper evidence at all. `audit_log_query`
 classifies every returned entry in an `integrity` field, and reports `integrity_summary` counts
@@ -526,6 +546,10 @@ its `sources_searched` field reports which files a given result actually covered
 ```env
 # OTEL (SigNoz, Honeycomb, Grafana Tempo, Jaeger, Datadog — same env var)
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+# Pair the protocol with the port. Default is grpc; :4318 needs http.
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+# Per-process, or every agent collapses into one service in the backend.
+OTEL_SERVICE_NAME=githost-mcp-<agent>
 
 # Loki
 LOKI_URL=http://localhost:3100
@@ -544,6 +568,21 @@ NATS_URL=nats://localhost:4222
 > bind regressed). `ecosystem.config.js` sets one port per agent, 9620-9625, mirroring
 > the 8620-8625 HTTP block. Verify with `ss -tlnp` showing `127.0.0.1` — a successful
 > `curl` to localhost alone doesn't distinguish a loopback bind from a `0.0.0.0` one.
+
+> **`OTEL_EXPORTER_OTLP_PROTOCOL` must agree with the port in the endpoint.** It defaults
+> to `grpc`, so setting only `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318` points
+> the gRPC exporter at an HTTP port, and it fails **silently** — `_init_otel()` swallows
+> the error and the process starts normally with no telemetry at all. Use `:4317` with
+> `grpc`, or `:4318` with `OTEL_EXPORTER_OTLP_PROTOCOL=http`. `ecosystem.config.js` sets
+> both explicitly rather than relying on the default, so the pairing is checkable by
+> reading one place. Verify by querying the backend for a `githost.*` series — an
+> exporter that initialised proves nothing about whether anything arrived.
+
+> **`OTEL_SERVICE_NAME` defaults to `githost-mcp` for every process.** With seven agents
+> that is one service with seven writers, which makes "which agent hit this limit"
+> unanswerable from traces — the question the telemetry exists to answer.
+> `ecosystem.config.js` sets `githost-mcp-<agent>`, matching the `scoped-mcp-<agent>`
+> convention.
 
 ### Transport (optional — default stdio)
 

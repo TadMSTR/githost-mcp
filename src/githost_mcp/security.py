@@ -8,6 +8,36 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 from .config import get_config
+from .errors import (
+    BranchNameInvalid,
+    InvalidArgument,
+    PathNotAllowed,
+    RemoteNameInvalid,
+    RemoteUrlRejected,
+    WriteGlobDenied,
+)
+
+# Re-exported: these are raised here and caught by tools/, which has always imported
+# them from this module. They live in errors.py now so audit.py can classify them
+# without importing security.
+__all__ = [
+    "BranchNameInvalid",
+    "InvalidArgument",
+    "PathNotAllowed",
+    "RemoteNameInvalid",
+    "RemoteUrlRejected",
+    "WriteGlobDenied",
+    "clean_env",
+    "mask_credentials",
+    "redact_url_credentials",
+    "scrub",
+    "validate_branch_name",
+    "validate_read_path",
+    "validate_remote_name",
+    "validate_remote_url",
+    "validate_write_globs",
+    "validate_write_path",
+]
 
 # Any URL userinfo component (`scheme://user:token@host`). mask_credentials() only
 # replaces githost-mcp's *own configured* token values, so a credential a human
@@ -52,14 +82,14 @@ def _validate_path(
     repo_path: str, roots: list[str], *, verb: str, list_name: str, source: str
 ) -> None:
     if not roots:
-        raise ValueError(
+        raise PathNotAllowed(
             f"{verb} operations are disabled: no {list_name} resolved (source: {source}). "
             "Set ALLOWED_REPO_ROOTS, or grant this agent via the workspace policy or manifest."
         )
     try:
         resolved = Path(repo_path).resolve()
     except Exception as e:
-        raise ValueError(f"Invalid repo path: {e}") from None
+        raise InvalidArgument(f"Invalid repo path: {e}") from None
 
     for root in roots:
         try:
@@ -68,14 +98,14 @@ def _validate_path(
         except ValueError:
             continue
 
-    raise ValueError(
+    raise PathNotAllowed(
         f"Path '{repo_path}' is not under any allowed root ({list_name}, source: {source}). "
         f"Allowed: {roots}"
     )
 
 
 def validate_write_path(repo_path: str) -> None:
-    """Raise ValueError if repo_path is not under an allowed write root.
+    """Raise PathNotAllowed if repo_path is not under an allowed write root.
 
     Also fails closed if this agent's grant carries write_globs/write_globs_deny but
     the running code has no glob-enforcement path yet (_GLOB_ENFORCEMENT_IMPLEMENTED):
@@ -84,7 +114,7 @@ def validate_write_path(repo_path: str) -> None:
     """
     config = get_config()
     if not _GLOB_ENFORCEMENT_IMPLEMENTED and (config.write_globs or config.write_globs_deny):
-        raise ValueError(
+        raise PathNotAllowed(
             "Write operations are disabled: this agent's grant is scoped by write_globs, "
             "but glob enforcement is not implemented in this githost-mcp version. "
             "Refusing to grant unrestricted write across allowed_write_roots instead of "
@@ -100,7 +130,7 @@ def validate_write_path(repo_path: str) -> None:
 
 
 def validate_read_path(repo_path: str) -> None:
-    """Raise ValueError if repo_path is not under an allowed read root."""
+    """Raise PathNotAllowed if repo_path is not under an allowed read root."""
     config = get_config()
     _validate_path(
         repo_path,
@@ -109,23 +139,6 @@ def validate_read_path(repo_path: str) -> None:
         list_name="allowed_read_roots",
         source=config.allowlist_source,
     )
-
-
-class WriteGlobDenied(ValueError):
-    """Raised by validate_write_globs() when a path fails write_globs allow/deny scope.
-
-    A distinct type (rather than a bare ValueError) so callers can log/audit a policy
-    denial differently from an unrelated failure — git_add/git_commit use this to write
-    a `denied:write_glob` audit result instead of the generic `error:ValueError` other
-    exceptions get, so the trail shows *why* the write failed, not just that it did.
-    """
-
-    def __init__(self, repo_path: str, denied_paths: list[str], source: str) -> None:
-        self.denied_paths = denied_paths
-        super().__init__(
-            f"Write denied by policy write_globs scope for '{repo_path}': "
-            f"{denied_paths} (source: {source})"
-        )
 
 
 def validate_write_globs(repo_path: str, paths: list[str]) -> None:
@@ -197,22 +210,20 @@ _LEADING_DASH_ERR = "must not start with '-'"
 _REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
 
-class RemoteUrlRejected(ValueError):
-    """Raised by validate_remote_url() for a URL git_remote refuses to store."""
-
-
 def validate_remote_name(name: str) -> None:
-    """Raise ValueError unless `name` is a plain remote name."""
+    """Raise RemoteNameInvalid unless `name` is a plain remote name."""
     if not name:
-        raise ValueError("remote name is required")
+        raise RemoteNameInvalid("remote name is required")
     if name.startswith("-"):
-        raise ValueError(f"remote name {_LEADING_DASH_ERR}")
+        raise RemoteNameInvalid(f"remote name {_LEADING_DASH_ERR}")
     if not _REMOTE_NAME_RE.match(name):
-        raise ValueError(f"Invalid remote name '{name}': use letters, digits, '.', '_', '-', '/'")
+        raise RemoteNameInvalid(
+            f"Invalid remote name '{name}': use letters, digits, '.', '_', '-', '/'"
+        )
 
 
 def validate_branch_name(name: str) -> None:
-    """Raise ValueError unless `name` is safe to interpolate into a push refspec.
+    """Raise BranchNameInvalid unless `name` is safe to interpolate into a push refspec.
 
     ``git_branch_delete_remote`` builds ``":refs/heads/" + name``. GitPython passes
     that as one argv element, so this is not a shell-injection boundary — but a
@@ -227,27 +238,33 @@ def validate_branch_name(name: str) -> None:
     ``release/v1.2.0+build`` are not rejected for no reason.
     """
     if not name:
-        raise ValueError("branch name is required")
+        raise BranchNameInvalid("branch name is required")
     if name.startswith("-"):
-        raise ValueError(f"branch name {_LEADING_DASH_ERR}")
+        raise BranchNameInvalid(f"branch name {_LEADING_DASH_ERR}")
     if ":" in name:
-        raise ValueError(
+        raise BranchNameInvalid(
             f"Invalid branch name '{name}': ':' would split the push refspec and "
             f"retarget the deletion at a different ref"
         )
     if _WHITESPACE_RE.search(name):
-        raise ValueError(f"Invalid branch name '{name}': must not contain whitespace")
+        raise BranchNameInvalid(f"Invalid branch name '{name}': must not contain whitespace")
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
-        raise ValueError(f"Invalid branch name '{name!r}': must not contain control characters")
+        raise BranchNameInvalid(
+            f"Invalid branch name '{name!r}': must not contain control characters"
+        )
     for bad in ("*", "?", "[", "~", "^", "\\"):
         if bad in name:
-            raise ValueError(f"Invalid branch name '{name}': must not contain '{bad}'")
+            raise BranchNameInvalid(f"Invalid branch name '{name}': must not contain '{bad}'")
     if ".." in name or "@{" in name:
-        raise ValueError(f"Invalid branch name '{name}': must not contain '..' or '@{{'")
+        raise BranchNameInvalid(f"Invalid branch name '{name}': must not contain '..' or '@{{'")
     if name.endswith(".lock") or name.endswith("/") or name.endswith("."):
-        raise ValueError(f"Invalid branch name '{name}': must not end with '.lock', '/' or '.'")
+        raise BranchNameInvalid(
+            f"Invalid branch name '{name}': must not end with '.lock', '/' or '.'"
+        )
     if name.startswith("/") or "//" in name:
-        raise ValueError(f"Invalid branch name '{name}': must not start with '/' or contain '//'")
+        raise BranchNameInvalid(
+            f"Invalid branch name '{name}': must not start with '/' or contain '//'"
+        )
 
 
 def validate_remote_url(url: str) -> None:
@@ -341,6 +358,27 @@ def redact_url_credentials(text: str) -> str:
     return _URL_USERINFO_RE.sub(lambda m: f"{m.group('scheme')}***@", text)
 
 
+# SECURITY[deferred]: a credential this process does not hold in its own config, appearing
+# OUTSIDE a URL, survives both passes — `Authorization: Bearer <unknown-tok>` comes through
+# intact. mask_credentials() only replaces values it knows; redact_url_credentials() only
+# matches `scheme://userinfo@`. Measured 2026-09-19 against forge's real secrets: 7
+# adversarial cases in the shapes git/GitPython actually emit, 0 leaks — the gap is narrow
+# but real. The exposure shape is pre-existing (this function's output already reaches
+# callers at ~40 sites in tools/); what changed is that audit.py now also writes it to a
+# durable HMAC-signed log.
+#
+# Deferred by Ted 2026-09-19 rather than patched here: scrub() is on every tool return
+# path, so an over-broad shape-based redactor silently mangles legitimate error text —
+# a failure mode harder to notice than the leak it fixes. Needs its own build with a
+# fixture corpus asserting both directions.
+#
+# Target: vikunja#913 (id 996). Audit: 2026-09-19/agent-build-workflow-2026-09-p1-githost-telemetry.
 def scrub(text: str) -> str:
-    """Full credential scrub for caller-facing strings: known tokens + URL userinfo."""
+    """Full credential scrub for caller-facing strings: known tokens + URL userinfo.
+
+    Note the limit documented in the SECURITY[deferred] comment above: an unknown
+    credential outside a URL is not redacted. Callers writing this output to a durable
+    sink should be aware of that, and must scrub before any truncation — cutting first
+    can split a token and leave an unmatched prefix.
+    """
     return redact_url_credentials(mask_credentials(text))

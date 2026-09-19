@@ -104,7 +104,7 @@ def register(mcp) -> None:
             ac.finish("ok")
             return {"target": target, "dist_dir": dist_path, "stdout": upload_result.stdout[:500]}
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
 
     @mcp.tool
@@ -163,5 +163,5 @@ def register(mcp) -> None:
                 "registry": registry or "https://registry.npmjs.org/",
             }
         except Exception as e:
-            ac.finish(f"error:{type(e).__name__}")
+            ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
