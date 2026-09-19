@@ -358,6 +358,27 @@ def redact_url_credentials(text: str) -> str:
     return _URL_USERINFO_RE.sub(lambda m: f"{m.group('scheme')}***@", text)
 
 
+# SECURITY[deferred]: a credential this process does not hold in its own config, appearing
+# OUTSIDE a URL, survives both passes — `Authorization: Bearer <unknown-tok>` comes through
+# intact. mask_credentials() only replaces values it knows; redact_url_credentials() only
+# matches `scheme://userinfo@`. Measured 2026-09-19 against forge's real secrets: 7
+# adversarial cases in the shapes git/GitPython actually emit, 0 leaks — the gap is narrow
+# but real. The exposure shape is pre-existing (this function's output already reaches
+# callers at ~40 sites in tools/); what changed is that audit.py now also writes it to a
+# durable HMAC-signed log.
+#
+# Deferred by Ted 2026-09-19 rather than patched here: scrub() is on every tool return
+# path, so an over-broad shape-based redactor silently mangles legitimate error text —
+# a failure mode harder to notice than the leak it fixes. Needs its own build with a
+# fixture corpus asserting both directions.
+#
+# Target: vikunja#913 (id 996). Audit: 2026-09-19/agent-build-workflow-2026-09-p1-githost-telemetry.
 def scrub(text: str) -> str:
-    """Full credential scrub for caller-facing strings: known tokens + URL userinfo."""
+    """Full credential scrub for caller-facing strings: known tokens + URL userinfo.
+
+    Note the limit documented in the SECURITY[deferred] comment above: an unknown
+    credential outside a URL is not redacted. Callers writing this output to a durable
+    sink should be aware of that, and must scrub before any truncation — cutting first
+    can split a token and leave an unmatched prefix.
+    """
     return redact_url_credentials(mask_credentials(text))
