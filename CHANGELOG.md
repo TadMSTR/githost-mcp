@@ -2,6 +2,64 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`reason` on every non-ok audit record.** The record carried the exception type and
+  not its message (`"result": "error:ValueError"`), so allowlist rejection, bad repo
+  format and missing remote were indistinguishable — 242 of the 466 non-ok records on
+  forge were `error:ValueError` with nothing to tell them apart. `AuditCtx.finish()` now
+  takes the exception itself and records `str(e)`, scrubbed through `security.scrub()` as
+  well as the audit module's own token pass. The former strips URL userinfo by shape,
+  which is the only thing that catches a PAT a human embedded in a git remote by hand.
+
+  `reason` is an audit-record field and deliberately never a metric label: messages carry
+  repo paths and branch names, which is unbounded cardinality.
+
+- **`githost_tool_denied_total{tool, agent_id, reason_class}`**, plus the OTel counter
+  `githost.tool.denied`. `reason_class` is drawn from a closed vocabulary in the new
+  `errors.py` and is derived from the exception *type*, never from a regex over its
+  message — a message regex rots silently, into the wrong bucket. `other` is counted
+  rather than dropped: a rising `other` is the signal that agents are hitting a limit the
+  vocabulary cannot name yet.
+
+  `security.py`'s bare `ValueError` raises are now typed (`PathNotAllowed`,
+  `BranchNameInvalid`, `RemoteNameInvalid`, `InvalidArgument`), as are `git_local`'s
+  (`RepoNotFound`, `NoSuchRemote`). All subclass `ValueError`, so existing `except
+  ValueError` handlers and `pytest.raises(ValueError)` assertions are unaffected.
+
+- **OTLP export configured on the forge deploy.** `ecosystem.config.js` sets
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL` and a per-agent
+  `OTEL_SERVICE_NAME`. The protocol is set explicitly even though `grpc` is already the
+  default — an exporter correct only because a variable is unset is how `:4318` ends up
+  paired with a gRPC exporter and fails without a word.
+
+### Fixed
+
+- **`githost_tool_calls_total` had never incremented.** `emit_tool_event()` was defined
+  and called by nothing, so the counters were declared at startup and never touched.
+  `prometheus_client` emits no series for a labelled counter until its first `.inc()`,
+  which meant all five live metrics ports answered `200` with 42 lines of
+  `process_*`/`python_*` defaults and zero `githost_*` series — indistinguishable from a
+  healthy idle server.
+
+  It is now driven from `AuditCtx.finish()`. `emit_tool_event()` is split into a sync core
+  (spans, OTel counters, Prometheus — all sync, thread-safe APIs) and an async tail (Loki,
+  NATS), because 45 of the 65 tools are sync functions that FastMCP runs on a worker
+  thread where there is no running event loop to await into.
+
+- **66 pre-flight guards produced no audit record at all.** `repo`/`project` format
+  checks, `_bad_tag`, and the `method`/`merge_style` enum guards all returned before the
+  tool built its `AuditCtx`, so an agent that hit one left no record, no metric and no
+  trace. They now route through `audit_rejection()`, which reuses each tool's own
+  `tool`/`provider`/`repo` expressions so a rejection and a success are comparably shaped.
+
+- **`test_init_prometheus_missing_dep_is_swallowed` asserted its behaviour by relying on
+  `prometheus-client` being absent** from the environment rather than simulating it. It
+  therefore proved nothing once the package was installed — and bound a real TCP port.
+  Absence is now simulated via `sys.modules`. `prometheus-client` moves into the `dev`
+  extra, because the denial-counter tests assert on real `Counter` label behaviour and a
+  stub cannot show that `reason_class` is bounded.
+
 ## [0.13.0] — 2026-08-30
 
 ### Added — remote branch deletion, and `force` for squash-merged local branches (vikunja #383, id 402)
