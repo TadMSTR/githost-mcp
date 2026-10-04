@@ -78,6 +78,7 @@ const AGENTS = {
   // out from under a half-removed agent is how two services end up racing for
   // one bind. Renumber both together when that decommission finishes.
   steward: { httpPort: 8627, metricsPort: 9627 },
+  fleet: { httpPort: 8628, metricsPort: 9628 },
 };
 
 function buildApp(agentId, ports) {
