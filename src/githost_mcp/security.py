@@ -27,6 +27,7 @@ __all__ = [
     "RemoteNameInvalid",
     "RemoteUrlRejected",
     "WriteGlobDenied",
+    "canonical_path",
     "clean_env",
     "mask_credentials",
     "redact_url_credentials",
@@ -78,23 +79,36 @@ def clean_env() -> dict:
     return {k: v for k, v in os.environ.items() if k not in _PM2_IPC_ENV_VARS}
 
 
+def canonical_path(repo_path: str) -> Path:
+    """The path a caller's `repo_path` names: `~` expanded, then resolved.
+
+    `Path("~/x").resolve()` does not expand `~` — it resolves to `<cwd>/~/x`, so a
+    literal `~/repos/...` was refused as outside every root (sysadmin, 2026-10-06).
+    Expanding here is only half the fix: the git operation must run on this same
+    value, not on the caller's literal string, or validation and execution disagree
+    about which directory they mean and git creates a directory named `~` under the
+    cwd. The validators below therefore return it, and every tool runs on the return.
+    """
+    try:
+        return Path(repo_path).expanduser().resolve()
+    except Exception as e:
+        raise InvalidArgument(f"Invalid repo path: {e}") from None
+
+
 def _validate_path(
     repo_path: str, roots: list[str], *, verb: str, list_name: str, source: str
-) -> None:
+) -> str:
     if not roots:
         raise PathNotAllowed(
             f"{verb} operations are disabled: no {list_name} resolved (source: {source}). "
             "Set ALLOWED_REPO_ROOTS, or grant this agent via the workspace policy or manifest."
         )
-    try:
-        resolved = Path(repo_path).resolve()
-    except Exception as e:
-        raise InvalidArgument(f"Invalid repo path: {e}") from None
+    resolved = canonical_path(repo_path)
 
     for root in roots:
         try:
-            resolved.relative_to(Path(root).resolve())
-            return
+            resolved.relative_to(Path(root).expanduser().resolve())
+            return str(resolved)
         except ValueError:
             continue
 
@@ -104,8 +118,11 @@ def _validate_path(
     )
 
 
-def validate_write_path(repo_path: str) -> None:
+def validate_write_path(repo_path: str) -> str:
     """Raise PathNotAllowed if repo_path is not under an allowed write root.
+
+    Returns the canonical path that was checked. Run the operation on that value,
+    never on the caller's original string (see canonical_path()).
 
     Also fails closed if this agent's grant carries write_globs/write_globs_deny but
     the running code has no glob-enforcement path yet (_GLOB_ENFORCEMENT_IMPLEMENTED):
@@ -120,7 +137,7 @@ def validate_write_path(repo_path: str) -> None:
             "Refusing to grant unrestricted write across allowed_write_roots instead of "
             "silently ignoring the scope. (source: " + config.allowlist_source + ")"
         )
-    _validate_path(
+    return _validate_path(
         repo_path,
         config.allowed_write_roots,
         verb="Write",
@@ -129,10 +146,13 @@ def validate_write_path(repo_path: str) -> None:
     )
 
 
-def validate_read_path(repo_path: str) -> None:
-    """Raise PathNotAllowed if repo_path is not under an allowed read root."""
+def validate_read_path(repo_path: str) -> str:
+    """Raise PathNotAllowed if repo_path is not under an allowed read root.
+
+    Returns the canonical path that was checked; run the operation on it.
+    """
     config = get_config()
-    _validate_path(
+    return _validate_path(
         repo_path,
         config.allowed_read_roots,
         verb="Read",

@@ -339,7 +339,7 @@ def test_github_pr_merge_rejects_bad_method(tools):
     """Invalid merge_method is rejected before any API call."""
     result = tools["github_pr_merge"]("owner/repo", 12, merge_method="fast-forward")
     assert "error" in result
-    assert "merge_method must be one of" in result["error"]
+    assert "is not valid; must be one of" in result["error"]
 
 
 @pytest.mark.parametrize(
@@ -497,7 +497,7 @@ def test_github_pr_review_dismiss_requires_review_id(tools):
 def test_github_pr_review_rejects_bad_method(tools):
     result = tools["github_pr_review"]("owner/repo", 42, "delete_everything")
     assert "error" in result
-    assert "method must be one of" in result["error"]
+    assert "is not valid; must be one of" in result["error"]
 
 
 def test_github_pr_review_rejects_bad_repo(tools):
@@ -596,7 +596,7 @@ def test_github_actions_get_run_logs(tools):
 def test_github_actions_rejects_bad_method(tools):
     result = tools["github_actions"]("owner/repo", "delete_repo")
     assert "error" in result
-    assert "method must be one of" in result["error"]
+    assert "is not valid; must be one of" in result["error"]
 
 
 def test_github_actions_error_path(tools):
@@ -807,7 +807,7 @@ def test_github_issue_write_add_comment(tools):
 def test_github_issue_write_rejects_bad_method(tools):
     result = tools["github_issue_write"]("owner/repo", "explode")
     assert "error" in result
-    assert "method must be one of" in result["error"]
+    assert "is not valid; must be one of" in result["error"]
 
 
 # ---------------------------------------------------------------------------

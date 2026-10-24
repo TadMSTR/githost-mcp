@@ -42,6 +42,8 @@ REASON_CLASSES: frozenset[str] = frozenset(
         "identity_undetermined",
         "repo_not_found",
         "invalid_argument",
+        "missing_argument",
+        "protected_branch",
         "other",
     }
 )
@@ -81,6 +83,19 @@ class InvalidArgument(ValueError):
     """
 
 
+class MissingArgument(ValueError):
+    """A parameter the requested method needs was not supplied.
+
+    Distinct from `InvalidArgument`: "no `comment` for add_comment" and "`method='list'`"
+    are different findings about what agents misunderstand. Both used to land as a bare
+    ValueError, classified `other`.
+    """
+
+
+class ProtectedBranch(ValueError):
+    """A history-rewriting operation was aimed at a default or protected branch."""
+
+
 class RepoFormatInvalid(ValueError):
     """`repo` was not in `owner/repo` form."""
 
@@ -118,6 +133,8 @@ _BY_TYPE: tuple[tuple[type[BaseException], str], ...] = (
     (RepoNotFound, "repo_not_found"),
     (RepoFormatInvalid, "bad_repo_format"),
     (InvalidArgument, "invalid_argument"),
+    (MissingArgument, "missing_argument"),
+    (ProtectedBranch, "protected_branch"),
 )
 
 # Audit `result` string -> reason class, for the call sites that pass a literal result

@@ -38,7 +38,7 @@ def register(mcp) -> None:
             "pypi_publish", "registry", repo_path, {"repo_path": repo_path, "target": target}
         )
         try:
-            validate_write_path(repo_path)
+            repo_path = validate_write_path(repo_path)
             config = get_config()
             if target == "pypi":
                 token = config.pypi_token
@@ -124,7 +124,7 @@ def register(mcp) -> None:
             "npm_publish", "registry", repo_path, {"repo_path": repo_path, "registry": registry}
         )
         try:
-            validate_write_path(repo_path)
+            repo_path = validate_write_path(repo_path)
             config = get_config()
             if not config.npm_token:
                 raise ValueError("NPM_TOKEN is not set")

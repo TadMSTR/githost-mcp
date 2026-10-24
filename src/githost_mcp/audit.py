@@ -457,12 +457,36 @@ class AuditCtx:
             log.warning("tool_event_emit_failed", error=str(exc_emit))
 
 
+#: Bound on a rejected argument value recorded by audit_rejection(). An enum value an
+#: agent guessed is a word or two; anything longer is not a guess at the enum and only
+#: needs enough of a prefix to recognise.
+MAX_REJECTED_VALUE_CHARS = 64
+
+
+def bound_rejected_value(value: Any) -> tuple[str | None, bool]:
+    """Return ``(text, truncated)`` for a rejected argument value. ``None`` stays ``None``.
+
+    Scrubs BEFORE bounding. Cutting first can split a credential across the boundary
+    and leave a prefix that no scrubbing pass recognises any more — a partial secret
+    in a durable signed log (part 1 review round 2, agent-build-workflow-2026-09).
+    """
+    if value is None:
+        return None, False
+    text = scrub(str(value))
+    if len(text) <= MAX_REJECTED_VALUE_CHARS:
+        return text, False
+    return text[:MAX_REJECTED_VALUE_CHARS], True
+
+
 def audit_rejection(
     tool: str,
     provider: str,
     repo: str,
     reason_class: str,
     err: dict | str,
+    *,
+    argument: str | None = None,
+    value: Any = None,
 ) -> dict:
     """Record a pre-flight validation rejection, and return the caller-facing error.
 
@@ -475,8 +499,51 @@ def audit_rejection(
     AuditCtx uses, so a rejected call and a successful call of the same tool produce
     comparably-shaped records.
 
+    When `argument` is given, the record also carries `argument` and `rejected_value`
+    (null when absent, else scrubbed then bounded — see bound_rejected_value()). Before
+    this the record held `repo` alone, so the largest denial group on forge — a wrong
+    `method` — said that agents guessed wrong but never what they guessed.
+
     Returns the error dict so the guard stays a one-liner at the call site.
     """
     message = err["error"] if isinstance(err, dict) else err
-    AuditCtx(tool, provider, repo, {"repo": repo}).finish(f"denied:{reason_class}", message)
+    params: dict[str, Any] = {"repo": repo}
+    if argument is not None:
+        shown, truncated = bound_rejected_value(value)
+        params["argument"] = argument
+        params["rejected_value"] = shown
+        if truncated:
+            params["rejected_value_truncated"] = True
+    AuditCtx(tool, provider, repo, params).finish(f"denied:{reason_class}", message)
     return {"error": message}
+
+
+def reject_enum(
+    tool: str,
+    provider: str,
+    repo: str,
+    argument: str,
+    value: Any,
+    valid: set[str] | frozenset[str],
+    hint: str | None = None,
+) -> dict:
+    """Refuse a value outside an enum, saying what was passed and what would work.
+
+    An empty value is `missing_argument`, anything else `invalid_argument`: "the agent
+    did not say" and "the agent said something we do not have" call for different fixes.
+    `hint` points at the sibling tool when the request belongs somewhere else.
+    """
+    options = ", ".join(sorted(valid))
+    if value is None or value == "":
+        reason_class = "missing_argument"
+        message = f"{argument} is required; must be one of: {options}"
+    else:
+        reason_class = "invalid_argument"
+        shown, truncated = bound_rejected_value(value)
+        ellipsis = "…" if truncated else ""
+        message = f"{argument} {shown!r}{ellipsis} is not valid; must be one of: {options}"
+    if hint:
+        message = f"{message}. {hint}"
+    return audit_rejection(
+        tool, provider, repo, reason_class, message, argument=argument, value=value
+    )

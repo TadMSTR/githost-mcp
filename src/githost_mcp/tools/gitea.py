@@ -14,8 +14,9 @@ from .._providers.gitea_client import (
     gitea_post,
     gitea_post_void,
 )
-from ..audit import AuditCtx, audit_rejection
+from ..audit import AuditCtx, audit_rejection, reject_enum
 from ..config import get_config
+from ..errors import InvalidArgument, MissingArgument
 from ..security import scrub
 
 
@@ -48,6 +49,11 @@ def _bad_tag(tag: str) -> dict | None:
 
 
 log = structlog.get_logger(__name__)
+
+
+# Where a read-shaped request lands on a write-dispatch tool, the rejection names the
+# sibling that serves it. Agents reached for read methods here 34 times in a month.
+_HINT_GITEA_ISSUE_WRITE = "To read an issue, list issues or read comments, use gitea_issue_read"
 
 
 def register(mcp) -> None:
@@ -332,12 +338,13 @@ def register(mcp) -> None:
             )
         valid_styles = {"merge", "squash", "rebase"}
         if merge_style not in valid_styles:
-            return audit_rejection(
+            return reject_enum(
                 "gitea_pr_merge",
                 "gitea",
                 repo,
-                "invalid_argument",
-                f"merge_style must be one of: {', '.join(sorted(valid_styles))}",
+                "merge_style",
+                merge_style,
+                valid_styles,
             )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
@@ -397,12 +404,13 @@ def register(mcp) -> None:
             )
         valid = {"get_diff", "get_files", "submit_review", "dismiss_review"}
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "gitea_pr_review",
                 "gitea",
                 repo,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
             )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
@@ -443,9 +451,9 @@ def register(mcp) -> None:
                     "COMMENT": "COMMENT",
                 }
                 if event not in event_map:
-                    raise ValueError(f"event must be one of: {', '.join(sorted(event_map))}")
+                    raise InvalidArgument(f"event must be one of: {', '.join(sorted(event_map))}")
                 if event in {"REQUEST_CHANGES", "COMMENT"} and not body:
-                    raise ValueError(f"body is required when event is {event}")
+                    raise MissingArgument(f"body is required when event is {event}")
                 result = await gitea_post(
                     f"{base}/reviews", {"event": event_map[event], "body": body or ""}
                 )
@@ -459,9 +467,9 @@ def register(mcp) -> None:
 
             # dismiss_review
             if review_id is None:
-                raise ValueError("review_id is required for dismiss_review")
+                raise MissingArgument("review_id is required for dismiss_review")
             if not message:
-                raise ValueError("message is required for dismiss_review")
+                raise MissingArgument("message is required for dismiss_review")
             await gitea_post(
                 f"{base}/reviews/{review_id}/dismissals",
                 {"message": message, "priors": False},
@@ -523,12 +531,13 @@ def register(mcp) -> None:
             "rerun_failed_jobs",
         }
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "gitea_actions",
                 "gitea",
                 repo,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
             )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
@@ -558,7 +567,7 @@ def register(mcp) -> None:
 
             if method == "get_run":
                 if run_id is None:
-                    raise ValueError("run_id is required for get_run")
+                    raise MissingArgument("run_id is required for get_run")
                 r = await gitea_get(f"{base}/runs/{run_id}")
                 ac.finish("ok")
                 return {
@@ -577,7 +586,7 @@ def register(mcp) -> None:
 
             if method == "list_jobs":
                 if run_id is None:
-                    raise ValueError("run_id is required for list_jobs")
+                    raise MissingArgument("run_id is required for list_jobs")
                 data = await gitea_get(f"{base}/runs/{run_id}/jobs")
                 jobs = data.get("jobs", []) if isinstance(data, dict) else []
                 out = [
@@ -595,14 +604,14 @@ def register(mcp) -> None:
 
             if method == "get_job_log":
                 if job_id is None:
-                    raise ValueError("job_id is required for get_job_log")
+                    raise MissingArgument("job_id is required for get_job_log")
                 text = await gitea_get_text(f"{base}/jobs/{job_id}/logs")
                 ac.finish("ok")
                 return {"repo": repo, "job_id": job_id, "log": text}
 
             if method == "dispatch_workflow":
                 if not workflow or not ref:
-                    raise ValueError("workflow and ref are required for dispatch_workflow")
+                    raise MissingArgument("workflow and ref are required for dispatch_workflow")
                 if not _WORKFLOW_RE.match(workflow):
                     raise ValueError("workflow contains characters not allowed in a path segment")
                 await gitea_post_void(
@@ -614,7 +623,7 @@ def register(mcp) -> None:
 
             # rerun_run / rerun_failed_jobs
             if run_id is None:
-                raise ValueError(f"run_id is required for {method}")
+                raise MissingArgument(f"run_id is required for {method}")
             suffix = "rerun" if method == "rerun_run" else "rerun-failed-jobs"
             await gitea_post_void(f"{base}/runs/{run_id}/{suffix}", {})
             ac.finish("ok")
@@ -738,12 +747,13 @@ def register(mcp) -> None:
             )
         valid = {"get", "list", "comments"}
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "gitea_issue_read",
                 "gitea",
                 repo,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
             )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
@@ -770,7 +780,7 @@ def register(mcp) -> None:
                 return {"repo": repo, "issues": issues}
 
             if issue_number is None:
-                raise ValueError(f"issue_number is required for {method}")
+                raise MissingArgument(f"issue_number is required for {method}")
 
             if method == "get":
                 i = await gitea_get(f"{base}/{issue_number}")
@@ -845,12 +855,14 @@ def register(mcp) -> None:
             )
         valid = {"create", "update", "add_comment", "close", "reopen"}
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "gitea_issue_write",
                 "gitea",
                 repo,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
+                hint=_HINT_GITEA_ISSUE_WRITE,
             )
         config = get_config()
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
@@ -860,7 +872,7 @@ def register(mcp) -> None:
         try:
             if method == "create":
                 if not title:
-                    raise ValueError("title is required for create")
+                    raise MissingArgument("title is required for create")
                 data: dict = {"title": title, "body": body or ""}
                 if labels:
                     data["labels"] = labels
@@ -876,7 +888,7 @@ def register(mcp) -> None:
                 }
 
             if issue_number is None:
-                raise ValueError(f"issue_number is required for {method}")
+                raise MissingArgument(f"issue_number is required for {method}")
 
             if method == "update":
                 data = {}
@@ -885,14 +897,14 @@ def register(mcp) -> None:
                 if body is not None:
                     data["body"] = body
                 if not data:
-                    raise ValueError("update requires at least one of title or body")
+                    raise MissingArgument("update requires at least one of title or body")
                 await gitea_patch(f"{base}/{issue_number}", data)
                 ac.finish("ok")
                 return {"repo": repo, "number": issue_number, "updated": True}
 
             if method == "add_comment":
                 if not comment:
-                    raise ValueError("comment is required for add_comment")
+                    raise MissingArgument("comment is required for add_comment")
                 result = await gitea_post(f"{base}/{issue_number}/comments", {"body": comment})
                 ac.finish("ok")
                 return {

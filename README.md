@@ -68,7 +68,7 @@ flowchart TD
 
 **githost-mcp fills the gap:** local git + multi-provider remote via native APIs + per-agent structured audit trail. As of the Tier-1 parity release it matches the single-provider servers on PR/MR review + diff, CI trigger/rerun/cancel, full release CRUD, and issues — across all three providers behind one audited server.
 
-## Tools (66 total)
+## Tools (69 total)
 
 Higher-verb-count capabilities (PR/MR review, CI control, issues) are exposed as
 **method-dispatch** tools — one tool takes a `method` argument and routes internally —
@@ -76,8 +76,28 @@ mirroring how the official GitHub/Gitea servers structure theirs. This adds ~40
 operations without the tool count ballooning past what every agent pays for in context.
 Each `method` still writes its own per-operation audit entry.
 
-### Local Git (13)
-`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_branch_delete_remote`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*
+### Local Git (15)
+`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_branch_delete_remote`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_push_force_with_lease`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*, `git_worktree` *(add/list/remove)*
+
+`git_worktree` (as of 0.15.0) is the one sanctioned way to get a scratch checkout. The
+destination is **computed, never caller-supplied**: `<worktree_root>/<repo>-<name>`, where
+`worktree_root` is `GITHOST_WORKTREE_ROOT` (default `~/repos/personal/_worktrees`, expanded
+at startup). `add` returns the path; run every later call against it. The root is a
+location, not a grant — each destination is still checked against the agent's write roots.
+`remove` never forces: a worktree with uncommitted or untracked files is refused with
+git's own message. Before this verb, agents guessed `/tmp/…`, `~/scratch/…` and
+`~/worktrees/…`, and githost-mcp refused every one.
+
+`git_push_force_with_lease` (as of 0.15.0) updates a rebased branch. It always sends
+`--force-with-lease=refs/heads/<branch>:<expected_sha>`, with `expected_sha` required as a
+full 40-hex sha — without an explicit sha the lease compares against the remote-tracking
+ref, which a `git fetch` silently moves, and protects nothing. `main`, `master` and the
+remote's default branch are refused before any push (and the default-branch check fails
+closed when the default cannot be determined). It is a separate tool, not a flag on
+`git_push`, for the same reason `git_branch_delete_remote` is: HITL gates on tool names.
+
+Paths: `repo_path` may start with `~` (as of 0.15.0). Validation expands and resolves it,
+and the git operation runs on that same resolved path — never on the literal string.
 
 `git_branch` takes `force` (as of 0.13.0), which applies to `delete` only. Without it,
 deletion uses `git branch -d` semantics, which require the branch be an ancestor of HEAD.
@@ -134,8 +154,13 @@ rejected push as a success. `flags` are decoded to reason names (e.g. `["REJECTE
 credential-scrubbed (see Credential isolation below). On success, a missing upstream is
 set automatically and reported as `upstream_set: true`.
 
-### GitHub (17)
-`github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
+### GitHub (18)
+`github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_update`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
+
+`github_pr_update` (as of 0.15.0) edits title, body or base, and with
+`ready_for_review=True` takes a draft out of draft through PyGithub's
+`mark_ready_for_review()` — REST cannot change `draft`. The PR number and its review
+threads survive, which close-and-recreate did not. It cannot close a PR.
 
 ### Gitea (14)
 `gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_release_update`, `gitea_release_delete`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`, `gitea_pr_review` *(get_diff/get_files/submit_review/dismiss_review)*, `gitea_actions` *(list_runs/get_run/list_jobs/get_job_log/dispatch_workflow/rerun_run/rerun_failed_jobs)*, `gitea_issue_read` *(get/list/comments)*, `gitea_issue_write` *(create/update/add_comment/close/reopen)*
