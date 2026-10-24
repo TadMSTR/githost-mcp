@@ -252,3 +252,45 @@ async def test_gitea_omitted_review_event_is_missing_not_invalid():
     assert "event is required" in out["error"]
     post.assert_not_called()
     assert _entries()[-1]["result"] == "error:MissingArgument"
+
+
+# --- scrub() is linear (audit F-02) --------------------------------------------------
+
+
+def test_scrub_is_linear_on_a_long_scheme_character_run():
+    """128k scheme characters with no `://` took 8.6 s through the old quadratic pattern."""
+    import time
+
+    from githost_mcp.security import redact_url_credentials
+
+    for value in ("a" * 200_000, "ab.c+d-" * 30_000, "1." * 50_000 + "a" * 100_000):
+        t0 = time.perf_counter()
+        redact_url_credentials(value)
+        assert time.perf_counter() - t0 < 0.5
+
+
+def test_reject_enum_with_a_huge_value_stays_fast():
+    import time
+
+    t0 = time.perf_counter()
+    reject_enum("t", "github", "o/r", "method", "a" * 200_000, VALID)
+    assert time.perf_counter() - t0 < 1.0
+    (entry,) = _entries()
+    assert entry["params"]["rejected_value_truncated"] is True
+
+
+def test_scrub_output_matches_the_old_pattern():
+    """The linear pattern must redact exactly what the old one did."""
+    import random
+    import re
+
+    from githost_mcp.security import redact_url_credentials
+
+    old = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s]+@")
+    rng = random.Random(4)
+    alphabet = "ab1+.-:/@ x"
+    for _ in range(20_000):
+        s = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 18)))
+        assert redact_url_credentials(s) == old.sub(lambda m: f"{m.group('scheme')}***@", s), s
+    for s in ("1https://tok@h", "x.1git://u:p@h/x", "see https://t@h and ssh://git@h:22/p"):
+        assert redact_url_credentials(s) == old.sub(lambda m: f"{m.group('scheme')}***@", s)

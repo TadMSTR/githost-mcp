@@ -183,10 +183,18 @@ def test_default_branch_from_remote_when_no_local_symref(env):
     assert remote_default_branch(clone, "origin") == "main"
 
 
-def test_default_branch_falls_back_to_local_symref_when_remote_unreachable(env):
+def test_default_branch_fails_closed_when_remote_unreachable(env):
+    """A failed ls-remote must not fall back to the possibly stale local symref (F-04)."""
     clone = env["clone"]
     err = git.GitCommandError("ls-remote", 128)
     with patch.object(type(clone.git), "ls_remote", side_effect=err):
+        assert remote_default_branch(clone, "origin") is None
+
+
+def test_default_branch_uses_local_symref_when_remote_names_none(env):
+    """The fallback is for a remote that answered without a symref line."""
+    clone = env["clone"]
+    with patch.object(type(clone.git), "ls_remote", return_value="abc123\tHEAD"):
         assert remote_default_branch(clone, "origin") == "main"
 
 

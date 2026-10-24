@@ -49,7 +49,18 @@ __all__ = [
 #
 # scp-style remotes (`git@github.com:owner/repo.git`) have no scheme and are left
 # readable — that is the form every forge remote actually uses.
-_URL_USERINFO_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s]+@")
+#
+# Linear, not quadratic (audit F-02, agent-build-workflow-2026-09 p4). The plain form
+# `[a-zA-Z][a-zA-Z0-9+.\-]*://` retries from every position in a long run of scheme
+# characters, scanning to the run's end each time: 128k chars took 8.6 s, and scrub()
+# runs on caller strings. Possessive quantifiers alone do not fix that (the scan, not the
+# backtracking, is the cost). The lookbehind lets an attempt start only at the beginning
+# of a run, and `pre` keeps leading digits/`+.-` so `1https://tok@h` is still redacted
+# exactly as before. Output-equivalent to the old pattern on a 300k-string fuzz.
+_URL_USERINFO_RE = re.compile(
+    r"(?<![a-zA-Z0-9+.\-])(?P<pre>[0-9+.\-]*+)"
+    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*+://)[^/@\s]++@"
+)
 
 # PM2 sets these variables in the process environment for its own IPC channel.
 # If they leak into spawned children, any Node.js child (npm, twine's helper
@@ -375,7 +386,7 @@ def redact_url_credentials(text: str) -> str:
     Complements mask_credentials(), which can only redact tokens it already knows
     about from config. Use both on anything derived from git remote output.
     """
-    return _URL_USERINFO_RE.sub(lambda m: f"{m.group('scheme')}***@", text)
+    return _URL_USERINFO_RE.sub(lambda m: f"{m.group('pre')}{m.group('scheme')}***@", text)
 
 
 # SECURITY[deferred]: a credential this process does not hold in its own config, appearing

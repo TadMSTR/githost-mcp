@@ -291,13 +291,16 @@ def remote_default_branch(repo: git.Repo, remote: str) -> str | None:
     Remote first because `git fetch` never updates the local `<remote>/HEAD` symref: after
     the remote renames its default branch, the local value names the old one, and a guard
     trusting it would let a force push through to the new default. The query is a
-    read-only `ls-remote --symref`. The local symref is used only when the remote cannot
-    be asked. None when neither answers — callers protecting the default must refuse.
+    read-only `ls-remote --symref`. The local symref is used only when the remote answered
+    but named no symref (some servers omit it). If the remote cannot be asked at all, the
+    answer is None, and callers protecting the default must refuse.
     """
     try:
         listing = repo.git.ls_remote("--symref", remote, "HEAD")
     except git.GitCommandError:
-        listing = ""
+        # Fail closed (audit F-04): falling back to the local symref here would trust the
+        # stale value on exactly the call where the remote could not confirm it.
+        return None
     for line in listing.splitlines():
         if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
             return line[len("ref: refs/heads/") : -len("\tHEAD")]

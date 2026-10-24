@@ -19,15 +19,17 @@ all, and the audit blind spot hiding the largest denial group.
   `--force-with-lease=refs/heads/<branch>:<expected_sha>`. `expected_sha` is required and
   must be a full 40-hex sha. `main`, `master` and the remote's default branch are refused
   before any push. The default is asked of the remote first, because `git fetch` never
-  updates a stale local `origin/HEAD` after a rename. An undeterminable default fails
-  closed. A separate tool so it can be
+  updates a stale local `origin/HEAD` after a rename. If the remote cannot be asked, the
+  push is refused rather than trusting the local value. A separate tool so it can be
   HITL-gated by name. **Manifests must gate it.**
 - **`github_pr_update`** (#925). Edits title/body/base, and `ready_for_review=True` marks a
   draft ready through PyGithub's `mark_ready_for_review()`, so the PR keeps its number
   and review threads. It has no `state` parameter and cannot close a PR.
 - **Rejected values in the audit record.** An enum rejection now records
   `params.argument` and `params.rejected_value` (null when absent). The value is scrubbed
-  first, then bounded to 64 characters, flagged by `rejected_value_truncated`. **Audit
+  first, then bounded to 64 characters, flagged by `rejected_value_truncated`. The scrub
+  removes githost-mcp's own configured tokens and URL userinfo only; an unknown
+  credential outside a URL passes through (#913). **Audit
   consumers that parse `params` will see the new keys.** Before this, the largest
   denial group (a wrong `method` on `github_issue_write`/`github_actions`, 34 calls in a
   month) recorded that agents guessed wrong but never what they guessed.
@@ -52,6 +54,10 @@ all, and the audit blind spot hiding the largest denial group.
   validation inside a root and then opened wherever the variable pointed. Repos are now
   opened with `expand_vars=False`. This was not reachable from forge's deployed brokers,
   whose cwd sits outside their own write roots, but nothing guaranteed that.
+
+- **`scrub()`'s URL-userinfo regex was quadratic.** A long run of scheme characters with
+  no `://` took 8.6 s at 128k chars, and the new rejected-value path feeds it caller
+  strings directly. It is now linear and output-equivalent.
 
 ### Changed
 
