@@ -229,3 +229,26 @@ def test_missing_method_specific_argument_is_classified():
     assert "comment is required" in out["error"]
     (entry,) = _entries()
     assert entry["result"] == "error:MissingArgument"
+
+
+def test_omitted_review_event_is_missing_not_invalid():
+    from unittest.mock import MagicMock, patch
+
+    from githost_mcp.tools import github
+
+    with patch("githost_mcp.tools.github.get_github", return_value=MagicMock()):
+        out = _tools(github)["github_pr_review"]("o/r", 1, "submit_review")
+    assert "event is required" in out["error"]
+    assert _entries()[-1]["result"] == "error:MissingArgument"
+
+
+async def test_gitea_omitted_review_event_is_missing_not_invalid():
+    from unittest.mock import AsyncMock, patch
+
+    from githost_mcp.tools import gitea
+
+    with patch("githost_mcp.tools.gitea.gitea_post", new=AsyncMock()) as post:
+        out = await _tools(gitea)["gitea_pr_review"]("o/r", 1, "submit_review")
+    assert "event is required" in out["error"]
+    post.assert_not_called()
+    assert _entries()[-1]["result"] == "error:MissingArgument"

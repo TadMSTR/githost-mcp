@@ -97,7 +97,8 @@ def test_worktree_name_accepted(name):
 
 
 @pytest.mark.parametrize(
-    "name", ["-x", "a/b", "../up", "a..b", "UPPER", "x" * 65, ".hidden", "a b", "_x"]
+    "name",
+    ["-x", "a/b", "../up", "a..b", "UPPER", "x" * 65, ".hidden", "a b", "_x", "scratch\n"],
 )
 def test_worktree_name_refused(name):
     with pytest.raises(InvalidArgument):
@@ -134,7 +135,9 @@ def test_expected_sha_accepts_full_and_lowercases():
     assert validate_expected_sha("A" * 40) == "a" * 40
 
 
-@pytest.mark.parametrize("sha", ["a" * 39, "a" * 41, "g" * 40, "abc1234", " " + "a" * 39])
+@pytest.mark.parametrize(
+    "sha", ["a" * 39, "a" * 41, "g" * 40, "abc1234", " " + "a" * 39, "a" * 40 + "\n"]
+)
 def test_expected_sha_refused(sha):
     with pytest.raises(InvalidArgument):
         validate_expected_sha(sha)
@@ -180,10 +183,18 @@ def test_default_branch_from_remote_when_no_local_symref(env):
     assert remote_default_branch(clone, "origin") == "main"
 
 
-def test_default_branch_from_local_symref_without_network(env):
+def test_default_branch_falls_back_to_local_symref_when_remote_unreachable(env):
     clone = env["clone"]
-    with patch.object(type(clone.git), "ls_remote", side_effect=AssertionError("network")):
+    err = git.GitCommandError("ls-remote", 128)
+    with patch.object(type(clone.git), "ls_remote", side_effect=err):
         assert remote_default_branch(clone, "origin") == "main"
+
+
+def test_default_branch_rename_beats_a_stale_local_symref(env):
+    """`git fetch` never updates origin/HEAD, so after a rename the local value is stale."""
+    env["origin"].git.symbolic_ref("HEAD", "refs/heads/feat")
+    assert env["clone"].git.symbolic_ref("refs/remotes/origin/HEAD").endswith("/main")
+    assert remote_default_branch(env["clone"], "origin") == "feat"
 
 
 # --- git_worktree ----------------------------------------------------------------
@@ -301,7 +312,8 @@ def test_lease_push_to_a_protected_name_never_reaches_the_network(tools, env, br
 
 
 def test_lease_push_to_the_remote_default_is_refused(tools, env):
-    env["clone"].git.symbolic_ref("refs/remotes/origin/HEAD", "refs/remotes/origin/feat")
+    # The remote renamed its default to `feat`; the clone's origin/HEAD still says main.
+    env["origin"].git.symbolic_ref("HEAD", "refs/heads/feat")
     with patch.object(git.Remote, "push", side_effect=AssertionError("pushed")):
         out = tools["git_push_force_with_lease"](env["path"], "feat", "a" * 40)
     assert "default branch" in out["error"]
@@ -389,3 +401,15 @@ def test_registry_runs_on_the_expanded_path(env, tmp_path, monkeypatch):
     register(MockMCP())
     out = registered["pypi_publish"]("~/proj")
     assert out["error"] == f"dist directory not found: {env['root'] / 'proj' / 'dist'}"
+
+
+def test_worktree_add_refuses_a_default_branch_that_parses_as_an_option(tools, env):
+    """The default branch name comes from the remote; it must not reach `git fetch` as a flag."""
+    with (
+        patch("githost_mcp.tools.git_local.remote_default_branch", return_value="--upload-pack=x"),
+        patch.object(
+            type(env["clone"].git), "fetch", side_effect=AssertionError("fetched"), create=True
+        ),
+    ):
+        out = tools["git_worktree"](env["path"], "add", name="opt", branch="b")
+    assert "must not start with '-'" in out["error"]

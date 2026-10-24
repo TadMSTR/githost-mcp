@@ -205,8 +205,9 @@ def _public_identity(repo: git.Repo, config) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 WORKTREE_METHODS = frozenset({"add", "list", "remove"})
-_WORKTREE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# fullmatch, not match: `$` also matches before a trailing newline.
+_WORKTREE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 # Refused by name before anything else runs, whatever the remote says its default is.
 ALWAYS_PROTECTED_BRANCHES = frozenset({"main", "master"})
 
@@ -215,7 +216,7 @@ def validate_worktree_name(name: str | None) -> str:
     """Return `name` if it is a safe single path segment for a worktree directory."""
     if not name:
         raise MissingArgument("name is required for add and remove")
-    if ".." in name or not _WORKTREE_NAME_RE.match(name):
+    if ".." in name or not _WORKTREE_NAME_RE.fullmatch(name):
         raise InvalidArgument(
             f"Invalid worktree name {name!r}: use 1-64 of [a-z0-9._-], starting with a "
             "letter or digit, and no '..'"
@@ -242,7 +243,7 @@ def validate_expected_sha(sha: str | None) -> str:
     if not sha:
         raise MissingArgument("expected_sha is required: the full sha the remote branch is at")
     lowered = sha.lower()
-    if not _FULL_SHA_RE.match(lowered):
+    if not _FULL_SHA_RE.fullmatch(lowered):
         raise InvalidArgument(
             f"expected_sha must be a full 40-character hex sha, got {len(sha)} characters"
         )
@@ -284,22 +285,25 @@ def parse_worktree_porcelain(text: str) -> list[dict]:
 
 
 def remote_default_branch(repo: git.Repo, remote: str) -> str | None:
-    """The remote's default branch: the local `<remote>/HEAD` first, then ask the remote.
+    """The remote's default branch: ask the remote, then fall back to `<remote>/HEAD`.
 
-    The second step is a read-only network call (`ls-remote --symref`). None when
-    neither answers — callers that protect the default branch must then refuse.
+    Remote first because `git fetch` never updates the local `<remote>/HEAD` symref: after
+    the remote renames its default branch, the local value names the old one, and a guard
+    trusting it would let a force push through to the new default. The query is a
+    read-only `ls-remote --symref`. The local symref is used only when the remote cannot
+    be asked. None when neither answers — callers protecting the default must refuse.
     """
+    try:
+        listing = repo.git.ls_remote("--symref", remote, "HEAD")
+    except git.GitCommandError:
+        listing = ""
+    for line in listing.splitlines():
+        if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+            return line[len("ref: refs/heads/") : -len("\tHEAD")]
     local = repo.git.symbolic_ref(f"refs/remotes/{remote}/HEAD", with_exceptions=False).strip()
     prefix = f"refs/remotes/{remote}/"
     if local.startswith(prefix):
         return local[len(prefix) :]
-    try:
-        listing = repo.git.ls_remote("--symref", remote, "HEAD")
-    except git.GitCommandError:
-        return None
-    for line in listing.splitlines():
-        if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
-            return line[len("ref: refs/heads/") : -len("\tHEAD")]
     return None
 
 
@@ -1120,6 +1124,9 @@ def register(mcp) -> None:
                         raise MissingArgument(
                             "base is required: origin's default branch could not be determined"
                         )
+                    # It came from the remote: a name starting with '-' would reach
+                    # `git fetch` as an option.
+                    validate_branch_name(default)
                     repo.git.fetch("origin", default)
                     base_ref = f"origin/{default}"
                 else:

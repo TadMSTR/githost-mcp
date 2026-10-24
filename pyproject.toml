@@ -13,7 +13,8 @@ dependencies = [
     # 3.2.1 is the only release clearing every open GitPython advisory (#912):
     # CVE-2026-114145 (create_submodule, unused here) has no 3.1.x fix.
     "gitpython>=3.2.1",
-    "pygithub>=2.0",
+    # 2.6.0 added PullRequest.mark_ready_for_review(), which github_pr_update needs.
+    "pygithub>=2.6.0",
     "python-gitlab>=4.0",
     "httpx>=0.27",
     "structlog>=24.0",

@@ -653,6 +653,8 @@ def register(mcp) -> None:
 
             if method == "submit_review":
                 valid_events = {"APPROVE", "REQUEST_CHANGES", "COMMENT"}
+                if event is None or event == "":
+                    raise MissingArgument("event is required for submit_review")
                 if event not in valid_events:
                     raise InvalidArgument(
                         f"event must be one of: {', '.join(sorted(valid_events))}"

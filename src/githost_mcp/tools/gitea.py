@@ -450,6 +450,8 @@ def register(mcp) -> None:
                     "REQUEST_CHANGES": "REQUEST_CHANGES",
                     "COMMENT": "COMMENT",
                 }
+                if event is None or event == "":
+                    raise MissingArgument("event is required for submit_review")
                 if event not in event_map:
                     raise InvalidArgument(f"event must be one of: {', '.join(sorted(event_map))}")
                 if event in {"REQUEST_CHANGES", "COMMENT"} and not body:

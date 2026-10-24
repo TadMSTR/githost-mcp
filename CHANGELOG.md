@@ -18,7 +18,9 @@ all, and the audit blind spot hiding the largest denial group.
 - **`git_push_force_with_lease`** (#950). Updates a rebased branch with
   `--force-with-lease=refs/heads/<branch>:<expected_sha>`. `expected_sha` is required and
   must be a full 40-hex sha. `main`, `master` and the remote's default branch are refused
-  before any push, and an undeterminable default fails closed. A separate tool so it can be
+  before any push. The default is asked of the remote first, because `git fetch` never
+  updates a stale local `origin/HEAD` after a rename. An undeterminable default fails
+  closed. A separate tool so it can be
   HITL-gated by name. **Manifests must gate it.**
 - **`github_pr_update`** (#925). Edits title/body/base, and `ready_for_review=True` marks a
   draft ready through PyGithub's `mark_ready_for_review()`, so the PR keeps its number
@@ -56,6 +58,8 @@ all, and the audit blind spot hiding the largest denial group.
 - **`gitpython>=3.2.1`** (was `>=3.1`; the deployed venv held 3.1.50). This clears every
   GitPython advisory pip-audit reports, CVE-2026-114145 included, which has no 3.1.x fix
   (#912).
+- **`pygithub>=2.6.0`** (was `>=2.0`). `PullRequest.mark_ready_for_review()`, which
+  `github_pr_update` needs, first shipped in 2.6.0.
 
 ## [0.14.0] — 2026-09-19
 
