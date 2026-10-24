@@ -43,6 +43,14 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("ALLOWED_REPO_ROOTS", str(root))
     monkeypatch.setenv("GITHOST_WORKTREE_ROOT", str(root / "_worktrees"))
     monkeypatch.setenv("AGENT_ID", "test")
+    # CI runners have no global git identity; forge does, which hid this locally.
+    for var, value in (
+        ("GIT_AUTHOR_NAME", "T"),
+        ("GIT_AUTHOR_EMAIL", "t@t"),
+        ("GIT_COMMITTER_NAME", "T"),
+        ("GIT_COMMITTER_EMAIL", "t@t"),
+    ):
+        monkeypatch.setenv(var, value)
 
     origin = git.Repo.init(tmp_path / "origin.git", bare=True, initial_branch="main")
     seed = git.Repo.clone_from(origin.git_dir, tmp_path / "seed")
