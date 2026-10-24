@@ -345,6 +345,7 @@ def test_lease_push_sends_the_explicit_lease(tools, env):
     with patch.object(git.Remote, "push", wraps=env["clone"].remotes.origin.push) as push:
         tools["git_push_force_with_lease"](env["path"], "feat", old)
     assert push.call_args.kwargs["force_with_lease"] == f"refs/heads/feat:{old}"
+    assert push.call_args.kwargs["refspec"] == "refs/heads/feat:refs/heads/feat"
     assert "force" not in push.call_args.kwargs
 
 
@@ -413,3 +414,18 @@ def test_worktree_add_refuses_a_default_branch_that_parses_as_an_option(tools, e
     ):
         out = tools["git_worktree"](env["path"], "add", name="opt", branch="b")
     assert "must not start with '-'" in out["error"]
+
+
+def test_lease_push_reports_what_the_remote_received(tools, env):
+    """If the local branch moves between the sha read and the push, report what landed."""
+    old, _new = _rewrite_feat(env)
+    clone = env["clone"]
+    real_push = git.Remote.push
+
+    def push_then_move(self, *a, **k):
+        clone.git.commit("--allow-empty", "-m", "raced in")  # local branch moves first
+        return real_push(self, *a, **k)
+
+    with patch.object(git.Remote, "push", push_then_move):
+        out = tools["git_push_force_with_lease"](env["path"], "feat", old)
+    assert out["pushed_sha"] == env["origin"].commit("feat").hexsha

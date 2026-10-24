@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from pathlib import Path
@@ -1247,6 +1248,12 @@ def register(mcp) -> None:
                     "summary": reason,
                 }
 
+            # Report what the push actually sent: the remote-tracking ref it updated. The
+            # sha read before the push misreports if the local branch moved in between.
+            # (A bare sha as the refspec source would pin it, but GitPython cannot parse
+            # the push result for one.)
+            with contextlib.suppress(IndexError, KeyError, AttributeError):
+                pushed_sha = repo.remotes[remote].refs[branch].commit.hexsha
             ac.finish("ok")
             return {
                 "pushed": branch,
