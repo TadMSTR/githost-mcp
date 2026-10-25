@@ -1,6 +1,6 @@
 # githost-mcp
 
-FastMCP server providing 66 tools across local git, GitHub, Gitea, GitLab, Woodpecker CI, release orchestration, registry publishing, and audit log queries. PR/MR review, CI control, and issues are exposed as method-dispatch tools (one tool, a `method` argument, per-operation audit).
+FastMCP server providing 69 tools across local git, GitHub, Gitea, GitLab, Woodpecker CI, release orchestration, registry publishing, and audit log queries. PR/MR review, CI control, and issues are exposed as method-dispatch tools (one tool, a `method` argument, per-operation audit).
 
 ## Structure
 
@@ -9,7 +9,8 @@ src/githost_mcp/
   server.py                  Entry point — registers all tool modules, runs lifespan
   tools/
     git_local.py             Local git ops via gitpython: status, diff, add, commit,
-                             push, pull, log, show, checkout, branch, tag
+                             push, force-with-lease push, pull, log, show, checkout,
+                             branch, tag, remote, worktree
     github.py                GitHub PRs + review/diff, Actions control, release
                              CRUD, issues (method-dispatch), workflow status
     gitea.py                 Gitea PRs + review/diff, Actions control, release
@@ -37,7 +38,7 @@ pyproject.toml
 | File                    | Role                                                     |
 |-------------------------|----------------------------------------------------------|
 | `server.py`             | FastMCP app, lifespan, tool module registration          |
-| `tools/git_local.py`    | 11 local git tools                                       |
+| `tools/git_local.py`    | 15 local git tools                                       |
 | `tools/github.py`       | GitHub PRs + review, Actions, release CRUD, issues       |
 | `tools/gitea.py`        | Gitea PRs + review, Actions, release CRUD, issues        |
 | `tools/gitlab.py`       | GitLab MRs + review, pipelines, release CRUD, issues     |
@@ -61,6 +62,7 @@ pyproject.toml
 | `WOODPECKER_URL`           | Woodpecker CI base URL                                      |
 | `WOODPECKER_TOKEN`         | Woodpecker API token                                        |
 | `ALLOWED_REPO_ROOTS`       | Comma-separated paths; required for write operations         |
+| `GITHOST_WORKTREE_ROOT`    | Where `git_worktree` puts worktrees (default `~/repos/personal/_worktrees`). A location, not a grant: still checked against the write roots |
 | `AGENT_ID`                 | Injected into audit log records                             |
 | `AGENT_MANIFEST_PATH`      | Path to this agent's manifest YAML; used as an allowlist fallback when `ALLOWED_REPO_ROOTS` is unset (default: `~/.claude/manifests/{AGENT_ID}-agent.yml`) |
 | `LOG_LEVEL`                | Logging verbosity                                           |

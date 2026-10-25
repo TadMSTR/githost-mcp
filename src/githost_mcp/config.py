@@ -36,6 +36,10 @@ class Config:
     write_globs: list[str] = field(default_factory=list)
     write_globs_deny: list[str] = field(default_factory=list)
     allowlist_source: str = "none"
+    # Where git_worktree puts scratch worktrees. Not a grant: every worktree path is
+    # still checked against allowed_write_roots, so an agent whose roots do not cover
+    # this directory simply cannot create one here.
+    worktree_root: str = ""
     git_signing_key: str = ""
     git_agent_name: str = ""
     git_agent_email: str = ""
@@ -94,6 +98,15 @@ _parse_allowed_roots = _parse_csv
 
 
 _DEFAULT_POLICY_PATH = "/etc/forge/workspace-policy.yml"
+
+# Expanded at load, never hardcoded to a home directory: when agents move to their
+# own uids (agent-isolation-2026-10 p4), `~` has to follow the process.
+#
+# An env var rather than a workspace-policy key, deliberately. The policy decides
+# where an agent may WRITE; this only decides where, among those places, githost-mcp
+# PUTS a worktree. Every destination is still validated against the write roots, so
+# the policy stays the only authority over writes and this needs no manifest change.
+_DEFAULT_WORKTREE_ROOT = "~/repos/personal/_worktrees"
 
 
 def _default_manifest_path(agent_id: str) -> str:
@@ -344,6 +357,9 @@ def load_config() -> Config:
         write_globs=_write_globs,
         write_globs_deny=_write_globs_deny,
         allowlist_source=_allowlist_source,
+        worktree_root=os.path.expanduser(
+            os.getenv("GITHOST_WORKTREE_ROOT", "") or _DEFAULT_WORKTREE_ROOT
+        ),
         git_signing_key=os.getenv("GIT_SIGNING_KEY", ""),
         git_agent_name=_git_agent_name,
         git_agent_email=_git_agent_email,
@@ -402,6 +418,7 @@ def get_config() -> Config:
             source=_config.allowlist_source,
             read_root_count=len(_config.allowed_read_roots),
             write_root_count=len(_config.allowed_write_roots),
+            worktree_root=_config.worktree_root,
         )
     return _config
 

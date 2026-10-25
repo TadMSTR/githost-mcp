@@ -53,7 +53,7 @@ def register(mcp) -> None:
         ac = AuditCtx("release", "local", repo_path, params)
 
         try:
-            validate_write_path(repo_path)
+            repo_path = validate_write_path(repo_path)
         except ValueError as e:
             ac.finish("error:ValueError", e)
             return {"error": scrub(str(e))}
@@ -85,7 +85,7 @@ def register(mcp) -> None:
         import git
 
         try:
-            repo = git.Repo(repo_path, search_parent_directories=False)
+            repo = git.Repo(repo_path, search_parent_directories=False, expand_vars=False)
         except Exception as e:
             ac.finish("error:git", e)
             return {"error": f"Cannot open repo: {e}"}

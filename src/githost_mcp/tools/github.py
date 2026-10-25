@@ -8,8 +8,9 @@ from itertools import islice
 import structlog
 
 from .._providers.github_client import get_github, github_call
-from ..audit import AuditCtx, audit_rejection
-from ..security import scrub
+from ..audit import AuditCtx, audit_rejection, reject_enum
+from ..errors import InvalidArgument, MissingArgument
+from ..security import scrub, validate_branch_name
 
 log = structlog.get_logger(__name__)
 
@@ -42,6 +43,31 @@ def _bad_repo(repo: str) -> dict | None:
     input before it reaches the client library.
     """
     return None if _REPO_RE.match(repo) else {"error": _REPO_FMT_ERR}
+
+
+def pr_edit_kwargs(
+    title: str | None, body: str | None, base: str | None, ready_for_review: bool
+) -> dict:
+    """The `PullRequest.edit()` arguments for an update; refuses an update with nothing in it.
+
+    Only fields the caller passed are sent, so an omitted field keeps its value rather
+    than being blanked. `ready_for_review` is not an edit() field: REST cannot change
+    `draft`, which is why it goes through the GraphQL mutation instead.
+    """
+    kwargs = {k: v for k, v in (("title", title), ("body", body), ("base", base)) if v is not None}
+    if not kwargs and not ready_for_review:
+        raise MissingArgument("nothing to update: pass title, body, base or ready_for_review=True")
+    if "base" in kwargs:
+        validate_branch_name(kwargs["base"])
+    return kwargs
+
+
+# Where a read-shaped request lands on a write-dispatch tool, the rejection names the
+# sibling that serves it. Agents reached for read methods here 34 times in a month.
+_HINT_GITHUB_ACTIONS = (
+    "For listing runs or reading a run's status, use github_workflow_list or github_workflow_status"
+)
+_HINT_GITHUB_ISSUE_WRITE = "To read an issue, list issues or read comments, use github_issue_read"
 
 
 def register(mcp) -> None:
@@ -412,6 +438,73 @@ def register(mcp) -> None:
             return _err(e)
 
     @mcp.tool
+    def github_pr_update(
+        repo: str,
+        pr_number: int,
+        title: str | None = None,
+        body: str | None = None,
+        base: str | None = None,
+        ready_for_review: bool = False,
+    ) -> dict:
+        """Edit a GitHub pull request, and/or take it out of draft.
+
+        Keeps the PR number and its review threads — the alternative for a draft was
+        close-and-recreate, which loses both. Only the fields you pass change.
+        Closing or reopening is not done here.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            pr_number: Pull request number.
+            title: New title (unchanged if omitted).
+            body: New description markdown (unchanged if omitted).
+            base: New base branch (unchanged if omitted).
+            ready_for_review: True to mark a draft PR ready for review. A PR that is
+                already ready is left as it is and reported as such.
+        """
+        if err := _bad_repo(repo):
+            return audit_rejection("github_pr_update", "github", repo, "bad_repo_format", err)
+        params = {
+            "repo": repo,
+            "pr_number": pr_number,
+            "fields": [
+                k for k, v in (("title", title), ("body", body), ("base", base)) if v is not None
+            ],
+            "ready_for_review": ready_for_review,
+        }
+        ac = AuditCtx("github_pr_update", "github", repo, params)
+        try:
+            kwargs = pr_edit_kwargs(title, body, base, ready_for_review)
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+            pr = github_call(gh_repo.get_pull, pr_number)
+            was_draft = bool(pr.draft)
+            if kwargs:
+                github_call(pr.edit, **kwargs)
+            marked_ready = False
+            if ready_for_review and was_draft:
+                github_call(pr.mark_ready_for_review)
+                marked_ready = True
+            # Re-read rather than trusting the call results: the answer the caller
+            # needs is the PR's state now, not what we asked for.
+            pr = github_call(gh_repo.get_pull, pr_number)
+            if ready_for_review and pr.draft:
+                raise ValueError(f"PR #{pr_number} is still a draft after mark_ready_for_review")
+            ac.finish("ok")
+            return {
+                "number": pr.number,
+                "title": pr.title,
+                "base": pr.base.ref,
+                "draft": pr.draft,
+                "was_draft": was_draft,
+                "marked_ready": marked_ready,
+                "updated_fields": sorted(kwargs),
+                "url": pr.html_url,
+            }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return _err(e)
+
+    @mcp.tool
     def github_pr_merge(
         repo: str,
         pr_number: int,
@@ -434,12 +527,13 @@ def register(mcp) -> None:
             return audit_rejection("github_pr_merge", "github", repo, "bad_repo_format", err)
         valid_methods = {"merge", "squash", "rebase"}
         if merge_method not in valid_methods:
-            return audit_rejection(
+            return reject_enum(
                 "github_pr_merge",
                 "github",
                 repo,
-                "invalid_argument",
-                f"merge_method must be one of: {', '.join(sorted(valid_methods))}",
+                "merge_method",
+                merge_method,
+                valid_methods,
             )
         ac = AuditCtx(
             "github_pr_merge",
@@ -499,12 +593,13 @@ def register(mcp) -> None:
             return audit_rejection("github_pr_review", "github", repo, "bad_repo_format", err)
         valid = {"get_diff", "get_files", "get_reviews", "submit_review", "dismiss_review"}
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "github_pr_review",
                 "github",
                 repo,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
             )
         ac = AuditCtx(
             "github_pr_review",
@@ -558,10 +653,14 @@ def register(mcp) -> None:
 
             if method == "submit_review":
                 valid_events = {"APPROVE", "REQUEST_CHANGES", "COMMENT"}
+                if event is None or event == "":
+                    raise MissingArgument("event is required for submit_review")
                 if event not in valid_events:
-                    raise ValueError(f"event must be one of: {', '.join(sorted(valid_events))}")
+                    raise InvalidArgument(
+                        f"event must be one of: {', '.join(sorted(valid_events))}"
+                    )
                 if event in {"REQUEST_CHANGES", "COMMENT"} and not body:
-                    raise ValueError(f"body is required when event is {event}")
+                    raise MissingArgument(f"body is required when event is {event}")
                 review = github_call(pr.create_review, body=body or "", event=event)
                 ac.finish("ok")
                 return {
@@ -574,9 +673,9 @@ def register(mcp) -> None:
 
             # dismiss_review
             if review_id is None:
-                raise ValueError("review_id is required for dismiss_review")
+                raise MissingArgument("review_id is required for dismiss_review")
             if not message:
-                raise ValueError("message is required for dismiss_review")
+                raise MissingArgument("message is required for dismiss_review")
             review = github_call(pr.get_review, review_id)
             github_call(review.dismiss, message)
             ac.finish("ok")
@@ -631,12 +730,14 @@ def register(mcp) -> None:
             "get_run_logs",
         }
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "github_actions",
                 "github",
                 repo,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
+                hint=_HINT_GITHUB_ACTIONS,
             )
         ac = AuditCtx("github_actions", "github", repo, {"repo": repo, "method": method})
         try:
@@ -645,7 +746,7 @@ def register(mcp) -> None:
 
             if method == "run_workflow":
                 if not workflow or not ref:
-                    raise ValueError("workflow and ref are required for run_workflow")
+                    raise MissingArgument("workflow and ref are required for run_workflow")
                 wf = github_call(gh_repo.get_workflow, workflow)
                 if inputs:
                     created = github_call(wf.create_dispatch, ref, inputs)
@@ -655,7 +756,7 @@ def register(mcp) -> None:
                 return {"repo": repo, "workflow": workflow, "ref": ref, "dispatched": bool(created)}
 
             if run_id is None:
-                raise ValueError(f"run_id is required for {method}")
+                raise MissingArgument(f"run_id is required for {method}")
             run = github_call(gh_repo.get_workflow_run, run_id)
 
             if method == "rerun_workflow":
@@ -792,12 +893,13 @@ def register(mcp) -> None:
             return audit_rejection("github_issue_read", "github", repo, "bad_repo_format", err)
         valid = {"get", "list", "comments"}
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "github_issue_read",
                 "github",
                 repo,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
             )
         ac = AuditCtx("github_issue_read", "github", repo, {"repo": repo, "method": method})
         try:
@@ -824,7 +926,7 @@ def register(mcp) -> None:
                 return {"repo": repo, "issues": issues}
 
             if issue_number is None:
-                raise ValueError(f"issue_number is required for {method}")
+                raise MissingArgument(f"issue_number is required for {method}")
             issue = github_call(gh_repo.get_issue, issue_number)
 
             if method == "get":
@@ -895,12 +997,14 @@ def register(mcp) -> None:
             return audit_rejection("github_issue_write", "github", repo, "bad_repo_format", err)
         valid = {"create", "update", "add_comment", "close", "reopen"}
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "github_issue_write",
                 "github",
                 repo,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
+                hint=_HINT_GITHUB_ISSUE_WRITE,
             )
         ac = AuditCtx("github_issue_write", "github", repo, {"repo": repo, "method": method})
         try:
@@ -909,7 +1013,7 @@ def register(mcp) -> None:
 
             if method == "create":
                 if not title:
-                    raise ValueError("title is required for create")
+                    raise MissingArgument("title is required for create")
                 kwargs: dict = {"title": title}
                 if body is not None:
                     kwargs["body"] = body
@@ -927,7 +1031,7 @@ def register(mcp) -> None:
                 }
 
             if issue_number is None:
-                raise ValueError(f"issue_number is required for {method}")
+                raise MissingArgument(f"issue_number is required for {method}")
             issue = github_call(gh_repo.get_issue, issue_number)
 
             if method == "update":
@@ -937,14 +1041,14 @@ def register(mcp) -> None:
                 if body is not None:
                     kwargs["body"] = body
                 if not kwargs:
-                    raise ValueError("update requires at least one of title or body")
+                    raise MissingArgument("update requires at least one of title or body")
                 github_call(issue.edit, **kwargs)
                 ac.finish("ok")
                 return {"repo": repo, "number": issue_number, "updated": True}
 
             if method == "add_comment":
                 if not comment:
-                    raise ValueError("comment is required for add_comment")
+                    raise MissingArgument("comment is required for add_comment")
                 c = github_call(issue.create_comment, comment)
                 ac.finish("ok")
                 return {"repo": repo, "issue": issue_number, "comment_id": c.id, "url": c.html_url}

@@ -374,7 +374,7 @@ def test_gitlab_mr_review_get_approval_state(tools):
 def test_gitlab_mr_review_rejects_bad_method(tools):
     result = tools["gitlab_mr_review"]("owner/project", 5, "nuke")
     assert "error" in result
-    assert "method must be one of" in result["error"]
+    assert "is not valid; must be one of" in result["error"]
 
 
 def test_gitlab_mr_review_rejects_bad_project(tools):
@@ -480,7 +480,7 @@ def test_gitlab_pipeline_get_job_log(tools):
 def test_gitlab_pipeline_rejects_bad_method(tools):
     result = tools["gitlab_pipeline"]("owner/project", "nuke")
     assert "error" in result
-    assert "method must be one of" in result["error"]
+    assert "is not valid; must be one of" in result["error"]
 
 
 # --------------------------------------------------------------------------

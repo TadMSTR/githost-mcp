@@ -7,7 +7,8 @@ import re
 import structlog
 
 from .._providers.gitlab_client import get_gitlab, gitlab_call
-from ..audit import AuditCtx, audit_rejection
+from ..audit import AuditCtx, audit_rejection, reject_enum
+from ..errors import MissingArgument
 from ..security import scrub
 
 log = structlog.get_logger(__name__)
@@ -33,6 +34,11 @@ def _bad_project(project: str) -> dict | None:
     paths and numeric project IDs (both valid GitLab forms).
     """
     return None if _PROJECT_RE.match(project) else {"error": _PROJECT_FMT_ERR}
+
+
+# Where a read-shaped request lands on a write-dispatch tool, the rejection names the
+# sibling that serves it. Agents reached for read methods here 34 times in a month.
+_HINT_GITLAB_ISSUE_WRITE = "To read an issue, list issues or read comments, use gitlab_issue_read"
 
 
 def register(mcp) -> None:
@@ -319,12 +325,13 @@ def register(mcp) -> None:
             return audit_rejection("gitlab_mr_review", "gitlab", project, "bad_repo_format", err)
         valid = {"get_diffs", "get_changed_files", "approve", "unapprove", "get_approval_state"}
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "gitlab_mr_review",
                 "gitlab",
                 project,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
             )
         ac = AuditCtx(
             "gitlab_mr_review",
@@ -429,12 +436,13 @@ def register(mcp) -> None:
             return audit_rejection("gitlab_pipeline", "gitlab", project, "bad_repo_format", err)
         valid = {"list", "get", "create", "retry", "cancel", "get_job_log"}
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "gitlab_pipeline",
                 "gitlab",
                 project,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
             )
         ac = AuditCtx("gitlab_pipeline", "gitlab", project, {"project": project, "method": method})
         try:
@@ -457,7 +465,7 @@ def register(mcp) -> None:
 
             if method == "create":
                 if not ref:
-                    raise ValueError("ref is required for create")
+                    raise MissingArgument("ref is required for create")
                 pipe = gitlab_call(proj.pipelines.create, {"ref": ref})
                 ac.finish("ok")
                 return {
@@ -470,7 +478,7 @@ def register(mcp) -> None:
 
             if method == "get_job_log":
                 if job_id is None:
-                    raise ValueError("job_id is required for get_job_log")
+                    raise MissingArgument("job_id is required for get_job_log")
                 job = gitlab_call(proj.jobs.get, job_id)
                 trace = gitlab_call(job.trace)
                 if isinstance(trace, bytes):
@@ -480,7 +488,7 @@ def register(mcp) -> None:
 
             # get / retry / cancel all need a pipeline_id
             if pipeline_id is None:
-                raise ValueError(f"pipeline_id is required for {method}")
+                raise MissingArgument(f"pipeline_id is required for {method}")
             pipe = gitlab_call(proj.pipelines.get, pipeline_id)
 
             if method == "get":
@@ -598,12 +606,13 @@ def register(mcp) -> None:
             return audit_rejection("gitlab_issue_read", "gitlab", project, "bad_repo_format", err)
         valid = {"get", "list", "comments"}
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "gitlab_issue_read",
                 "gitlab",
                 project,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
             )
         ac = AuditCtx(
             "gitlab_issue_read", "gitlab", project, {"project": project, "method": method}
@@ -629,7 +638,7 @@ def register(mcp) -> None:
                 return {"project": project, "issues": issues}
 
             if issue_iid is None:
-                raise ValueError(f"issue_iid is required for {method}")
+                raise MissingArgument(f"issue_iid is required for {method}")
             issue = gitlab_call(proj.issues.get, issue_iid)
 
             if method == "get":
@@ -698,12 +707,14 @@ def register(mcp) -> None:
             return audit_rejection("gitlab_issue_write", "gitlab", project, "bad_repo_format", err)
         valid = {"create", "update", "add_comment", "close", "reopen"}
         if method not in valid:
-            return audit_rejection(
+            return reject_enum(
                 "gitlab_issue_write",
                 "gitlab",
                 project,
-                "invalid_argument",
-                f"method must be one of: {', '.join(sorted(valid))}",
+                "method",
+                method,
+                valid,
+                hint=_HINT_GITLAB_ISSUE_WRITE,
             )
         ac = AuditCtx(
             "gitlab_issue_write", "gitlab", project, {"project": project, "method": method}
@@ -714,7 +725,7 @@ def register(mcp) -> None:
 
             if method == "create":
                 if not title:
-                    raise ValueError("title is required for create")
+                    raise MissingArgument("title is required for create")
                 data: dict = {"title": title}
                 if description is not None:
                     data["description"] = description
@@ -730,7 +741,7 @@ def register(mcp) -> None:
                 }
 
             if issue_iid is None:
-                raise ValueError(f"issue_iid is required for {method}")
+                raise MissingArgument(f"issue_iid is required for {method}")
             issue = gitlab_call(proj.issues.get, issue_iid)
 
             if method == "update":
@@ -742,14 +753,14 @@ def register(mcp) -> None:
                     issue.description = description
                     changed = True
                 if not changed:
-                    raise ValueError("update requires at least one of title or description")
+                    raise MissingArgument("update requires at least one of title or description")
                 gitlab_call(issue.save)
                 ac.finish("ok")
                 return {"project": project, "iid": issue_iid, "updated": True}
 
             if method == "add_comment":
                 if not comment:
-                    raise ValueError("comment is required for add_comment")
+                    raise MissingArgument("comment is required for add_comment")
                 note = gitlab_call(issue.notes.create, {"body": comment})
                 ac.finish("ok")
                 return {"project": project, "issue_iid": issue_iid, "comment_id": note.id}

@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import re
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import git
 import structlog
 
 from .._providers.github_client import get_github, github_call
-from ..audit import AuditCtx
+from ..audit import AuditCtx, reject_enum
 from ..config import get_config
-from ..errors import NoSuchRemote, RepoNotFound
+from ..errors import (
+    InvalidArgument,
+    MissingArgument,
+    NoSuchRemote,
+    ProtectedBranch,
+    RepoNotFound,
+)
 from ..gitflags import evaluate_fetch, evaluate_push
 from ..identity import (
     IDENTITY_AGENT,
@@ -27,6 +37,7 @@ from ..identity import (
 from ..security import (
     RemoteUrlRejected,
     WriteGlobDenied,
+    canonical_path,
     redact_url_credentials,
     scrub,
     validate_branch_name,
@@ -41,8 +52,11 @@ log = structlog.get_logger(__name__)
 
 
 def _open_repo(repo_path: str) -> git.Repo:
+    # expand_vars=False: GitPython runs os.path.expandvars() on the path by default, so
+    # `<root>/$VAR` would pass validation as a literal path and then open wherever $VAR
+    # points. Callers pass the canonical path validation returned; open exactly that.
     try:
-        return git.Repo(repo_path, search_parent_directories=False)
+        return git.Repo(repo_path, search_parent_directories=False, expand_vars=False)
     except git.InvalidGitRepositoryError:
         raise RepoNotFound(f"Not a git repository: {repo_path}") from None
     except git.NoSuchPathError:
@@ -134,7 +148,7 @@ def _resolve_identity_mode(repo: git.Repo, requested: str, config) -> tuple[str,
     if requested in (IDENTITY_AGENT, IDENTITY_PUBLIC):
         return requested, f"explicitly requested by caller (identity={requested})"
     if requested != IDENTITY_AUTO:
-        raise ValueError(f"Unknown identity '{requested}'; use auto, agent, or public")
+        raise InvalidArgument(f"Unknown identity '{requested}'; use auto, agent, or public")
 
     remote_urls = {r.name: r.url for r in repo.remotes}
     ownership = resolve_ownership(
@@ -185,6 +199,127 @@ def _public_identity(repo: git.Repo, config) -> tuple[str, str]:
     return resolve_public_identity(str(name), str(email))
 
 
+# ---------------------------------------------------------------------------
+# Worktrees and lease pushes — guard logic lives here, outside the @mcp.tool bodies,
+# so mutation testing can reach it (mutmut generates no mutants inside a decorated
+# tool function).
+# ---------------------------------------------------------------------------
+
+WORKTREE_METHODS = frozenset({"add", "list", "remove"})
+# fullmatch, not match: `$` also matches before a trailing newline.
+_WORKTREE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+# Refused by name before anything else runs, whatever the remote says its default is.
+ALWAYS_PROTECTED_BRANCHES = frozenset({"main", "master"})
+
+
+def validate_worktree_name(name: str | None) -> str:
+    """Return `name` if it is a safe single path segment for a worktree directory."""
+    if not name:
+        raise MissingArgument("name is required for add and remove")
+    if ".." in name or not _WORKTREE_NAME_RE.fullmatch(name):
+        raise InvalidArgument(
+            f"Invalid worktree name {name!r}: use 1-64 of [a-z0-9._-], starting with a "
+            "letter or digit, and no '..'"
+        )
+    return name
+
+
+def validate_ref_arg(argument: str, value: str) -> str:
+    """Refuse a ref argument git would read as an option, or that cannot be a ref."""
+    if value.startswith("-"):
+        raise InvalidArgument(f"{argument} must not start with '-'")
+    if not value or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        raise InvalidArgument(f"{argument} must be a non-empty ref with no whitespace")
+    return value
+
+
+def validate_expected_sha(sha: str | None) -> str:
+    """A lease needs the exact remote sha the caller last saw: 40 hex, nothing shorter.
+
+    An abbreviated sha would make git resolve it locally, and a missing one makes
+    `--force-with-lease` compare against the remote-tracking ref, which any `git fetch`
+    silently moves — the lease would then protect nothing.
+    """
+    if not sha:
+        raise MissingArgument("expected_sha is required: the full sha the remote branch is at")
+    lowered = sha.lower()
+    if not _FULL_SHA_RE.fullmatch(lowered):
+        raise InvalidArgument(
+            f"expected_sha must be a full 40-character hex sha, got {len(sha)} characters"
+        )
+    return lowered
+
+
+def main_repo_name(repo: git.Repo) -> str:
+    """Basename of the main checkout, also when `repo` is itself a linked worktree."""
+    common = repo.git.rev_parse("--path-format=absolute", "--git-common-dir")
+    return Path(common).parent.name
+
+
+def worktree_destination(root: str, repo_name: str, name: str) -> str:
+    """`<root>/<repo>-<name>`, canonical. Computed here, never taken from the caller."""
+    return str(canonical_path(os.path.join(root, f"{repo_name}-{name}")))
+
+
+def parse_worktree_porcelain(text: str) -> list[dict]:
+    """Parse `git worktree list --porcelain` into one dict per worktree."""
+    entries: list[dict] = []
+    current: dict | None = None
+    for line in text.splitlines():
+        if not line.strip():
+            current = None
+            continue
+        key, _, value = line.partition(" ")
+        if key == "worktree":
+            current = {"path": value, "head": None, "branch": None}
+            entries.append(current)
+        elif current is None:
+            continue
+        elif key == "HEAD":
+            current["head"] = value
+        elif key == "branch":
+            current["branch"] = value.removeprefix("refs/heads/")
+        elif key in ("bare", "detached", "locked", "prunable"):
+            current[key] = value or True
+    return entries
+
+
+def remote_default_branch(repo: git.Repo, remote: str) -> str | None:
+    """The remote's default branch: ask the remote, then fall back to `<remote>/HEAD`.
+
+    Remote first because `git fetch` never updates the local `<remote>/HEAD` symref: after
+    the remote renames its default branch, the local value names the old one, and a guard
+    trusting it would let a force push through to the new default. The query is a
+    read-only `ls-remote --symref`. The local symref is used only when the remote answered
+    but named no symref (some servers omit it). If the remote cannot be asked at all, the
+    answer is None, and callers protecting the default must refuse.
+    """
+    try:
+        listing = repo.git.ls_remote("--symref", remote, "HEAD")
+    except git.GitCommandError:
+        # Fail closed (audit F-04): falling back to the local symref here would trust the
+        # stale value on exactly the call where the remote could not confirm it.
+        return None
+    for line in listing.splitlines():
+        if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+            return line[len("ref: refs/heads/") : -len("\tHEAD")]
+    local = repo.git.symbolic_ref(f"refs/remotes/{remote}/HEAD", with_exceptions=False).strip()
+    prefix = f"refs/remotes/{remote}/"
+    if local.startswith(prefix):
+        return local[len(prefix) :]
+    return None
+
+
+def protected_branch_reason(branch: str, default_branch: str | None) -> str | None:
+    """Why a force push to `branch` is refused, or None when it is allowed."""
+    if branch in ALWAYS_PROTECTED_BRANCHES:
+        return f"'{branch}' is always protected from force pushes"
+    if default_branch is not None and branch == default_branch:
+        return f"'{branch}' is the remote's default branch"
+    return None
+
+
 def register(mcp) -> None:
     @mcp.tool
     def git_status(repo_path: str) -> dict:
@@ -195,7 +330,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_status", "local", repo_path, {"repo_path": repo_path})
         try:
-            validate_read_path(repo_path)
+            repo_path = validate_read_path(repo_path)
             repo = _open_repo(repo_path)
             staged = (
                 [item.a_path for item in repo.index.diff("HEAD")] if repo.head.is_valid() else []
@@ -234,7 +369,7 @@ def register(mcp) -> None:
             {"repo_path": repo_path, "staged": staged, "file_path": file_path},
         )
         try:
-            validate_read_path(repo_path)
+            repo_path = validate_read_path(repo_path)
             repo = _open_repo(repo_path)
             kwargs = {}
             if file_path:
@@ -274,7 +409,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_log", "local", repo_path, {"repo_path": repo_path, "limit": limit})
         try:
-            validate_read_path(repo_path)
+            repo_path = validate_read_path(repo_path)
             limit = min(limit, 200)
             repo = _open_repo(repo_path)
             ref = branch or repo.active_branch.name
@@ -304,7 +439,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_show", "local", repo_path, {"repo_path": repo_path, "ref": ref})
         try:
-            validate_read_path(repo_path)
+            repo_path = validate_read_path(repo_path)
             repo = _open_repo(repo_path)
             commit = repo.commit(ref)
             ac.finish("ok")
@@ -364,9 +499,9 @@ def register(mcp) -> None:
         ac = AuditCtx("git_branch", "local", repo_path, params)
         try:
             if action == "list":
-                validate_read_path(repo_path)
+                repo_path = validate_read_path(repo_path)
             else:
-                validate_write_path(repo_path)
+                repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             if action == "list":
                 branches = [b.name for b in repo.branches]
@@ -374,7 +509,7 @@ def register(mcp) -> None:
                 return {"branches": branches, "active": repo.active_branch.name}
             elif action == "create":
                 if not branch_name:
-                    raise ValueError("branch_name required for create")
+                    raise MissingArgument("branch_name required for create")
                 repo.create_head(branch_name)
                 ac.finish("ok")
                 # `create` deliberately does NOT check out — `git branch` and
@@ -390,7 +525,7 @@ def register(mcp) -> None:
                 }
             elif action == "delete":
                 if not branch_name:
-                    raise ValueError("branch_name required for delete")
+                    raise MissingArgument("branch_name required for delete")
                 # Captured before the delete: once the head is gone the sha is only
                 # reachable from the reflog, and it is the one thing that makes a
                 # forced delete recoverable.
@@ -406,7 +541,7 @@ def register(mcp) -> None:
                     "forced": force,
                 }
             else:
-                raise ValueError(f"Unknown action '{action}'; use list, create, or delete")
+                raise InvalidArgument(f"Unknown action '{action}'; use list, create, or delete")
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
@@ -443,7 +578,7 @@ def register(mcp) -> None:
         params = {"repo_path": repo_path, "branch_name": branch_name, "remote": remote}
         ac = AuditCtx("git_branch_delete_remote", "local", repo_path, params)
         try:
-            validate_write_path(repo_path)
+            repo_path = validate_write_path(repo_path)
             validate_remote_name(remote)
             validate_branch_name(branch_name)
             repo = _open_repo(repo_path)
@@ -545,7 +680,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_checkout", "local", repo_path, {"repo_path": repo_path, "ref": ref})
         try:
-            validate_write_path(repo_path)
+            repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             repo.git.checkout(ref)
             ac.finish("ok")
@@ -591,9 +726,9 @@ def register(mcp) -> None:
         ac = AuditCtx("git_remote", "local", repo_path, params)
         try:
             if action == "list":
-                validate_read_path(repo_path)
+                repo_path = validate_read_path(repo_path)
             else:
-                validate_write_path(repo_path)
+                repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
 
             if action == "list":
@@ -620,7 +755,7 @@ def register(mcp) -> None:
                 ac.finish("ok")
                 return {"removed": name}
 
-            raise ValueError(f"Unknown action '{action}'; use list, add, or remove")
+            raise InvalidArgument(f"Unknown action '{action}'; use list, add, or remove")
         except RemoteUrlRejected as e:
             ac.finish("denied:remote_url", e)
             return {"error": scrub(str(e))}
@@ -638,7 +773,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_add", "local", repo_path, {"repo_path": repo_path, "paths": paths})
         try:
-            validate_write_path(repo_path)
+            repo_path = validate_write_path(repo_path)
             validate_write_globs(repo_path, paths)
             repo = _open_repo(repo_path)
             # Use git binary to stage files; repo.index.add(["."])  would recurse
@@ -682,7 +817,7 @@ def register(mcp) -> None:
             "git_commit", "local", repo_path, {"repo_path": repo_path, "identity": identity}
         )
         try:
-            validate_write_path(repo_path)
+            repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             # Enforced against the staged set, not the paths a prior git_add call named —
             # git_commit commits whatever is staged regardless of what staged it, so
@@ -759,7 +894,7 @@ def register(mcp) -> None:
         params = {"repo_path": repo_path, "remote": remote, "branch": branch}
         ac = AuditCtx("git_push", "local", repo_path, params)
         try:
-            validate_write_path(repo_path)
+            repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             branch_name = branch or repo.active_branch.name
             # Captured before the push so the reported sha is the one that was
@@ -828,7 +963,7 @@ def register(mcp) -> None:
         """
         ac = AuditCtx("git_pull", "local", repo_path, {"repo_path": repo_path, "remote": remote})
         try:
-            validate_write_path(repo_path)
+            repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             outcome = evaluate_fetch(repo.remotes[remote].pull())
 
@@ -876,7 +1011,7 @@ def register(mcp) -> None:
         params = {"repo_path": repo_path, "tag_name": tag_name, "push": push, "remote": remote}
         ac = AuditCtx("git_tag", "local", repo_path, params)
         try:
-            validate_write_path(repo_path)
+            repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             tag_msg = message or tag_name
             tag = repo.create_tag(tag_name, message=tag_msg)
@@ -912,6 +1047,227 @@ def register(mcp) -> None:
                 result["flags"] = outcome.flags
             ac.finish("ok")
             return result
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return {"error": scrub(str(e))}
+
+    @mcp.tool
+    def git_worktree(
+        repo_path: str,
+        method: str,
+        name: str | None = None,
+        branch: str | None = None,
+        base: str | None = None,
+    ) -> dict:
+        """Create, list or remove scratch worktrees in the one sanctioned location.
+
+        Use this for any work that must not disturb a repo's main checkout — some
+        checkouts on forge are production trees and must stay on their default
+        branch. Never create worktrees by hand under /tmp, ~/scratch or ~/worktrees:
+        githost-mcp refuses writes there.
+
+        The destination is computed, not chosen: `<worktree_root>/<repo>-<name>`.
+        `add` returns it as `path` — run every later git_* call against that path.
+
+        Methods:
+          - add: create branch `branch` from `base` in a new worktree. `base` defaults
+            to the remote default branch, freshly fetched from origin.
+          - list: every worktree of the repo, with `under_worktree_root` marked.
+          - remove: remove the worktree `name`. A worktree with uncommitted or
+            untracked changes is refused, never forced. The branch is kept.
+
+        Args:
+            repo_path: Absolute path to the repository (its main checkout or any worktree).
+            method: add | list | remove.
+            name: Short name, [a-z0-9._-], 1-64 chars (add, remove).
+            branch: New branch to create (add).
+            base: Ref to branch from (add; default: origin's default branch).
+        """
+        if method not in WORKTREE_METHODS:
+            return reject_enum(
+                "git_worktree", "local", repo_path, "method", method, WORKTREE_METHODS
+            )
+        params = {
+            "repo_path": repo_path,
+            "method": method,
+            "name": name,
+            "branch": branch,
+            "base": base,
+        }
+        ac = AuditCtx("git_worktree", "local", repo_path, params)
+        try:
+            config = get_config()
+            root = str(canonical_path(config.worktree_root))
+            if method == "list":
+                repo_path = validate_read_path(repo_path)
+                repo = _open_repo(repo_path)
+                entries = parse_worktree_porcelain(repo.git.worktree("list", "--porcelain"))
+                for entry in entries:
+                    entry["under_worktree_root"] = Path(entry["path"]).is_relative_to(root)
+                ac.finish("ok")
+                return {"repo": repo_path, "worktree_root": root, "worktrees": entries}
+
+            repo_path = validate_write_path(repo_path)
+            validate_worktree_name(name)
+            repo = _open_repo(repo_path)
+            # Validated like any other write target: worktree_root is a location, not a
+            # grant, so an agent whose write roots do not cover it is refused here.
+            dest = validate_write_path(worktree_destination(root, main_repo_name(repo), name))
+
+            if method == "add":
+                if not branch:
+                    raise MissingArgument("branch is required for add")
+                validate_branch_name(branch)
+                if os.path.lexists(dest):
+                    raise InvalidArgument(
+                        f"{dest} already exists. Pick another name, or remove the old worktree."
+                    )
+                if base is None:
+                    default = remote_default_branch(repo, "origin")
+                    if default is None:
+                        raise MissingArgument(
+                            "base is required: origin's default branch could not be determined"
+                        )
+                    # It came from the remote: a name starting with '-' would reach
+                    # `git fetch` as an option.
+                    validate_branch_name(default)
+                    repo.git.fetch("origin", default)
+                    base_ref = f"origin/{default}"
+                else:
+                    base_ref = validate_ref_arg("base", base)
+                os.makedirs(root, exist_ok=True)
+                repo.git.worktree("add", "-b", branch, dest, base_ref)
+                head_sha = _open_repo(dest).head.commit.hexsha
+                ac.finish("ok")
+                return {
+                    "path": dest,
+                    "branch": branch,
+                    "base": base_ref,
+                    "head_sha": head_sha,
+                    "note": "Use `path` as repo_path for every git_* call in this worktree.",
+                }
+
+            # remove — only a worktree this repo actually registered at that path.
+            registered = {
+                e["path"]
+                for e in parse_worktree_porcelain(repo.git.worktree("list", "--porcelain"))
+            }
+            if dest not in registered:
+                raise InvalidArgument(
+                    f"No worktree named '{name}' for this repo (looked for {dest})"
+                )
+            # No --force: git refuses a worktree with modified or untracked files, and
+            # its own message says so. A scratch tree is not ours to discard silently.
+            repo.git.worktree("remove", dest)
+            repo.git.worktree("prune")
+            ac.finish("ok")
+            return {"removed": dest, "note": "The worktree's branch was kept."}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return {"error": scrub(str(e))}
+
+    @mcp.tool
+    def git_push_force_with_lease(
+        repo_path: str,
+        branch: str,
+        expected_sha: str,
+        remote: str = "origin",
+    ) -> dict:
+        """Update a rebased branch on the remote, only if it is still where you last saw it.
+
+        DESTRUCTIVE: replaces the remote branch's history. HITL gated. A separate tool
+        rather than a flag on git_push because gating keys on the tool name.
+
+        Always `--force-with-lease=<branch>:<expected_sha>`, never a bare `--force`: if
+        anyone pushed to the branch after you read `expected_sha`, the push is refused
+        and nothing is overwritten. Get the sha from `git_log`/`github_pr_get` before
+        rebasing, not after a fetch.
+
+        Refused without any push: `main`, `master`, and the remote's default branch.
+
+        Args:
+            repo_path: Absolute path to the local git repository.
+            branch: Local branch to push to the same name on the remote.
+            expected_sha: Full 40-char sha the remote branch must still point at.
+            remote: Remote name (default: origin).
+        """
+        params = {
+            "repo_path": repo_path,
+            "branch": branch,
+            "expected_sha": expected_sha,
+            "remote": remote,
+        }
+        ac = AuditCtx("git_push_force_with_lease", "local", repo_path, params)
+        try:
+            repo_path = validate_write_path(repo_path)
+            validate_remote_name(remote)
+            validate_branch_name(branch)
+            sha = validate_expected_sha(expected_sha)
+            # By name first, before anything touches the network.
+            if reason := protected_branch_reason(branch, None):
+                raise ProtectedBranch(reason)
+            repo = _open_repo(repo_path)
+            if remote not in [r.name for r in repo.remotes]:
+                raise NoSuchRemote(f"No such remote '{remote}' in {repo_path}")
+            try:
+                pushed_sha = repo.heads[branch].commit.hexsha
+            except (IndexError, KeyError):
+                raise InvalidArgument(f"No local branch '{branch}' to push") from None
+            default = remote_default_branch(repo, remote)
+            if default is None:
+                raise ProtectedBranch(
+                    f"could not determine {remote}'s default branch, so cannot rule out "
+                    f"that '{branch}' is it; refusing"
+                )
+            if reason := protected_branch_reason(branch, default):
+                raise ProtectedBranch(reason)
+
+            try:
+                push_info = repo.remotes[remote].push(
+                    refspec=f"refs/heads/{branch}:refs/heads/{branch}",
+                    force_with_lease=f"refs/heads/{branch}:{sha}",
+                )
+            except git.GitCommandError as e:
+                reason = scrub(str(e))
+                ac.finish("error:PushRejected", reason)
+                return {"error": f"push to {remote}/{branch} failed: {reason}"}
+
+            outcome = evaluate_push(push_info)
+            if outcome.failed:
+                reason = outcome.summary or "push rejected by remote"
+                log.warning("lease_push_failed", remote=remote, branch=branch, flags=outcome.flags)
+                ac.finish("error:PushRejected", reason)
+                error = f"push to {remote}/{branch} failed: {reason}"
+                if "stale info" in reason:
+                    error += (
+                        f". The remote branch is no longer at {sha}: someone pushed after "
+                        "you read it. Fetch, review their commits, and rebase again."
+                    )
+                return {
+                    "error": error,
+                    "remote": remote,
+                    "branch": branch,
+                    "flags": outcome.flags,
+                    "summary": reason,
+                }
+
+            # Report what the push actually sent: the remote-tracking ref it updated. The
+            # sha read before the push misreports if the local branch moved in between.
+            # (A bare sha as the refspec source would pin it, but GitPython cannot parse
+            # the push result for one.)
+            with contextlib.suppress(IndexError, KeyError, AttributeError):
+                pushed_sha = repo.remotes[remote].refs[branch].commit.hexsha
+            ac.finish("ok")
+            return {
+                "pushed": branch,
+                "pushed_sha": pushed_sha,
+                "replaced_sha": sha,
+                "remote": remote,
+                "flags": outcome.flags,
+            }
+        except ProtectedBranch as e:
+            ac.finish("denied:protected_branch", e)
+            return {"error": scrub(str(e))}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}

@@ -27,6 +27,7 @@ __all__ = [
     "RemoteNameInvalid",
     "RemoteUrlRejected",
     "WriteGlobDenied",
+    "canonical_path",
     "clean_env",
     "mask_credentials",
     "redact_url_credentials",
@@ -48,7 +49,18 @@ __all__ = [
 #
 # scp-style remotes (`git@github.com:owner/repo.git`) have no scheme and are left
 # readable — that is the form every forge remote actually uses.
-_URL_USERINFO_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s]+@")
+#
+# Linear, not quadratic (audit F-02, agent-build-workflow-2026-09 p4). The plain form
+# `[a-zA-Z][a-zA-Z0-9+.\-]*://` retries from every position in a long run of scheme
+# characters, scanning to the run's end each time: 128k chars took 8.6 s, and scrub()
+# runs on caller strings. Possessive quantifiers alone do not fix that (the scan, not the
+# backtracking, is the cost). The lookbehind lets an attempt start only at the beginning
+# of a run, and `pre` keeps leading digits/`+.-` so `1https://tok@h` is still redacted
+# exactly as before. Output-equivalent to the old pattern on a 300k-string fuzz.
+_URL_USERINFO_RE = re.compile(
+    r"(?<![a-zA-Z0-9+.\-])(?P<pre>[0-9+.\-]*+)"
+    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*+://)[^/@\s]++@"
+)
 
 # PM2 sets these variables in the process environment for its own IPC channel.
 # If they leak into spawned children, any Node.js child (npm, twine's helper
@@ -78,23 +90,36 @@ def clean_env() -> dict:
     return {k: v for k, v in os.environ.items() if k not in _PM2_IPC_ENV_VARS}
 
 
+def canonical_path(repo_path: str) -> Path:
+    """The path a caller's `repo_path` names: `~` expanded, then resolved.
+
+    `Path("~/x").resolve()` does not expand `~` — it resolves to `<cwd>/~/x`, so a
+    literal `~/repos/...` was refused as outside every root (sysadmin, 2026-10-06).
+    Expanding here is only half the fix: the git operation must run on this same
+    value, not on the caller's literal string, or validation and execution disagree
+    about which directory they mean and git creates a directory named `~` under the
+    cwd. The validators below therefore return it, and every tool runs on the return.
+    """
+    try:
+        return Path(repo_path).expanduser().resolve()
+    except Exception as e:
+        raise InvalidArgument(f"Invalid repo path: {e}") from None
+
+
 def _validate_path(
     repo_path: str, roots: list[str], *, verb: str, list_name: str, source: str
-) -> None:
+) -> str:
     if not roots:
         raise PathNotAllowed(
             f"{verb} operations are disabled: no {list_name} resolved (source: {source}). "
             "Set ALLOWED_REPO_ROOTS, or grant this agent via the workspace policy or manifest."
         )
-    try:
-        resolved = Path(repo_path).resolve()
-    except Exception as e:
-        raise InvalidArgument(f"Invalid repo path: {e}") from None
+    resolved = canonical_path(repo_path)
 
     for root in roots:
         try:
-            resolved.relative_to(Path(root).resolve())
-            return
+            resolved.relative_to(Path(root).expanduser().resolve())
+            return str(resolved)
         except ValueError:
             continue
 
@@ -104,8 +129,11 @@ def _validate_path(
     )
 
 
-def validate_write_path(repo_path: str) -> None:
+def validate_write_path(repo_path: str) -> str:
     """Raise PathNotAllowed if repo_path is not under an allowed write root.
+
+    Returns the canonical path that was checked. Run the operation on that value,
+    never on the caller's original string (see canonical_path()).
 
     Also fails closed if this agent's grant carries write_globs/write_globs_deny but
     the running code has no glob-enforcement path yet (_GLOB_ENFORCEMENT_IMPLEMENTED):
@@ -120,7 +148,7 @@ def validate_write_path(repo_path: str) -> None:
             "Refusing to grant unrestricted write across allowed_write_roots instead of "
             "silently ignoring the scope. (source: " + config.allowlist_source + ")"
         )
-    _validate_path(
+    return _validate_path(
         repo_path,
         config.allowed_write_roots,
         verb="Write",
@@ -129,10 +157,13 @@ def validate_write_path(repo_path: str) -> None:
     )
 
 
-def validate_read_path(repo_path: str) -> None:
-    """Raise PathNotAllowed if repo_path is not under an allowed read root."""
+def validate_read_path(repo_path: str) -> str:
+    """Raise PathNotAllowed if repo_path is not under an allowed read root.
+
+    Returns the canonical path that was checked; run the operation on it.
+    """
     config = get_config()
-    _validate_path(
+    return _validate_path(
         repo_path,
         config.allowed_read_roots,
         verb="Read",
@@ -355,7 +386,7 @@ def redact_url_credentials(text: str) -> str:
     Complements mask_credentials(), which can only redact tokens it already knows
     about from config. Use both on anything derived from git remote output.
     """
-    return _URL_USERINFO_RE.sub(lambda m: f"{m.group('scheme')}***@", text)
+    return _URL_USERINFO_RE.sub(lambda m: f"{m.group('pre')}{m.group('scheme')}***@", text)
 
 
 # SECURITY[deferred]: a credential this process does not hold in its own config, appearing

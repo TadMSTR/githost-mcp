@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.15.0] — 2026-10-24
+
+Scoped from 14 days of measured denials (agent-build-workflow-2026-09 part 4), not from
+a wish list: the one gap with repeated hits, the two ticketed gaps with no workaround at
+all, and the audit blind spot hiding the largest denial group.
+
+### Added
+
+- **`git_worktree`** *(add/list/remove)*. Scratch worktrees in one sanctioned place:
+  `<worktree_root>/<repo>-<name>`, computed rather than caller-supplied, and returned by
+  `add`. `worktree_root` is `GITHOST_WORKTREE_ROOT` (default `~/repos/personal/_worktrees`,
+  `~` expanded at startup). It is a location, not a grant: each destination is validated
+  against the write roots. `remove` never forces, so a dirty worktree is refused. Agents
+  had been guessing `/tmp/…`, `~/scratch/…` and `~/worktrees/…`: 15 `PathNotAllowed`
+  refusals since 2026-09-27.
+- **`git_push_force_with_lease`** (#950). Updates a rebased branch with
+  `--force-with-lease=refs/heads/<branch>:<expected_sha>`. `expected_sha` is required and
+  must be a full 40-hex sha. `main`, `master` and the remote's default branch are refused
+  before any push. The default is asked of the remote first, because `git fetch` never
+  updates a stale local `origin/HEAD` after a rename. If the remote cannot be asked, the
+  push is refused rather than trusting the local value. A separate tool so it can be
+  HITL-gated by name. **Manifests must gate it.**
+- **`github_pr_update`** (#925). Edits title/body/base, and `ready_for_review=True` marks a
+  draft ready through PyGithub's `mark_ready_for_review()`, so the PR keeps its number
+  and review threads. It has no `state` parameter and cannot close a PR.
+- **Rejected values in the audit record.** An enum rejection now records
+  `params.argument` and `params.rejected_value` (null when absent). The value is scrubbed
+  first, then bounded to 64 characters, flagged by `rejected_value_truncated`. The scrub
+  removes githost-mcp's own configured tokens and URL userinfo only; an unknown
+  credential outside a URL passes through (#913). **Audit
+  consumers that parse `params` will see the new keys.** Before this, the largest
+  denial group (a wrong `method` on `github_issue_write`/`github_actions`, 34 calls in a
+  month) recorded that agents guessed wrong but never what they guessed.
+- **`reason_class` members `missing_argument` and `protected_branch`.** An empty enum
+  value and "X is required for Y" are now `missing_argument`, distinct from
+  `invalid_argument`. The in-body "required" errors used to be bare `ValueError`s,
+  counted as `other`. Their audit `result` changes from `error:ValueError` to
+  `error:MissingArgument`, and in-body unknown event/action/identity values change to
+  `error:InvalidArgument`.
+- **Rejection messages name the value and, where it applies, the sibling tool.**
+  `github_actions` points read-shaped requests at `github_workflow_list` /
+  `github_workflow_status`. Each `*_issue_write` points at its `*_issue_read`.
+
+### Fixed
+
+- **A `~` repo path was refused.** `_validate_path()` resolved without `expanduser()`, so
+  `~/repos/x` became `<cwd>/~/repos/x`. Validation now expands and resolves, returns the
+  path it checked, and every tool runs on that return value rather than the caller's
+  string.
+- **`<root>/$VAR` paths opened a different directory from the one validated.** GitPython
+  runs `expandvars()` on a repo path by default, so a literal `$VAR` segment passed
+  validation inside a root and then opened wherever the variable pointed. Repos are now
+  opened with `expand_vars=False`. This was not reachable from forge's deployed brokers,
+  whose cwd sits outside their own write roots, but nothing guaranteed that.
+
+- **`scrub()`'s URL-userinfo regex was quadratic.** A long run of scheme characters with
+  no `://` took 8.6 s at 128k chars, and the new rejected-value path feeds it caller
+  strings directly. It is now linear and output-equivalent.
+
+### Changed
+
+- **`gitpython>=3.2.1`** (was `>=3.1`; the deployed venv held 3.1.50). This clears every
+  GitPython advisory pip-audit reports, CVE-2026-114145 included, which has no 3.1.x fix
+  (#912).
+- **`pygithub>=2.6.0`** (was `>=2.0`). `PullRequest.mark_ready_for_review()`, which
+  `github_pr_update` needs, first shipped in 2.6.0.
+
 ## [0.14.0] — 2026-09-19
 
 ### Added

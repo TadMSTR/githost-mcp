@@ -249,7 +249,7 @@ async def test_gitea_pr_review_dismiss(tools):
 async def test_gitea_pr_review_rejects_bad_method(tools):
     result = await tools["gitea_pr_review"]("testowner/repo", 3, "nuke")
     assert "error" in result
-    assert "method must be one of" in result["error"]
+    assert "is not valid; must be one of" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -350,7 +350,7 @@ async def test_gitea_actions_dispatch_requires_ref(tools):
 async def test_gitea_actions_rejects_bad_method(tools):
     result = await tools["gitea_actions"]("testowner/repo", "cancel_run")
     assert "error" in result
-    assert "method must be one of" in result["error"]
+    assert "is not valid; must be one of" in result["error"]
 
 
 # --------------------------------------------------------------------------
@@ -594,7 +594,7 @@ async def test_gitea_pr_review_error_path(tools):
 async def test_gitea_issue_read_rejects_bad_method(tools):
     result = await tools["gitea_issue_read"]("testowner/repo", "purge")
     assert "error" in result
-    assert "method must be one of" in result["error"]
+    assert "is not valid; must be one of" in result["error"]
 
 
 @pytest.mark.asyncio
