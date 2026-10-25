@@ -98,8 +98,10 @@ existing path is refused, never merged into. Submodules are not cloned, since
 and a failed clone removes only the directory the call created. An agent whose grant is
 scoped by `write_globs` is refused outright, because a clone writes a whole tree. An agent
 whose grant carries `write_globs_deny` (developer's `manifests/**`) cannot pass `branch`,
-and a clone whose tree contains a denied path (a tracked symlink is checked as the
-directory it would create) is removed and refused as `denied:write_glob`. So developer cannot clone `host-forge/scripts`, whose manifests
+and a clone whose tree contains a denied path is removed and refused as
+`denied:write_glob`. A tracked symlink is refused if it sits above any denied area, at
+any depth (`config -> evil/` under a `config/secrets/*` deny); a file symlink such as
+`AGENTS.md -> CLAUDE.md` is not affected. So developer cannot clone `host-forge/scripts`, whose manifests
 sysadmin owns.
 
 `git_worktree` (as of 0.15.0) is the one sanctioned way to get a scratch checkout. The

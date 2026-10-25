@@ -1084,3 +1084,98 @@ async def test_gitea_repo_create_unconfirmed_is_visible_in_the_audit(gitea_tools
         )
         await gitea_tools["gitea_repo_create"]("host-forge", "probe", "private")
     assert _entries()[-1]["result"] == "ok:visibility_unconfirmed"
+
+
+# ---------------------------------------------------------------------------
+# Audit round 3 remediation
+# ---------------------------------------------------------------------------
+
+
+def _listing(*entries):
+    return "".join(f"{mode} {'a' * 40} 0\t{path}\0" for mode, path in entries)
+
+
+@pytest.mark.parametrize(
+    ("deny", "entries", "expected"),
+    [
+        # R3-01: the deeper glob tree_check_paths' `S/x` probe misses.
+        (
+            ["config/secrets/*"],
+            [("120000", "config"), ("100644", "evil/secrets/a")],
+            ["config (symlink)"],
+        ),
+        (["a/b/c/**"], [("120000", "a/b")], ["a/b (symlink)"]),
+        (["manifests/**", "manifests/*"], [("120000", "manifests")], ["manifests (symlink)"]),
+        # A file symlink serving one instructions file to several agents still clones.
+        (["manifests/**", "manifests/*"], [("120000", "AGENT.md"), ("120000", "MEMORY.md")], []),
+        # A shared name prefix is not a parent directory.
+        (["config/secrets/*"], [("120000", "conf")], []),
+        # Deeper than the denied area: not above it (tree_check_paths covers it as a path).
+        (["config/*"], [("120000", "config/sub")], []),
+        # A regular file at that path is not a symlink.
+        (["config/secrets/*"], [("100644", "config")], []),
+        ([], [("120000", "config")], []),
+        # A wildcard segment above the denied area (the gap a literal-prefix rule misses).
+        (["a/*/secrets/*"], [("120000", "a/foo")], ["a/foo (symlink)"]),
+        (["a/*/secrets/*"], [("120000", "b/foo")], []),
+        # Under a `**/` deny, a dangling or directory symlink is refused...
+        (["**/secrets/*"], [("120000", "anything")], ["anything (symlink)"]),
+    ],
+)
+def test_symlinks_above_denied(deny, entries, expected, tmp_path):
+    from githost_mcp.bootstrap import symlinks_above_denied
+
+    assert symlinks_above_denied(_listing(*entries), deny, str(tmp_path)) == expected
+
+
+def test_symlinks_above_denied_skips_a_symlink_to_a_file(tmp_path):
+    """...but one that resolves to a regular file cannot hold anything beneath it."""
+    from githost_mcp.bootstrap import symlinks_above_denied
+
+    (tmp_path / "CLAUDE.md").write_text("x")
+    (tmp_path / "AGENT.md").symlink_to("CLAUDE.md")
+    listing = _listing(("100644", "CLAUDE.md"), ("120000", "AGENT.md"))
+    assert symlinks_above_denied(listing, ["**/secrets/*"], str(tmp_path)) == []
+
+
+def test_git_clone_refuses_a_symlink_above_a_deeper_denied_area(local_tools, env, tmp_path):
+    bare = git.Repo.init(tmp_path / "deep.git", bare=True, initial_branch="main")
+    work = tmp_path / "seed-deep"
+    seed = git.Repo.clone_from(bare.git_dir, work)
+    (work / "evil" / "secrets").mkdir(parents=True)
+    (work / "evil" / "secrets" / "a").write_text("x")
+    (work / "config").symlink_to("evil")
+    seed.git.add("evil/secrets/a", "config")
+    seed.git.commit("-m", "deep symlink")
+    seed.git.push("origin", "HEAD:refs/heads/main")
+    fake, _ = _fake_clone(bare.git_dir)
+    scoped = dataclasses.replace(get_config(), write_globs_deny=["config/secrets/*"])
+    with (
+        patch("githost_mcp.tools.git_local.get_config", return_value=scoped),
+        patch("githost_mcp.security.get_config", return_value=scoped),
+        patch("githost_mcp.tools.git_local.run_clone", side_effect=fake),
+    ):
+        result = local_tools["git_clone"]("github", "TadMSTR", "deep")
+    assert "config (symlink)" in result["error"]
+    assert not (env["home"] / "repos/personal/deep").exists()
+    assert _entries()[-1]["result"] == "denied:write_glob"
+
+
+def test_git_clone_keeps_file_symlinks_for_a_deny_scoped_agent(local_tools, env, tmp_path):
+    bare = git.Repo.init(tmp_path / "agentmd.git", bare=True, initial_branch="main")
+    work = tmp_path / "seed-agentmd"
+    seed = git.Repo.clone_from(bare.git_dir, work)
+    (work / "CLAUDE.md").write_text("x")
+    (work / "AGENT.md").symlink_to("CLAUDE.md")
+    seed.git.add("CLAUDE.md", "AGENT.md")
+    seed.git.commit("-m", "agent symlink")
+    seed.git.push("origin", "HEAD:refs/heads/main")
+    fake, _ = _fake_clone(bare.git_dir)
+    scoped = _deny_scoped()
+    with (
+        patch("githost_mcp.tools.git_local.get_config", return_value=scoped),
+        patch("githost_mcp.security.get_config", return_value=scoped),
+        patch("githost_mcp.tools.git_local.run_clone", side_effect=fake),
+    ):
+        result = local_tools["git_clone"]("github", "TadMSTR", "agentmd")
+    assert result.get("path") == str(env["home"] / "repos/personal/agentmd"), result

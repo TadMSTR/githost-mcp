@@ -29,6 +29,7 @@ from ..bootstrap import (
     occupied_message,
     raw_clone_destination,
     run_clone,
+    symlinks_above_denied,
     tree_check_paths,
     validate_depth,
 )
@@ -1399,7 +1400,8 @@ def register(mcp) -> None:
                 cloned = _open_repo(dest)
                 # A clone writes every path of the tree, so a deny-scoped grant
                 # (developer's manifests/**) is checked against all of them (audit F-03).
-                check = tree_check_paths(cloned.git.ls_files("-s", "-z"))
+                listing = cloned.git.ls_files("-s", "-z")
+                check = tree_check_paths(listing)
                 try:
                     validate_write_globs(dest, list(check))
                 except WriteGlobDenied as denied:
@@ -1408,6 +1410,8 @@ def register(mcp) -> None:
                         sorted({check[p] for p in denied.denied_paths}),
                         config.allowlist_source,
                     ) from None
+                if above := symlinks_above_denied(listing, config.write_globs_deny, dest):
+                    raise WriteGlobDenied(dest, above, config.allowlist_source)
                 empty = not cloned.head.is_valid()
                 # `branch` may name a tag, which git checks out detached.
                 on_branch = not empty and not cloned.head.is_detached

@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 import unicodedata
+from fnmatch import fnmatch
 
 import git
 
@@ -165,6 +166,37 @@ def tree_check_paths(ls_files_stage: str) -> dict[str, str]:
         if meta.split(" ", 1)[0] == _SYMLINK_MODE:
             paths[f"{path}/x"] = f"{path} (symlink)"
     return paths
+
+
+def symlinks_above_denied(ls_files_stage: str, write_globs_deny: list[str], root: str) -> list[str]:
+    """Tracked symlinks that sit above a denied area, at any depth (round 3, R3-01).
+
+    tree_check_paths() tests a symlink `S` as `S/x`, which catches `S/*` and `S/**` but not
+    a deeper glob: with `config -> evil/` and a deny glob `config/secrets/*`, `evil/secrets/a`
+    lands at `config/secrets/a` while no tested path matches. So `S` is refused when some
+    deny glob has more segments than `S`, and its first segments match `S` segment by
+    segment (fnmatch per segment, so `a/*/secrets/*` covers a symlink `a/foo`).
+
+    A symlink that resolves to a regular file inside the checkout cannot hold anything
+    beneath it and is skipped. That keeps `AGENT.md -> CLAUDE.md`, a common way to serve
+    one instructions file to several agents, cloneable even under a `**/...` deny.
+    """
+    above: list[str] = []
+    for entry in ls_files_stage.split("\0"):
+        meta, _, path = entry.partition("\t")
+        if not entry or meta.split(" ", 1)[0] != _SYMLINK_MODE:
+            continue
+        if os.path.isfile(os.path.join(root, path)):
+            continue
+        parts = os.path.normpath(path).split("/")
+        for pattern in write_globs_deny:
+            segments = pattern.split("/")
+            if len(segments) > len(parts) and all(
+                fnmatch(part, seg) for part, seg in zip(parts, segments, strict=False)
+            ):
+                above.append(f"{path} (symlink)")
+                break
+    return above
 
 
 def validate_depth(depth: int | None) -> int | None:

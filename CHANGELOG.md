@@ -27,8 +27,9 @@ repo was public. Closes #546 and #764. Ted decided the three constraints below o
   `write_globs` (writer) is refused: a clone writes a whole tree. An agent whose grant
   carries `write_globs_deny` cannot pass `branch`, and a clone whose tree holds a denied
   path is removed and refused as `denied:write_glob`, the same result `git_add` and
-  `git_commit` write. A tracked symlink is checked as the directory it creates, so
-  `manifests -> evil/` is refused too. A Gitea org refusal is `denied:not_owned`, like the
+  `git_commit` write. A tracked symlink above any denied area is refused too, at any
+  depth (`manifests -> evil/`, or `config -> evil/` under a `config/secrets/*` deny),
+  while a file symlink such as `AGENTS.md -> CLAUDE.md` still clones. A Gitea org refusal is `denied:not_owned`, like the
   GitHub one.
 - **`github_repo_create(name, visibility, description=None)`** and
   **`gitea_repo_create(owner, name, visibility, description=None)`**. `visibility` is
