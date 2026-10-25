@@ -68,7 +68,7 @@ flowchart TD
 
 **githost-mcp fills the gap:** local git + multi-provider remote via native APIs + per-agent structured audit trail. As of the Tier-1 parity release it matches the single-provider servers on PR/MR review + diff, CI trigger/rerun/cancel, full release CRUD, and issues — across all three providers behind one audited server.
 
-## Tools (69 total)
+## Tools (74 total)
 
 Higher-verb-count capabilities (PR/MR review, CI control, issues) are exposed as
 **method-dispatch** tools — one tool takes a `method` argument and routes internally —
@@ -76,8 +76,26 @@ mirroring how the official GitHub/Gitea servers structure theirs. This adds ~40
 operations without the tool count ballooning past what every agent pays for in context.
 Each `method` still writes its own per-operation audit entry.
 
-### Local Git (15)
-`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_branch_delete_remote`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_push_force_with_lease`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*, `git_worktree` *(add/list/remove)*
+### Local Git (16)
+`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_branch_delete_remote`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_push_force_with_lease`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*, `git_worktree` *(add/list/remove)*, `git_clone`
+
+`git_clone(provider, owner, repo, depth=None, branch=None)` (as of 0.16.0) clones **only
+repos forge owns**: GitHub owners in `FORGE_OWNED_OWNERS` (default `TadMSTR`) and any org
+on the configured Gitea. Anything else is refused before any network or filesystem
+access, as `denied:not_owned`. Third-party code never lands inside an agent write root;
+to work on an upstream, `github_fork` it and clone the fork. The tool takes **no URL and
+no destination**. It builds the scp-form SSH URL itself and computes the path:
+
+| Provider | Destination |
+|---|---|
+| `github` | `~/repos/personal/<repo>` |
+| `gitea` | `~/repos/gitea/<owner>-<repo>`, or `~/repos/gitea/<repo>` if `<repo>` already starts with `<owner>-` |
+
+`~` is the broker's own home. The path is validated against the write roots, and an
+existing path is refused, never merged into. Submodules are not cloned, since
+`.gitmodules` URLs are content the cloned repo controls. The clone is killed after 120 s,
+and a failed clone removes only the directory the call created. An agent whose grant is
+scoped by `write_globs` is refused outright, because a clone writes a whole tree.
 
 `git_worktree` (as of 0.15.0) is the one sanctioned way to get a scratch checkout. The
 destination is **computed, never caller-supplied**: `<worktree_root>/<repo>-<name>`, where
@@ -154,16 +172,30 @@ rejected push as a success. `flags` are decoded to reason names (e.g. `["REJECTE
 credential-scrubbed (see Credential isolation below). On success, a missing upstream is
 set automatically and reported as `upstream_set: true`.
 
-### GitHub (18)
-`github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_update`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
+### GitHub (20)
+`github_repo_get`, `github_repo_create`, `github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_update`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
 
 `github_pr_update` (as of 0.15.0) edits title, body or base, and with
 `ready_for_review=True` takes a draft out of draft through PyGithub's
 `mark_ready_for_review()` — REST cannot change `draft`. The PR number and its review
 threads survive, which close-and-recreate did not. It cannot close a PR.
 
-### Gitea (14)
-`gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_release_update`, `gitea_release_delete`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`, `gitea_pr_review` *(get_diff/get_files/submit_review/dismiss_review)*, `gitea_actions` *(list_runs/get_run/list_jobs/get_job_log/dispatch_workflow/rerun_run/rerun_failed_jobs)*, `gitea_issue_read` *(get/list/comments)*, `gitea_issue_write` *(create/update/add_comment/close/reopen)*
+`github_repo_get(repo)` and `gitea_repo_get(repo)` (as of 0.16.0) return a repo's
+`visibility`, `default_branch`, `empty`, `archived`, `fork`, `parent`,
+`delete_branch_on_merge`, `ssh_url` and `html_url`. They are read-only and work for any
+repo. An absent repo, or one the token cannot see, returns `{"exists": false}`.
+
+`github_repo_create(name, visibility, description=None)` and
+`gitea_repo_create(owner, name, visibility, description=None)` (as of 0.16.0) create an
+**empty** repo, with no initial commit, so existing local work can be pushed in.
+`visibility` (`public`/`private`) is required, with no default. An existing name is
+refused before the create call. The reported `visibility` is read back from the
+provider, not echoed. GitHub creates under the token's account; Gitea creates in an
+organization only. There is deliberately no delete verb and no visibility-change verb.
+Gate both create tools with HITL.
+
+### Gitea (16)
+`gitea_repo_get`, `gitea_repo_create`, `gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_release_update`, `gitea_release_delete`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`, `gitea_pr_review` *(get_diff/get_files/submit_review/dismiss_review)*, `gitea_actions` *(list_runs/get_run/list_jobs/get_job_log/dispatch_workflow/rerun_run/rerun_failed_jobs)*, `gitea_issue_read` *(get/list/comments)*, `gitea_issue_write` *(create/update/add_comment/close/reopen)*
 
 ### GitLab (13)
 `gitlab_create_release`, `gitlab_get_release`, `gitlab_list_releases`, `gitlab_release_update`, `gitlab_release_delete`, `gitlab_mr_list`, `gitlab_mr_create`, `gitlab_mr_get`, `gitlab_mr_merge`, `gitlab_mr_review` *(get_diffs/get_changed_files/approve/unapprove/get_approval_state)*, `gitlab_pipeline` *(list/get/create/retry/cancel/get_job_log)*, `gitlab_issue_read` *(get/list/comments)*, `gitlab_issue_write` *(create/update/add_comment/close/reopen)*

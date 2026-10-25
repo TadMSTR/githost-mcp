@@ -1,4 +1,4 @@
-"""Gitea tools via httpx (8 tools)."""
+"""Gitea tools via httpx."""
 
 from __future__ import annotations
 
@@ -9,14 +9,16 @@ import structlog
 from .._providers.gitea_client import (
     gitea_delete,
     gitea_get,
+    gitea_get_optional,
     gitea_get_text,
     gitea_patch,
     gitea_post,
     gitea_post_void,
 )
 from ..audit import AuditCtx, audit_rejection, reject_enum
+from ..bootstrap import VISIBILITIES, first_bad_segment, validate_description
 from ..config import get_config
-from ..errors import InvalidArgument, MissingArgument
+from ..errors import AlreadyExists, InvalidArgument, MissingArgument
 from ..security import scrub
 
 
@@ -54,6 +56,37 @@ log = structlog.get_logger(__name__)
 # Where a read-shaped request lands on a write-dispatch tool, the rejection names the
 # sibling that serves it. Agents reached for read methods here 34 times in a month.
 _HINT_GITEA_ISSUE_WRITE = "To read an issue, list issues or read comments, use gitea_issue_read"
+
+
+def gitea_visibility(data: dict) -> str:
+    """Gitea carries two booleans where GitHub carries one string."""
+    if data.get("private"):
+        return "private"
+    if data.get("internal"):
+        return "internal"
+    return "public"
+
+
+def gitea_repo_metadata(data: dict) -> dict:
+    """The same shape github_repo_get returns, from Gitea's repo representation.
+
+    Gitea's `default_delete_branch_after_merge` is the merge-UI default, the nearest
+    thing it has to GitHub's `delete_branch_on_merge`, so it is reported under that name.
+    """
+    parent = data.get("parent")
+    return {
+        "exists": True,
+        "full_name": data.get("full_name"),
+        "visibility": gitea_visibility(data),
+        "default_branch": data.get("default_branch"),
+        "empty": data.get("empty"),
+        "archived": data.get("archived"),
+        "fork": data.get("fork"),
+        "parent": parent.get("full_name") if isinstance(parent, dict) else None,
+        "delete_branch_on_merge": data.get("default_delete_branch_after_merge"),
+        "ssh_url": data.get("ssh_url"),
+        "html_url": data.get("html_url"),
+    }
 
 
 def register(mcp) -> None:
@@ -921,6 +954,129 @@ def register(mcp) -> None:
             await gitea_patch(f"{base}/{issue_number}", {"state": new_state})
             ac.finish("ok")
             return {"repo": repo, "number": issue_number, "state": new_state}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return _err(e)
+
+    @mcp.tool
+    async def gitea_repo_get(repo: str) -> dict:
+        """Read a repo's metadata on the configured Gitea (GITEA_URL).
+
+        Read-only. A repo that does not exist, or that this token cannot see, returns
+        {"exists": false} rather than an error.
+
+        Returns full_name, visibility (public/private/internal), default_branch, empty,
+        archived, fork, parent, delete_branch_on_merge (Gitea's merge-UI default),
+        ssh_url, html_url.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+        """
+        owner, _, name = repo.partition("/")
+        if not _REPO_RE.match(repo):
+            return audit_rejection(
+                "gitea_repo_get", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
+        if bad := first_bad_segment((("owner", owner), ("repo", name))):
+            reason_class, argument, value, message = bad
+            return audit_rejection(
+                "gitea_repo_get",
+                "gitea",
+                repo,
+                reason_class,
+                message,
+                argument=argument,
+                value=value,
+            )
+        ac = AuditCtx("gitea_repo_get", "gitea", repo, {"repo": repo})
+        try:
+            data = await gitea_get_optional(f"/repos/{owner}/{name}")
+            result = (
+                {"exists": False, "full_name": repo} if data is None else gitea_repo_metadata(data)
+            )
+            ac.finish("ok")
+            return result
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return _err(e)
+
+    @mcp.tool
+    async def gitea_repo_create(
+        owner: str, name: str, visibility: str, description: str | None = None
+    ) -> dict:
+        """Create an EMPTY repo in an organization on our Gitea. HITL gated.
+
+        `owner` must be an organization: the Gitea token cannot create repos under a
+        user account. `visibility` is required and has no default: public or private.
+        There is no tool to change it later or to delete the repo; both are operator
+        steps. Note that a public repo in a private org is still visible only to the
+        org's members.
+
+        Created with no initial commit, ready for an existing local repo to be pushed.
+        An existing name is refused before anything is created. The returned
+        visibility is read back from Gitea, not echoed from the argument.
+
+        Args:
+            owner: Gitea organization, e.g. host-forge or agent-platform.
+            name: Repo name, [A-Za-z0-9_.-], without '.git'.
+            visibility: public | private.
+            description: Optional, up to 350 characters.
+        """
+        full_name = f"{owner}/{name}"
+        if visibility not in VISIBILITIES:
+            return reject_enum(
+                "gitea_repo_create", "gitea", full_name, "visibility", visibility, VISIBILITIES
+            )
+        if bad := first_bad_segment((("owner", owner), ("name", name))):
+            reason_class, argument, value, message = bad
+            return audit_rejection(
+                "gitea_repo_create",
+                "gitea",
+                full_name,
+                reason_class,
+                message,
+                argument=argument,
+                value=value,
+            )
+        try:
+            validate_description(description)
+        except InvalidArgument as e:
+            return audit_rejection(
+                "gitea_repo_create", "gitea", full_name, "invalid_argument", str(e)
+            )
+        params = {"repo": full_name, "visibility": visibility, "description": description}
+        ac = AuditCtx("gitea_repo_create", "gitea", full_name, params)
+        try:
+            # An explicit org check, so a user name gets a clear refusal rather than a
+            # bare 404 from the create endpoint.
+            if await gitea_get_optional(f"/orgs/{owner}") is None:
+                raise InvalidArgument(
+                    f"'{owner}' is not an organization on this Gitea (or not visible to the "
+                    "token). gitea_repo_create creates repos in organizations only."
+                )
+            if await gitea_get_optional(f"/repos/{owner}/{name}") is not None:
+                raise AlreadyExists(f"{full_name} already exists; nothing was created")
+            data = {"name": name, "private": visibility == "private", "auto_init": False}
+            if description:
+                data["description"] = description
+            created = await gitea_post(f"/orgs/{owner}/repos", data)
+            readback = await gitea_get_optional(f"/repos/{owner}/{name}")
+            result = {
+                "created": True,
+                "full_name": created.get("full_name", full_name),
+                "requested_visibility": visibility,
+                "visibility": gitea_visibility(readback) if readback else None,
+                "empty": readback.get("empty") if readback else None,
+                "ssh_url": created.get("ssh_url"),
+                "html_url": created.get("html_url"),
+            }
+            if result["visibility"] != visibility:
+                result["warning"] = (
+                    f"requested {visibility}, Gitea reports {result['visibility']}. "
+                    "Check the repo before pushing anything to it."
+                )
+            ac.finish("ok")
+            return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)

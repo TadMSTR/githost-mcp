@@ -38,6 +38,25 @@ async def gitea_get(path: str) -> Any:
         raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
 
 
+async def gitea_get_optional(path: str) -> Any | None:
+    """GET, returning None on a 404 instead of raising. For "does this exist?" reads.
+
+    Gitea answers 404 for a private resource the token cannot see as well as for an
+    absent one, so None means "not visible to us", which is what callers act on.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{_gitea_base()}{path}", headers=_get_gitea_headers())
+            if resp.status_code == 404:
+                return None
+            _check_gitea_response(resp)
+            return resp.json()
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
+
+
 async def gitea_post(path: str, data: dict) -> Any:
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:

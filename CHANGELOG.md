@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.16.0] — 2026-10-25
+
+Repo bootstrap (agent-build-workflow-2026-09 part 4b). Before this, githost-mcp assumed a
+working tree already existed: no tool could create a repo, obtain one, or say whether a
+repo was public. Closes #546 and #764. Ted decided the three constraints below on
+2026-10-25: clone is owned-only, writer gets no clone, and visibility is required.
+
+### Added
+
+- **`git_clone(provider, owner, repo, depth=None, branch=None)`**. Owned repos only:
+  GitHub owners in `forge_owned_owners`, any org on our Gitea. Anything else is refused
+  before any network or filesystem access, as `denied:not_owned`; a third-party clone is
+  an operator step. There is **no `url` and no destination parameter.** The scp-form SSH
+  URL is built from the arguments and still passed through `validate_remote_url()`. The
+  path follows forge's checkout convention: GitHub → `~/repos/personal/<repo>`, Gitea →
+  `~/repos/gitea/<owner>-<repo>` (or `<repo>` if it already starts with `<owner>-`). It is
+  validated against the write roots, and an existing path is refused rather than merged
+  into. Submodules are never cloned. The clone is killed after 120 s, and a failed clone
+  removes only the directory this call created. An agent whose grant is scoped by
+  `write_globs` (writer) is refused: a clone writes a whole tree.
+- **`github_repo_create(name, visibility, description=None)`** and
+  **`gitea_repo_create(owner, name, visibility, description=None)`**. `visibility` is
+  `public` or `private`, required, with no default. Repos are created **empty**
+  (`auto_init=False`), ready for existing local work to be pushed in. An existing name
+  is refused before the create call. The result's `visibility` is read back from the
+  provider, and a `warning` is added if it differs from the request. GitHub creates
+  under the authenticated account. Gitea creates in an **organization only**: forge's
+  token has no `write:user` scope, so `owner` must be an org, and a user name is refused
+  with a clear message rather than a bare 404. There is no delete verb and no
+  visibility-change verb; both stay operator steps. **Manifests must HITL-gate both.**
+- **`github_repo_get(repo)`** and **`gitea_repo_get(repo)`**. Read-only metadata, not
+  limited to owned repos: `full_name`, `visibility`, `default_branch`, `empty`,
+  `archived`, `fork`, `parent`, `delete_branch_on_merge`, `ssh_url`, `html_url`. A repo
+  that is absent or invisible to the token returns `{"exists": false}`, not an error.
+  GitHub's `delete_branch_on_merge` is only on the single-repo representation, and
+  `empty` comes from the commits endpoint's 409, because REST has no `empty` field and
+  `size` is recomputed lazily.
+- **`reason_class` members `not_owned` and `already_exists`.**
+
+### Notes
+
+- `git_clone` does not use `Repo.clone_from()`. GitPython runs that clone with
+  `as_process=True`, and `kill_after_timeout` only applies when GitPython waits on the
+  process itself, so clone_from has no working timeout. GitPython's unsafe-protocol and
+  unsafe-option checks are called explicitly instead.
+- Owner and repo names refuse `.` and `..`. On Gitea they are interpolated into API
+  paths, and httpx resolves dot segments.
+
 ## [0.15.0] — 2026-10-24
 
 Scoped from 14 days of measured denials (agent-build-workflow-2026-09 part 4), not from

@@ -1,6 +1,6 @@
 # githost-mcp
 
-FastMCP server providing 69 tools across local git, GitHub, Gitea, GitLab, Woodpecker CI, release orchestration, registry publishing, and audit log queries. PR/MR review, CI control, and issues are exposed as method-dispatch tools (one tool, a `method` argument, per-operation audit).
+FastMCP server providing 74 tools across local git, GitHub, Gitea, GitLab, Woodpecker CI, release orchestration, registry publishing, and audit log queries. PR/MR review, CI control, and issues are exposed as method-dispatch tools (one tool, a `method` argument, per-operation audit).
 
 ## Structure
 
@@ -10,7 +10,7 @@ src/githost_mcp/
   tools/
     git_local.py             Local git ops via gitpython: status, diff, add, commit,
                              push, force-with-lease push, pull, log, show, checkout,
-                             branch, tag, remote, worktree
+                             branch, tag, remote, worktree, clone
     github.py                GitHub PRs + review/diff, Actions control, release
                              CRUD, issues (method-dispatch), workflow status
     gitea.py                 Gitea PRs + review/diff, Actions control, release
@@ -25,6 +25,8 @@ src/githost_mcp/
     github_client.py         PyGitHub wrapper
     gitea_client.py          httpx Gitea API client
     gitlab_client.py         httpx GitLab API client
+  bootstrap.py               git_clone / *_repo_create guards: names, ownership,
+                             computed clone URL and destination, timed clone
   audit.py                   JSONL audit logging — every tool call recorded
   security.py                ALLOWED_REPO_ROOTS enforcement for write operations
   config.py                  Env var loading
@@ -38,7 +40,7 @@ pyproject.toml
 | File                    | Role                                                     |
 |-------------------------|----------------------------------------------------------|
 | `server.py`             | FastMCP app, lifespan, tool module registration          |
-| `tools/git_local.py`    | 15 local git tools                                       |
+| `tools/git_local.py`    | 16 local git tools, including `git_clone`                |
 | `tools/github.py`       | GitHub PRs + review, Actions, release CRUD, issues       |
 | `tools/gitea.py`        | Gitea PRs + review, Actions, release CRUD, issues        |
 | `tools/gitlab.py`       | GitLab MRs + review, pipelines, release CRUD, issues     |

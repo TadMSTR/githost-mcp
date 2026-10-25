@@ -1,4 +1,4 @@
-"""GitHub tools via PyGithub (11 tools)."""
+"""GitHub tools via PyGithub."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ import structlog
 
 from .._providers.github_client import get_github, github_call
 from ..audit import AuditCtx, audit_rejection, reject_enum
-from ..errors import InvalidArgument, MissingArgument
-from ..security import scrub, validate_branch_name
+from ..bootstrap import VISIBILITIES, first_bad_segment, validate_description
+from ..errors import AlreadyExists, InvalidArgument, MissingArgument
+from ..security import mask_credentials, scrub, validate_branch_name
 
 log = structlog.get_logger(__name__)
 
@@ -68,6 +69,60 @@ _HINT_GITHUB_ACTIONS = (
     "For listing runs or reading a run's status, use github_workflow_list or github_workflow_status"
 )
 _HINT_GITHUB_ISSUE_WRITE = "To read an issue, list issues or read comments, use github_issue_read"
+
+
+def get_repo_or_none(gh, full_name: str):
+    """The repo, or None if GitHub answers 404 (absent, or private and not visible to us).
+
+    Not through github_call(): it turns every exception into a ValueError, and a 404 is
+    an answer here, not a failure. Anything else is masked the same way github_call does.
+    """
+    from github import UnknownObjectException  # type: ignore
+
+    try:
+        return gh.get_repo(full_name)
+    except UnknownObjectException:
+        return None
+    except Exception as e:
+        raise ValueError(mask_credentials(str(e))) from None
+
+
+def github_repo_is_empty(gh_repo) -> bool:
+    """True when the repo has no commits.
+
+    REST has no `empty` field, and `size` is recomputed lazily, so neither is trusted.
+    Listing commits on an empty repo is a 409 ("Git Repository is empty").
+    """
+    from github import GithubException  # type: ignore
+
+    try:
+        return next(iter(gh_repo.get_commits()), None) is None
+    except GithubException as e:
+        if e.status == 409:
+            return True
+        raise ValueError(mask_credentials(str(e))) from None
+
+
+def github_repo_metadata(gh_repo) -> dict:
+    """The fields #546 (id 629) and part 3 asked for, from the single-repo representation.
+
+    `delete_branch_on_merge` is only on GET /repos/{owner}/{repo}, never on the list
+    endpoints: part 3 measured it as None for all 70 repos through /user/repos.
+    """
+    parent = gh_repo.parent if gh_repo.fork else None
+    return {
+        "exists": True,
+        "full_name": gh_repo.full_name,
+        "visibility": gh_repo.visibility,
+        "default_branch": gh_repo.default_branch,
+        "empty": github_repo_is_empty(gh_repo),
+        "archived": gh_repo.archived,
+        "fork": gh_repo.fork,
+        "parent": parent.full_name if parent else None,
+        "delete_branch_on_merge": gh_repo.delete_branch_on_merge,
+        "ssh_url": gh_repo.ssh_url,
+        "html_url": gh_repo.html_url,
+    }
 
 
 def register(mcp) -> None:
@@ -1062,6 +1117,108 @@ def register(mcp) -> None:
             github_call(issue.edit, state="open")
             ac.finish("ok")
             return {"repo": repo, "number": issue_number, "state": "open"}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return _err(e)
+
+    @mcp.tool
+    def github_repo_get(repo: str) -> dict:
+        """Read a GitHub repo's metadata: visibility, default branch, empty, settings.
+
+        Read-only, and not limited to repos we own. A repo that does not exist, or is
+        private and not visible to this token, returns {"exists": false} rather than
+        an error.
+
+        Returns full_name, visibility (public/private/internal), default_branch, empty,
+        archived, fork, parent, delete_branch_on_merge, ssh_url, html_url.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+        """
+        if err := _bad_repo(repo):
+            return audit_rejection("github_repo_get", "github", repo, "bad_repo_format", err)
+        ac = AuditCtx("github_repo_get", "github", repo, {"repo": repo})
+        try:
+            gh_repo = get_repo_or_none(get_github(), repo)
+            result = (
+                {"exists": False, "full_name": repo}
+                if gh_repo is None
+                else github_repo_metadata(gh_repo)
+            )
+            ac.finish("ok")
+            return result
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return _err(e)
+
+    @mcp.tool
+    def github_repo_create(name: str, visibility: str, description: str | None = None) -> dict:
+        """Create an EMPTY GitHub repo under the authenticated account. HITL gated.
+
+        `visibility` is required and has no default: public or private. There is no
+        tool to change it later or to delete the repo; both are operator steps, so
+        choose deliberately.
+
+        The repo is created with no initial commit, ready for an existing local repo
+        to be pushed into it (git_remote add, then git_push). An existing name is
+        refused before anything is created. The returned visibility is read back from
+        GitHub, not echoed from the argument.
+
+        Args:
+            name: Repo name, [A-Za-z0-9_.-], without '.git'.
+            visibility: public | private.
+            description: Optional, up to 350 characters.
+        """
+        if visibility not in VISIBILITIES:
+            return reject_enum(
+                "github_repo_create", "github", name, "visibility", visibility, VISIBILITIES
+            )
+        if bad := first_bad_segment((("name", name),)):
+            reason_class, argument, value, message = bad
+            return audit_rejection(
+                "github_repo_create",
+                "github",
+                name or "",
+                reason_class,
+                message,
+                argument=argument,
+                value=value,
+            )
+        try:
+            validate_description(description)
+        except InvalidArgument as e:
+            return audit_rejection("github_repo_create", "github", name, "invalid_argument", str(e))
+        params = {"name": name, "visibility": visibility, "description": description}
+        ac = AuditCtx("github_repo_create", "github", name, params)
+        try:
+            gh = get_github()
+            user = github_call(gh.get_user)
+            full_name = f"{user.login}/{name}"
+            ac.repo = full_name
+            if get_repo_or_none(gh, full_name) is not None:
+                raise AlreadyExists(f"{full_name} already exists; nothing was created")
+            kwargs = {"description": description} if description else {}
+            created = github_call(
+                user.create_repo, name, private=visibility == "private", auto_init=False, **kwargs
+            )
+            # Report what GitHub says, from a fresh read, not the argument echoed back.
+            readback = get_repo_or_none(gh, created.full_name)
+            result = {
+                "created": True,
+                "full_name": created.full_name,
+                "requested_visibility": visibility,
+                "visibility": readback.visibility if readback else None,
+                "empty": github_repo_is_empty(readback) if readback else None,
+                "ssh_url": created.ssh_url,
+                "html_url": created.html_url,
+            }
+            if result["visibility"] != visibility:
+                result["warning"] = (
+                    f"requested {visibility}, GitHub reports {result['visibility']}. "
+                    "Check the repo before pushing anything to it."
+                )
+            ac.finish("ok")
+            return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)

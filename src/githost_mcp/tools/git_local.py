@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shutil
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -12,12 +13,25 @@ import git
 import structlog
 
 from .._providers.github_client import get_github, github_call
-from ..audit import AuditCtx, reject_enum
+from ..audit import AuditCtx, audit_rejection, reject_enum
+from ..bootstrap import (
+    CLONE_PROVIDERS,
+    clone_args,
+    clone_destination,
+    clone_url,
+    ensure_owned,
+    ensure_whole_tree_writer,
+    first_bad_segment,
+    run_clone,
+    validate_depth,
+)
 from ..config import get_config
 from ..errors import (
+    AlreadyExists,
     InvalidArgument,
     MissingArgument,
     NoSuchRemote,
+    NotOwned,
     ProtectedBranch,
     RepoNotFound,
 )
@@ -1268,6 +1282,118 @@ def register(mcp) -> None:
         except ProtectedBranch as e:
             ac.finish("denied:protected_branch", e)
             return {"error": scrub(str(e))}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return {"error": scrub(str(e))}
+
+    @mcp.tool
+    def git_clone(
+        provider: str,
+        owner: str,
+        repo: str,
+        depth: int | None = None,
+        branch: str | None = None,
+    ) -> dict:
+        """Clone a repo forge owns into its standard checkout location.
+
+        Owned repos only: GitHub owners in forge_owned_owners, any org on our Gitea.
+        A third-party clone is an operator step; to work on one, github_fork it and
+        clone the fork.
+
+        There is no url and no destination argument. The SSH URL is built from
+        provider/owner/repo, and the path is computed:
+          - github: ~/repos/personal/<repo>
+          - gitea:  ~/repos/gitea/<owner>-<repo> (or <repo> if it starts with <owner>-)
+        An existing destination is refused, never merged into. The result's `path`
+        is where it landed; use it as repo_path from then on.
+
+        Submodules are not cloned. A failed clone removes the directory it created.
+
+        Args:
+            provider: github | gitea.
+            owner: Repo owner (GitHub user/org, or Gitea org).
+            repo: Repo name, without '.git'.
+            depth: Shallow-clone depth (positive integer). Default: full history.
+            branch: Branch to check out. Default: the remote's default branch.
+        """
+        full_name = f"{owner}/{repo}"
+        if provider not in CLONE_PROVIDERS:
+            return reject_enum(
+                "git_clone", "local", full_name, "provider", provider, CLONE_PROVIDERS
+            )
+        if bad := first_bad_segment((("owner", owner), ("repo", repo))):
+            reason_class, argument, value, message = bad
+            return audit_rejection(
+                "git_clone",
+                provider,
+                full_name,
+                reason_class,
+                message,
+                argument=argument,
+                value=value,
+            )
+        config = get_config()
+        gitea_host = _gitea_host(config.gitea_url)
+        # Before anything touches the network or the filesystem.
+        try:
+            ensure_owned(provider, owner, config.forge_owned_owners, gitea_host)
+        except NotOwned as e:
+            return audit_rejection(
+                "git_clone",
+                provider,
+                full_name,
+                "not_owned",
+                str(e),
+                argument="owner",
+                value=owner,
+            )
+
+        params = {"provider": provider, "repo": full_name, "depth": depth, "branch": branch}
+        ac = AuditCtx("git_clone", provider, full_name, params)
+        try:
+            validate_depth(depth)
+            if branch is not None:
+                validate_branch_name(branch)
+            dest = validate_write_path(clone_destination(provider, owner, repo))
+            ensure_whole_tree_writer(dest, config.write_globs, config.allowlist_source)
+            if os.path.lexists(dest):
+                raise AlreadyExists(
+                    f"{dest} already exists. git_clone never merges into an existing "
+                    "directory; use the checkout that is there."
+                )
+            url = clone_url(provider, owner, repo, gitea_host)
+            validate_remote_url(url)
+
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            # mkdir, not a later git-side create: it fails if anything appeared since the
+            # lexists() check, and it is what makes the cleanup below safe — this call
+            # removes only a directory it created itself.
+            try:
+                os.mkdir(dest)
+            except FileExistsError:
+                raise AlreadyExists(f"{dest} already exists") from None
+            try:
+                run_clone(url, dest, clone_args(depth, branch))
+            except BaseException:
+                shutil.rmtree(dest, ignore_errors=True)
+                raise
+
+            cloned = _open_repo(dest)
+            empty = not cloned.head.is_valid()
+            # `branch` may name a tag, which git checks out detached.
+            on_branch = not empty and not cloned.head.is_detached
+            ac.finish("ok")
+            return {
+                "path": dest,
+                "provider": provider,
+                "repo": full_name,
+                "url": url,
+                "branch": cloned.active_branch.name if on_branch else None,
+                "head_sha": None if empty else cloned.head.commit.hexsha,
+                "empty": empty,
+                "depth": depth,
+                "note": "Use `path` as repo_path for every git_* call on this repo.",
+            }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}

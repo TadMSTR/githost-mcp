@@ -1,0 +1,190 @@
+"""Repo bootstrap guards: names, ownership, clone URL and destination, the clone itself.
+
+Shared by git_clone and the `*_repo_create` / `*_repo_get` tools. Everything here is an
+undecorated helper so mutation testing reaches it (mutmut generates no mutants inside an
+`@mcp.tool` body).
+
+The shape of git_clone is decided here and is deliberate (Ted, 2026-10-25,
+agent-build-workflow-2026-09 part 4b):
+
+- **No caller URL.** The URL is built from `provider/owner/repo`, so the `ext::`/`fd::`
+  remote-helper surface #764 (id 847) worried about is removed rather than filtered.
+  validate_remote_url() still runs on the built URL, as defence in depth.
+- **No caller destination.** The path follows forge's checkout convention, measured from
+  40 existing checkouts' `origin`, and is still checked against the agent's write roots.
+- **Owned repos only.** GitHub owners in `forge_owned_owners`, any owner on our Gitea.
+  A third-party clone stays an operator step, so third-party code never lands inside an
+  agent write root.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+
+import git
+
+from .errors import InvalidArgument, MissingArgument, NotOwned, WriteGlobDenied
+from .security import canonical_path
+
+CLONE_PROVIDERS = frozenset({"github", "gitea"})
+VISIBILITIES = frozenset({"public", "private"})
+
+# Where clones land. `~` is expanded per call, for the broker's own uid: when
+# agent-isolation gives agents their own uids, each lands under its own home rather than
+# a hardcoded /home/ted. A location, not a grant — validate_write_path() still decides.
+GITHUB_CLONE_ROOT = "~/repos/personal"
+GITEA_CLONE_ROOT = "~/repos/gitea"
+
+# Measured 2026-10-25: the largest owned repos (TadMSTR/memsearch, 34 MB checked out;
+# TadMSTR/claudecodeui, 25 MB; host-forge/scripts on Gitea) clone in 0.7-1.3 s from
+# forge. 120 s is ~90x that: room for a slow network, short of an unbounded hang.
+CLONE_TIMEOUT_S = 120
+
+# GitHub and Gitea both allow [A-Za-z0-9_.-] in owner and repo names. `.github` is a
+# real repo (#764's second case), so a leading dot is allowed; "." and ".." are not.
+_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}")
+_MAX_DESCRIPTION_CHARS = 350
+
+
+def validate_segment(argument: str, value: str | None) -> str:
+    """Return `value` if it is one safe owner or repo name segment.
+
+    Refuses "." and "..": these are interpolated into Gitea API paths, and httpx resolves
+    dot segments, so `owner=".."` would address a different endpoint. A `.git` suffix is
+    refused too: the clone URL appends one, and GitHub renames such a repo on create.
+    """
+    if not value:
+        raise MissingArgument(f"{argument} is required")
+    if value in (".", "..") or value.startswith("-") or not _SEGMENT_RE.fullmatch(value):
+        raise InvalidArgument(
+            f"Invalid {argument} {value!r}: use 1-100 of [A-Za-z0-9_.-], not starting "
+            "with '-', and not '.' or '..'"
+        )
+    if value.lower().endswith(".git"):
+        raise InvalidArgument(f"Invalid {argument} {value!r}: drop the '.git' suffix")
+    return value
+
+
+def first_bad_segment(
+    pairs: tuple[tuple[str, str | None], ...],
+) -> tuple[str, str, str | None, str] | None:
+    """`(reason_class, argument, value, message)` for the first invalid segment, else None.
+
+    For the pre-flight guards, which record a rejection with audit_rejection() before
+    the tool has built its AuditCtx.
+    """
+    for argument, value in pairs:
+        try:
+            validate_segment(argument, value)
+        except MissingArgument as e:
+            return "missing_argument", argument, value, str(e)
+        except InvalidArgument as e:
+            return "invalid_argument", argument, value, str(e)
+    return None
+
+
+def validate_description(description: str | None) -> str | None:
+    """GitHub caps a repo description at 350 characters; refuse longer before the call."""
+    if description is not None and len(description) > _MAX_DESCRIPTION_CHARS:
+        raise InvalidArgument(
+            f"description is {len(description)} characters; the limit is {_MAX_DESCRIPTION_CHARS}"
+        )
+    return description
+
+
+def validate_depth(depth: int | None) -> int | None:
+    """A shallow-clone depth must be a positive int. `True` is an int in Python; refuse it."""
+    if depth is None:
+        return None
+    if isinstance(depth, bool) or not isinstance(depth, int) or depth < 1:
+        raise InvalidArgument(f"depth must be a positive integer, got {depth!r}")
+    return depth
+
+
+def ensure_owned(provider: str, owner: str, forge_owners: list[str], gitea_host: str) -> None:
+    """Raise NotOwned unless `owner` is one forge controls on `provider`.
+
+    GitHub: case-insensitive membership of `forge_owned_owners`, the same comparison
+    identity.py uses. Gitea: every owner on our instance is ours, but only if one is
+    configured — an unset GITEA_URL is not a licence to clone from anywhere.
+    """
+    if provider == "github":
+        if owner.lower() not in {o.lower() for o in forge_owners}:
+            raise NotOwned(
+                f"git_clone only clones repos forge owns; '{owner}' is not in "
+                f"forge_owned_owners ({', '.join(forge_owners)}). Cloning a third-party "
+                "repo is an operator step. To work on one, github_fork it and clone the fork."
+            )
+        return
+    if not gitea_host:
+        raise NotOwned("GITEA_URL is not set, so no Gitea owner can be recognised as ours")
+
+
+def ensure_whole_tree_writer(dest: str, write_globs: list[str], source: str) -> None:
+    """Refuse a clone for an agent whose grant is scoped by `write_globs`.
+
+    A clone writes a whole tree. An agent allowed only `README*` and `**/*.md` (writer)
+    would otherwise get every file of the repo written under its roots in one call. Ted
+    denied writer the tool at the manifest (2026-10-25); this is the same rule in code.
+    A deny-only scope (developer's `manifests/**`) narrows nothing a clone writes on
+    purpose, so only an allow scope refuses.
+    """
+    if write_globs:
+        raise WriteGlobDenied(dest, ["(entire clone)"], source)
+
+
+def clone_url(provider: str, owner: str, repo: str, gitea_host: str) -> str:
+    """The scp-form SSH URL every forge checkout already uses."""
+    host = "github.com" if provider == "github" else gitea_host
+    return f"git@{host}:{owner}/{repo}.git"
+
+
+def clone_destination(provider: str, owner: str, repo: str) -> str:
+    """Forge's checkout convention, canonical. Computed here, never taken from the caller.
+
+    GitHub `<owner>/<repo>` → `~/repos/personal/<repo>`.
+    Gitea `<org>/<repo>` → `~/repos/gitea/<org>-<repo>`, or `~/repos/gitea/<repo>` when the
+    name already starts with `<org>-` (`agent-platform/agent-platform-knowledge-base`).
+    """
+    if provider == "github":
+        return str(canonical_path(os.path.join(GITHUB_CLONE_ROOT, repo)))
+    name = repo if repo.startswith(f"{owner}-") else f"{owner}-{repo}"
+    return str(canonical_path(os.path.join(GITEA_CLONE_ROOT, name)))
+
+
+def clone_args(depth: int | None, branch: str | None) -> list[str]:
+    """Options for `git clone`. Never `-c`/`--config`/`--template`/`--upload-pack`.
+
+    `--no-recurse-submodules` because `.gitmodules` URLs are content the cloned repo
+    controls: validating the top-level URL says nothing about them.
+    """
+    args = ["--no-recurse-submodules"]
+    if depth is not None:
+        args += ["--depth", str(depth)]
+    if branch is not None:
+        args += ["--branch", branch]
+    return args
+
+
+def run_clone(
+    url: str,
+    dest: str,
+    args: list[str],
+    timeout: float = CLONE_TIMEOUT_S,
+    extra_env: dict[str, str] | None = None,
+) -> None:
+    """Run `git clone <args> -- <url> <dest>`, killed after `timeout` seconds.
+
+    Not `Repo.clone_from()`: it runs git with `as_process=True`, and GitPython applies
+    `kill_after_timeout` only when it waits on the process itself, so clone_from has no
+    working timeout. GitPython's own unsafe-protocol and unsafe-option checks are called
+    here explicitly instead, so going around clone_from loses neither.
+
+    The env passed to execute() MERGES into os.environ, it does not replace it. Only
+    GIT_TERMINAL_PROMPT is set: under PM2 there is nobody to answer a prompt.
+    """
+    git.Git.check_unsafe_protocols(url)
+    git.Git.check_unsafe_options(options=args, unsafe_options=git.Repo.unsafe_git_clone_options)
+    env = {"GIT_TERMINAL_PROMPT": "0", **(extra_env or {})}
+    git.Git().clone(*args, "--", url, dest, kill_after_timeout=timeout, env=env)
