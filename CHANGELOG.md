@@ -22,15 +22,16 @@ repo was public. Closes #546 and #764. Ted decided the three constraints below o
   into. The convention is not one-to-one (`a/foo` and `b/foo` on GitHub share a
   directory), so the refusal says "use that checkout" only when the existing checkout's
   `origin` is this repo, and names the other origin otherwise. A symlink at the
-  destination is refused, never followed. Submodules are never cloned. The clone is killed after 120 s, and a failed clone
-  removes only the directory this call created. An agent whose grant is scoped by
-  `write_globs` (writer) is refused: a clone writes a whole tree. An agent whose grant
+  destination is refused, never followed. Submodules are never cloned. The clone is
+  killed after 120 s, and a failed clone removes only the directory this call created.
+  An agent whose grant is scoped by `write_globs` (writer) is refused: a clone writes a
+  whole tree. An agent whose grant
   carries `write_globs_deny` cannot pass `branch`, and a clone whose tree holds a denied
   path is removed and refused as `denied:write_glob`, the same result `git_add` and
   `git_commit` write. A tracked symlink above any denied area is refused too, at any
   depth (`manifests -> evil/`, or `config -> evil/` under a `config/secrets/*` deny),
-  while a file symlink such as `AGENTS.md -> CLAUDE.md` still clones. A Gitea org refusal is `denied:not_owned`, like the
-  GitHub one.
+  while a file symlink such as `AGENTS.md -> CLAUDE.md` still clones. A Gitea org
+  refusal is `denied:not_owned`, like the GitHub one.
 - **`github_repo_create(name, visibility, description=None)`** and
   **`gitea_repo_create(owner, name, visibility, description=None)`**. `visibility` is
   `public` or `private`, required, with no default. Repos are created **empty**
@@ -40,13 +41,11 @@ repo was public. Closes #546 and #764. Ted decided the three constraints below o
   fails; a failed read-back never turns a successful create into an error. Those two
   cases are audited as `ok:visibility_mismatch` / `ok:visibility_unconfirmed`, with the
   warning as the reason. `description` refuses control characters and Unicode line
-  breaks (the HITL notification renders arguments unescaped).
-- **`WriteGlobDenied` names at most 20 paths** in its message (`and N more`); the full
-  list stays on the exception. A denied clone can otherwise list a whole tree. GitHub creates
-  under the authenticated account. Gitea creates in an **organization only**: forge's
-  token has no `write:user` scope, so `owner` must be an org, and a user name is refused
-  with a clear message rather than a bare 404. There is no delete verb and no
-  visibility-change verb; both stay operator steps. **Manifests must HITL-gate both.**
+  breaks (the HITL notification renders arguments unescaped). GitHub creates under the
+  authenticated account. Gitea creates in an **organization only**: forge's token has no
+  `write:user` scope, so `owner` must be an org, and a user name is refused with a clear
+  message rather than a bare 404. There is no delete verb and no visibility-change verb;
+  both stay operator steps. **Manifests must HITL-gate both.**
 - **`github_repo_get(repo)`** and **`gitea_repo_get(repo)`**. Read-only metadata, not
   limited to owned repos: `full_name`, `visibility`, `default_branch`, `empty`,
   `archived`, `fork`, `parent`, `delete_branch_on_merge`, `ssh_url`, `html_url`. A repo
@@ -55,6 +54,8 @@ repo was public. Closes #546 and #764. Ted decided the three constraints below o
   `empty` comes from the commits endpoint's 409, because REST has no `empty` field and
   `size` is recomputed lazily.
 - **`reason_class` members `not_owned` and `already_exists`.**
+- **`WriteGlobDenied` names at most 20 paths** in its message (`and N more`); the full
+  list stays on the exception. A denied clone can otherwise list a whole tree.
 
 ### Deploy order
 
