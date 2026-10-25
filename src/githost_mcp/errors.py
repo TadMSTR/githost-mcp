@@ -44,6 +44,8 @@ REASON_CLASSES: frozenset[str] = frozenset(
         "invalid_argument",
         "missing_argument",
         "protected_branch",
+        "not_owned",
+        "already_exists",
         "other",
     }
 )
@@ -96,6 +98,23 @@ class ProtectedBranch(ValueError):
     """A history-rewriting operation was aimed at a default or protected branch."""
 
 
+class NotOwned(ValueError):
+    """A repo outside the owners forge controls, where the verb is limited to owned repos.
+
+    git_clone only clones GitHub repos under `forge_owned_owners` and repos on our own
+    Gitea. A third-party clone stays an operator step (Ted, 2026-10-25), so third-party
+    code never lands inside an agent write root.
+    """
+
+
+class AlreadyExists(ValueError):
+    """The thing a create-shaped verb would make is already there.
+
+    A clone destination that exists, or a repo name that is taken. Refused rather than
+    merged into or surfaced as the provider's 422.
+    """
+
+
 class RepoFormatInvalid(ValueError):
     """`repo` was not in `owner/repo` form."""
 
@@ -109,11 +128,19 @@ class WriteGlobDenied(ValueError):
     exceptions get, so the trail shows *why* the write failed, not just that it did.
     """
 
+    #: How many denied paths the message names. A clone reaches this with a whole tree's
+    #: paths (20,000 measured at 720 KB), so the message is bounded and the full list stays
+    #: on `denied_paths` (p4b round 2, R2-04).
+    MAX_LISTED = 20
+
     def __init__(self, repo_path: str, denied_paths: list[str], source: str) -> None:
         self.denied_paths = denied_paths
+        shown = denied_paths[: self.MAX_LISTED]
+        more = len(denied_paths) - len(shown)
+        listed = f"{shown} and {more} more" if more > 0 else f"{shown}"
         super().__init__(
             f"Write denied by policy write_globs scope for '{repo_path}': "
-            f"{denied_paths} (source: {source})"
+            f"{listed} (source: {source})"
         )
 
 
@@ -135,6 +162,8 @@ _BY_TYPE: tuple[tuple[type[BaseException], str], ...] = (
     (InvalidArgument, "invalid_argument"),
     (MissingArgument, "missing_argument"),
     (ProtectedBranch, "protected_branch"),
+    (NotOwned, "not_owned"),
+    (AlreadyExists, "already_exists"),
 )
 
 # Audit `result` string -> reason class, for the call sites that pass a literal result

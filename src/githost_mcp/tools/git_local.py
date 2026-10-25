@@ -5,19 +5,41 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shutil
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import git
 import structlog
 
+from .._providers.gitea_client import gitea_org_exists_sync
 from .._providers.github_client import get_github, github_call
-from ..audit import AuditCtx, reject_enum
+from ..audit import AuditCtx, audit_rejection, reject_enum
+from ..bootstrap import (
+    CLONE_PROVIDERS,
+    checkout_origin,
+    clone_args,
+    clone_destination,
+    clone_url,
+    ensure_gitea_org,
+    ensure_no_branch_for_denied_paths,
+    ensure_owned,
+    ensure_whole_tree_writer,
+    first_bad_segment,
+    occupied_message,
+    raw_clone_destination,
+    run_clone,
+    symlinks_above_denied,
+    tree_check_paths,
+    validate_depth,
+)
 from ..config import get_config
 from ..errors import (
+    AlreadyExists,
     InvalidArgument,
     MissingArgument,
     NoSuchRemote,
+    NotOwned,
     ProtectedBranch,
     RepoNotFound,
 )
@@ -1267,6 +1289,157 @@ def register(mcp) -> None:
             }
         except ProtectedBranch as e:
             ac.finish("denied:protected_branch", e)
+            return {"error": scrub(str(e))}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return {"error": scrub(str(e))}
+
+    @mcp.tool
+    def git_clone(
+        provider: str,
+        owner: str,
+        repo: str,
+        depth: int | None = None,
+        branch: str | None = None,
+    ) -> dict:
+        """Clone a repo forge owns into its standard checkout location.
+
+        Only repos whose owner forge controls: GitHub owners in forge_owned_owners,
+        organizations on our Gitea. A fork is deliberately allowed: to work on an
+        upstream, github_fork it and clone the fork. Cloning the upstream itself is an
+        operator step.
+
+        An agent whose grant denies some paths (write_globs_deny) cannot pass `branch`,
+        and a clone whose tree contains a denied path is removed and refused.
+
+        There is no url and no destination argument. The SSH URL is built from
+        provider/owner/repo, and the path is computed:
+          - github: ~/repos/personal/<repo>
+          - gitea:  ~/repos/gitea/<owner>-<repo> (or <repo> if it starts with <owner>-)
+        An existing destination is refused, never merged into. The result's `path`
+        is where it landed; use it as repo_path from then on.
+
+        Submodules are not cloned. A failed clone removes the directory it created.
+
+        Args:
+            provider: github | gitea.
+            owner: Repo owner (GitHub user/org, or Gitea org).
+            repo: Repo name, without '.git'.
+            depth: Shallow-clone depth (positive integer). Default: full history.
+            branch: Branch to check out. Default: the remote's default branch.
+        """
+        full_name = f"{owner}/{repo}"
+        if provider not in CLONE_PROVIDERS:
+            return reject_enum(
+                "git_clone", "local", full_name, "provider", provider, CLONE_PROVIDERS
+            )
+        if bad := first_bad_segment((("owner", owner), ("repo", repo))):
+            reason_class, argument, value, message = bad
+            return audit_rejection(
+                "git_clone",
+                provider,
+                full_name,
+                reason_class,
+                message,
+                argument=argument,
+                value=value,
+            )
+        config = get_config()
+        gitea_host = _gitea_host(config.gitea_url)
+        # Before anything touches the network or the filesystem.
+        try:
+            ensure_owned(provider, owner, config.forge_owned_owners, gitea_host)
+        except NotOwned as e:
+            return audit_rejection(
+                "git_clone",
+                provider,
+                full_name,
+                "not_owned",
+                str(e),
+                argument="owner",
+                value=owner,
+            )
+
+        params = {"provider": provider, "repo": full_name, "depth": depth, "branch": branch}
+        ac = AuditCtx("git_clone", provider, full_name, params)
+        try:
+            validate_depth(depth)
+            if branch is not None:
+                validate_branch_name(branch)
+            dest = validate_write_path(clone_destination(provider, owner, repo))
+            ensure_whole_tree_writer(dest, config.write_globs, config.allowlist_source)
+            ensure_no_branch_for_denied_paths(branch, config.write_globs_deny)
+            if provider == "gitea":
+                ensure_gitea_org(owner, gitea_org_exists_sync(owner))
+            raw = raw_clone_destination(provider, owner, repo)
+            if os.path.lexists(raw) or os.path.lexists(dest):
+                raise AlreadyExists(
+                    occupied_message(dest, checkout_origin(raw), provider, owner, repo, gitea_host)
+                )
+            url = clone_url(provider, owner, repo, gitea_host)
+            validate_remote_url(url)
+
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            # mkdir, not a later git-side create: it fails if anything appeared since the
+            # lexists() check, and it is what makes the cleanup below safe — this call
+            # removes only a directory it created itself.
+            # SECURITY[deferred]: between this mkdir and git starting, a same-uid process
+            # could swap the empty directory for a symlink, and git would clone through it.
+            # Nothing to gain while every agent shares one uid; revisit with per-agent uids
+            # (clone into a mkdtemp sibling, then rename). Ticket vikunja#1228.
+            # Target: agent-isolation-2026-10 p4.
+            # Audit: 2026-10-25/agent-build-workflow-2026-09-p4b-githost-bootstrap F-07.
+            try:
+                os.mkdir(dest)
+            except FileExistsError:
+                raise AlreadyExists(f"{dest} already exists") from None
+            # Everything up to reading the result back counts as the clone: if any of it
+            # fails, the tree is removed, so a retry is not refused as "already exists".
+            try:
+                run_clone(url, dest, clone_args(depth, branch))
+                cloned = _open_repo(dest)
+                # A clone writes every path of the tree, so a deny-scoped grant
+                # (developer's manifests/**) is checked against all of them (audit F-03).
+                listing = cloned.git.ls_files("-s", "-z")
+                check = tree_check_paths(listing)
+                try:
+                    validate_write_globs(dest, list(check))
+                except WriteGlobDenied as denied:
+                    raise WriteGlobDenied(
+                        dest,
+                        sorted({check[p] for p in denied.denied_paths}),
+                        config.allowlist_source,
+                    ) from None
+                if above := symlinks_above_denied(listing, config.write_globs_deny, dest):
+                    raise WriteGlobDenied(dest, above, config.allowlist_source)
+                empty = not cloned.head.is_valid()
+                # `branch` may name a tag, which git checks out detached.
+                on_branch = not empty and not cloned.head.is_detached
+                branch_name = cloned.active_branch.name if on_branch else None
+                head_sha = None if empty else cloned.head.commit.hexsha
+            except BaseException:
+                shutil.rmtree(dest, ignore_errors=True)
+                raise
+
+            ac.finish("ok")
+            return {
+                "path": dest,
+                "provider": provider,
+                "repo": full_name,
+                "url": url,
+                "branch": branch_name,
+                "head_sha": head_sha,
+                "empty": empty,
+                "depth": depth,
+                "note": "Use `path` as repo_path for every git_* call on this repo.",
+            }
+        except WriteGlobDenied as e:
+            # The same result string git_add/git_commit write (CR-01).
+            ac.finish("denied:write_glob", e)
+            return {"error": scrub(str(e))}
+        except NotOwned as e:
+            # The same result string as the GitHub ownership refusal (round 2, R2-02).
+            ac.finish("denied:not_owned", e)
             return {"error": scrub(str(e))}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)

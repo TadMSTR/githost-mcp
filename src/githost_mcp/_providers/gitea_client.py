@@ -38,6 +38,45 @@ async def gitea_get(path: str) -> Any:
         raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
 
 
+async def gitea_get_optional(path: str) -> Any | None:
+    """GET, returning None on a 404 instead of raising. For "does this exist?" reads.
+
+    Gitea answers 404 for a private resource the token cannot see as well as for an
+    absent one, so None means "not visible to us", which is what callers act on.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{_gitea_base()}{path}", headers=_get_gitea_headers())
+            if resp.status_code == 404:
+                return None
+            _check_gitea_response(resp)
+            return resp.json()
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
+
+
+def gitea_org_exists_sync(org: str) -> bool:
+    """True if `org` is an organization this token can see on our Gitea; 404 → False.
+
+    Synchronous, for git_clone, which runs in a worker thread rather than on the event
+    loop. `org` must already have passed bootstrap.validate_segment(): it is interpolated
+    into the path, and httpx resolves dot segments.
+    """
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(f"{_gitea_base()}/orgs/{org}", headers=_get_gitea_headers())
+            if resp.status_code == 404:
+                return False
+            _check_gitea_response(resp)
+            return True
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
+
+
 async def gitea_post(path: str, data: dict) -> Any:
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
