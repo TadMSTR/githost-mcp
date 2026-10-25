@@ -700,3 +700,91 @@ async def test_gitea_repo_create_preflight(gitea_tools, owner, name, visibility)
         result = await gitea_tools["gitea_repo_create"](owner, name, visibility)
     assert not anything.called
     assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Pre-audit baseline fixes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("repo", ["../user", "TadMSTR/..", "./x"])
+def test_github_repo_get_refuses_dot_segments_before_any_call(gh_tools, repo):
+    gh = MagicMock()
+    with patch("githost_mcp.tools.github.get_github", return_value=gh):
+        result = gh_tools["github_repo_get"](repo)
+    assert "error" in result
+    gh.get_repo.assert_not_called()
+    assert _entries()[-1]["result"] == "denied:invalid_argument"
+
+
+def _checkout_with_origin(path, url):
+    repo = git.Repo.init(path)
+    repo.create_remote("origin", url)
+
+
+@pytest.mark.parametrize(
+    "origin_url",
+    [
+        "git@github.com:TadMSTR/foo.git",
+        "https://github.com/TadMSTR/foo",
+        "ssh://git@github.com/tadmstr/FOO.git",
+    ],
+)
+def test_git_clone_existing_checkout_of_the_same_repo_says_use_it(local_tools, env, origin_url):
+    _checkout_with_origin(env["home"] / "repos/personal/foo", origin_url)
+    with patch("githost_mcp.tools.git_local.run_clone") as run:
+        result = local_tools["git_clone"]("github", "TadMSTR", "foo")
+    run.assert_not_called()
+    assert "use that checkout" in result["error"]
+
+
+def test_git_clone_existing_checkout_of_another_repo_is_not_offered(local_tools, env):
+    # Not one-to-one: another owner's `foo` maps to the same directory.
+    _checkout_with_origin(env["home"] / "repos/personal/foo", "git@github.com:someone/foo.git")
+    with patch("githost_mcp.tools.git_local.run_clone") as run:
+        result = local_tools["git_clone"]("github", "TadMSTR", "foo")
+    run.assert_not_called()
+    assert "use that checkout" not in result["error"]
+    assert "someone/foo" in result["error"] and "operator decision" in result["error"]
+
+
+def test_git_clone_gitea_collision_is_not_offered(local_tools, env):
+    # a-b/c and a/b-c share ~/repos/gitea/a-b-c.
+    _checkout_with_origin(env["home"] / "repos/gitea/a-b-c", "git@gitea.example.com:a-b/c.git")
+    with patch("githost_mcp.tools.git_local.run_clone") as run:
+        result = local_tools["git_clone"]("gitea", "a", "b-c")
+    run.assert_not_called()
+    assert "use that checkout" not in result["error"]
+    with patch("githost_mcp.tools.git_local.run_clone"):
+        same = local_tools["git_clone"]("gitea", "a-b", "c")
+    assert "use that checkout" in same["error"]
+
+
+def test_git_clone_does_not_follow_a_dangling_symlink_inside_the_roots(local_tools, env):
+    target = env["home"] / "repos/personal/elsewhere"
+    (env["home"] / "repos/personal/foo").symlink_to(target)
+    with patch("githost_mcp.tools.git_local.run_clone") as run:
+        result = local_tools["git_clone"]("github", "TadMSTR", "foo")
+    assert "error" in result
+    run.assert_not_called()
+    assert not target.exists()
+
+
+def test_git_clone_removes_the_tree_if_reading_it_back_fails(local_tools, env, origin):
+    fake, _ = _fake_clone(origin.git_dir)
+    dest = env["home"] / "repos/personal/readback"
+    with (
+        patch("githost_mcp.tools.git_local.run_clone", side_effect=fake),
+        patch("githost_mcp.tools.git_local._open_repo", side_effect=RuntimeError("unreadable")),
+    ):
+        result = local_tools["git_clone"]("github", "TadMSTR", "readback")
+    assert "unreadable" in result["error"]
+    assert not dest.exists()
+
+
+def test_git_clone_same_name_on_another_host_is_not_offered(local_tools, env):
+    _checkout_with_origin(env["home"] / "repos/personal/foo", "git@gitlab.com:TadMSTR/foo.git")
+    with patch("githost_mcp.tools.git_local.run_clone"):
+        result = local_tools["git_clone"]("github", "TadMSTR", "foo")
+    assert "use that checkout" not in result["error"]
+    assert "gitlab.com" in result["error"]

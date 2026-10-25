@@ -17,7 +17,10 @@ repo was public. Closes #546 and #764. Ted decided the three constraints below o
   path follows forge's checkout convention: GitHub → `~/repos/personal/<repo>`, Gitea →
   `~/repos/gitea/<owner>-<repo>` (or `<repo>` if it already starts with `<owner>-`). It is
   validated against the write roots, and an existing path is refused rather than merged
-  into. Submodules are never cloned. The clone is killed after 120 s, and a failed clone
+  into. The convention is not one-to-one (`a/foo` and `b/foo` on GitHub share a
+  directory), so the refusal says "use that checkout" only when the existing checkout's
+  `origin` is this repo, and names the other origin otherwise. A symlink at the
+  destination is refused, never followed. Submodules are never cloned. The clone is killed after 120 s, and a failed clone
   removes only the directory this call created. An agent whose grant is scoped by
   `write_globs` (writer) is refused: a clone writes a whole tree.
 - **`github_repo_create(name, visibility, description=None)`** and
@@ -38,6 +41,14 @@ repo was public. Closes #546 and #764. Ted decided the three constraints below o
   `empty` comes from the commits endpoint's 409, because REST has no `empty` field and
   `size` is recomputed lazily.
 - **`reason_class` members `not_owned` and `already_exists`.**
+
+### Deploy order
+
+Writer and research (and harlock and the desktop manifests) restrict githost-mcp with a
+`tool_denylist`, so every new tool is live for them the moment this version loads. Deny
+`git_clone` and both `*_repo_create` tools there, and HITL-gate both create tools for the
+allowlist agents, **before** installing 0.16.0. Then restart the allowlist agents' proxies
+a second time: they skip allowlist entries for tools the old upstream did not serve.
 
 ### Notes
 

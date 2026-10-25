@@ -1137,6 +1137,20 @@ def register(mcp) -> None:
         """
         if err := _bad_repo(repo):
             return audit_rejection("github_repo_get", "github", repo, "bad_repo_format", err)
+        # _REPO_RE admits ".." as a segment, and PyGithub builds /repos/{full_name}
+        # unquoted: "../user" would GET /user with our token.
+        owner, _, name = repo.partition("/")
+        if bad := first_bad_segment((("owner", owner), ("repo", name))):
+            reason_class, argument, value, message = bad
+            return audit_rejection(
+                "github_repo_get",
+                "github",
+                repo,
+                reason_class,
+                message,
+                argument=argument,
+                value=value,
+            )
         ac = AuditCtx("github_repo_get", "github", repo, {"repo": repo})
         try:
             gh_repo = get_repo_or_none(get_github(), repo)

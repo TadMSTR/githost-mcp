@@ -16,12 +16,15 @@ from .._providers.github_client import get_github, github_call
 from ..audit import AuditCtx, audit_rejection, reject_enum
 from ..bootstrap import (
     CLONE_PROVIDERS,
+    checkout_origin,
     clone_args,
     clone_destination,
     clone_url,
     ensure_owned,
     ensure_whole_tree_writer,
     first_bad_segment,
+    occupied_message,
+    raw_clone_destination,
     run_clone,
     validate_depth,
 )
@@ -1356,10 +1359,10 @@ def register(mcp) -> None:
                 validate_branch_name(branch)
             dest = validate_write_path(clone_destination(provider, owner, repo))
             ensure_whole_tree_writer(dest, config.write_globs, config.allowlist_source)
-            if os.path.lexists(dest):
+            raw = raw_clone_destination(provider, owner, repo)
+            if os.path.lexists(raw) or os.path.lexists(dest):
                 raise AlreadyExists(
-                    f"{dest} already exists. git_clone never merges into an existing "
-                    "directory; use the checkout that is there."
+                    occupied_message(dest, checkout_origin(raw), provider, owner, repo, gitea_host)
                 )
             url = clone_url(provider, owner, repo, gitea_host)
             validate_remote_url(url)
@@ -1372,24 +1375,28 @@ def register(mcp) -> None:
                 os.mkdir(dest)
             except FileExistsError:
                 raise AlreadyExists(f"{dest} already exists") from None
+            # Everything up to reading the result back counts as the clone: if any of it
+            # fails, the tree is removed, so a retry is not refused as "already exists".
             try:
                 run_clone(url, dest, clone_args(depth, branch))
+                cloned = _open_repo(dest)
+                empty = not cloned.head.is_valid()
+                # `branch` may name a tag, which git checks out detached.
+                on_branch = not empty and not cloned.head.is_detached
+                branch_name = cloned.active_branch.name if on_branch else None
+                head_sha = None if empty else cloned.head.commit.hexsha
             except BaseException:
                 shutil.rmtree(dest, ignore_errors=True)
                 raise
 
-            cloned = _open_repo(dest)
-            empty = not cloned.head.is_valid()
-            # `branch` may name a tag, which git checks out detached.
-            on_branch = not empty and not cloned.head.is_detached
             ac.finish("ok")
             return {
                 "path": dest,
                 "provider": provider,
                 "repo": full_name,
                 "url": url,
-                "branch": cloned.active_branch.name if on_branch else None,
-                "head_sha": None if empty else cloned.head.commit.hexsha,
+                "branch": branch_name,
+                "head_sha": head_sha,
                 "empty": empty,
                 "depth": depth,
                 "note": "Use `path` as repo_path for every git_* call on this repo.",

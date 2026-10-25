@@ -25,7 +25,8 @@ import re
 import git
 
 from .errors import InvalidArgument, MissingArgument, NotOwned, WriteGlobDenied
-from .security import canonical_path
+from .identity import _parse_remote, _repo_full_name
+from .security import canonical_path, redact_url_credentials
 
 CLONE_PROVIDERS = frozenset({"github", "gitea"})
 VISIBILITIES = frozenset({"public", "private"})
@@ -140,17 +141,74 @@ def clone_url(provider: str, owner: str, repo: str, gitea_host: str) -> str:
     return f"git@{host}:{owner}/{repo}.git"
 
 
-def clone_destination(provider: str, owner: str, repo: str) -> str:
-    """Forge's checkout convention, canonical. Computed here, never taken from the caller.
+def raw_clone_destination(provider: str, owner: str, repo: str) -> str:
+    """Forge's checkout convention, `~` expanded but NOT resolved.
 
     GitHub `<owner>/<repo>` → `~/repos/personal/<repo>`.
     Gitea `<org>/<repo>` → `~/repos/gitea/<org>-<repo>`, or `~/repos/gitea/<repo>` when the
     name already starts with `<org>-` (`agent-platform/agent-platform-knowledge-base`).
+
+    Kept unresolved for the "is something already here?" check: resolving first follows a
+    dangling symlink at this path, and the clone would land wherever it points.
     """
     if provider == "github":
-        return str(canonical_path(os.path.join(GITHUB_CLONE_ROOT, repo)))
+        return os.path.join(os.path.expanduser(GITHUB_CLONE_ROOT), repo)
     name = repo if repo.startswith(f"{owner}-") else f"{owner}-{repo}"
-    return str(canonical_path(os.path.join(GITEA_CLONE_ROOT, name)))
+    return os.path.join(os.path.expanduser(GITEA_CLONE_ROOT), name)
+
+
+def clone_destination(provider: str, owner: str, repo: str) -> str:
+    """raw_clone_destination(), canonical. Computed here, never taken from the caller."""
+    return str(canonical_path(raw_clone_destination(provider, owner, repo)))
+
+
+def checkout_origin(path: str) -> str | None:
+    """`origin`'s URL if `path` is a real directory holding a git checkout, else None."""
+    if os.path.islink(path) or not os.path.isdir(path):
+        return None
+    try:
+        return (
+            git.Repo(path, search_parent_directories=False, expand_vars=False).remotes["origin"].url
+        )
+    except Exception:
+        return None
+
+
+def origin_is(origin: str | None, provider: str, owner: str, repo: str, gitea_host: str) -> bool:
+    """True when `origin` names this provider's `<owner>/<repo>`, in any URL form."""
+    if not origin:
+        return False
+    parsed = _parse_remote(origin)
+    full_name = _repo_full_name(origin)
+    host = "github.com" if provider == "github" else gitea_host
+    return (
+        parsed is not None
+        and full_name is not None
+        and parsed[0] == host.lower()
+        and full_name.lower() == f"{owner}/{repo}".lower()
+    )
+
+
+def occupied_message(
+    dest: str, origin: str | None, provider: str, owner: str, repo: str, gitea_host: str
+) -> str:
+    """Why an existing destination is refused, and whether it is safe to use.
+
+    The convention is not one-to-one: `a/foo` and `b/foo` on GitHub share
+    `~/repos/personal/foo`, and Gitea's `a-b/c` and `a/b-c` share `a-b-c`. So "use the
+    checkout that is there" is said only when that checkout's origin IS this repo; an
+    agent told otherwise could commit and push to the wrong remote.
+    """
+    full_name = f"{owner}/{repo}"
+    if origin_is(origin, provider, owner, repo, gitea_host):
+        return f"{full_name} is already cloned at {dest}; use that checkout."
+    if origin:
+        return (
+            f"{dest} is occupied by a checkout of {redact_url_credentials(origin)}, not "
+            f"{full_name}. Nothing was cloned. Where {full_name} should live instead is an "
+            "operator decision."
+        )
+    return f"{dest} already exists and is not a checkout of {full_name}. Nothing was cloned."
 
 
 def clone_args(depth: int | None, branch: str | None) -> list[str]:
