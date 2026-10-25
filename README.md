@@ -98,8 +98,8 @@ existing path is refused, never merged into. Submodules are not cloned, since
 and a failed clone removes only the directory the call created. An agent whose grant is
 scoped by `write_globs` is refused outright, because a clone writes a whole tree. An agent
 whose grant carries `write_globs_deny` (developer's `manifests/**`) cannot pass `branch`,
-and a clone whose tree contains a denied path is removed and refused as
-`denied:write_glob`. So developer cannot clone `host-forge/scripts`, whose manifests
+and a clone whose tree contains a denied path (a tracked symlink is checked as the
+directory it would create) is removed and refused as `denied:write_glob`. So developer cannot clone `host-forge/scripts`, whose manifests
 sysadmin owns.
 
 `git_worktree` (as of 0.15.0) is the one sanctioned way to get a scratch checkout. The
@@ -196,7 +196,8 @@ repo. An absent repo, or one the token cannot see, returns `{"exists": false}`.
 `visibility` (`public`/`private`) is required, with no default. An existing name is
 refused before the create call. The reported `visibility` is read back from the
 provider, not echoed; if the read-back fails or disagrees, the result still says
-`created: true` and carries a `warning`. `description` refuses control characters, so it
+`created: true` and carries a `warning`, and the audit record says
+`ok:visibility_unconfirmed` or `ok:visibility_mismatch` rather than plain `ok`. `description` refuses control characters, so it
 cannot print a forged `visibility:` line in the HITL notification. GitHub creates under the token's account; Gitea creates in an
 organization only. There is deliberately no delete verb and no visibility-change verb.
 Gate both create tools with HITL.

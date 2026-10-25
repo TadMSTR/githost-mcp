@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 
 import git
 
@@ -47,6 +48,8 @@ CLONE_TIMEOUT_S = 120
 # real repo (#764's second case), so a leading dot is allowed; "." and ".." are not.
 _SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}")
 _MAX_DESCRIPTION_CHARS = 350
+_LINE_BREAKING_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+_SYMLINK_MODE = "120000"
 
 
 def validate_segment(argument: str, value: str | None) -> str:
@@ -95,7 +98,10 @@ def validate_description(description: str | None) -> str | None:
     """
     if description is None:
         return None
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in description):
+    # Unicode categories, not an ASCII range (round 2, R2-05): Cc covers C0, DEL and C1
+    # (U+0085 NEL among them), and Zl/Zp are U+2028/U+2029. All are line breaks to some
+    # renderer.
+    if any(unicodedata.category(ch) in _LINE_BREAKING_CATEGORIES for ch in description):
         raise InvalidArgument("description must not contain control characters or newlines")
     if len(description) > _MAX_DESCRIPTION_CHARS:
         raise InvalidArgument(
@@ -129,6 +135,36 @@ def readback_warning(
             "Check the repo before pushing anything to it."
         )
     return None
+
+
+def readback_result(reported: str | None, warning: str | None) -> str:
+    """The audit `result` for a create: `ok`, or an `ok:*` naming what is unconfirmed.
+
+    The create succeeded either way, so these stay successes (audit.py counts `ok*` as
+    such). But "asked for private, the provider says public" must be visible in the audit
+    trail, not only in the result the calling agent receives (round 2, R2-03).
+    """
+    if warning is None:
+        return "ok"
+    return "ok:visibility_unconfirmed" if reported is None else "ok:visibility_mismatch"
+
+
+def tree_check_paths(ls_files_stage: str) -> dict[str, str]:
+    """Paths to test against the deny globs, mapped to how a refusal should name them.
+
+    Parses `git ls-files -s -z`. A tracked symlink is also tested as `<path>/x`: a symlink
+    named `manifests` pointing at `evil/` lands `manifests/a.yml` on disk while no tracked
+    path matches `manifests/**` (round 2, R2-01).
+    """
+    paths: dict[str, str] = {}
+    for entry in ls_files_stage.split("\0"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition("\t")
+        paths[path] = path
+        if meta.split(" ", 1)[0] == _SYMLINK_MODE:
+            paths[f"{path}/x"] = f"{path} (symlink)"
+    return paths
 
 
 def validate_depth(depth: int | None) -> int | None:

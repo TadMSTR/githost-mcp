@@ -128,11 +128,19 @@ class WriteGlobDenied(ValueError):
     exceptions get, so the trail shows *why* the write failed, not just that it did.
     """
 
+    #: How many denied paths the message names. A clone reaches this with a whole tree's
+    #: paths (20,000 measured at 720 KB), so the message is bounded and the full list stays
+    #: on `denied_paths` (p4b round 2, R2-04).
+    MAX_LISTED = 20
+
     def __init__(self, repo_path: str, denied_paths: list[str], source: str) -> None:
         self.denied_paths = denied_paths
+        shown = denied_paths[: self.MAX_LISTED]
+        more = len(denied_paths) - len(shown)
+        listed = f"{shown} and {more} more" if more > 0 else f"{shown}"
         super().__init__(
             f"Write denied by policy write_globs scope for '{repo_path}': "
-            f"{denied_paths} (source: {source})"
+            f"{listed} (source: {source})"
         )
 
 

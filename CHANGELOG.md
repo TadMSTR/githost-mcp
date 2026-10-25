@@ -27,15 +27,21 @@ repo was public. Closes #546 and #764. Ted decided the three constraints below o
   `write_globs` (writer) is refused: a clone writes a whole tree. An agent whose grant
   carries `write_globs_deny` cannot pass `branch`, and a clone whose tree holds a denied
   path is removed and refused as `denied:write_glob`, the same result `git_add` and
-  `git_commit` write.
+  `git_commit` write. A tracked symlink is checked as the directory it creates, so
+  `manifests -> evil/` is refused too. A Gitea org refusal is `denied:not_owned`, like the
+  GitHub one.
 - **`github_repo_create(name, visibility, description=None)`** and
   **`gitea_repo_create(owner, name, visibility, description=None)`**. `visibility` is
   `public` or `private`, required, with no default. Repos are created **empty**
   (`auto_init=False`), ready for existing local work to be pushed in. An existing name
   is refused before the create call. The result's `visibility` is read back from the
   provider. A `warning` is added if it differs from the request, or if the read-back
-  fails; a failed read-back never turns a successful create into an error. `description`
-  refuses control characters (the HITL notification renders arguments unescaped). GitHub creates
+  fails; a failed read-back never turns a successful create into an error. Those two
+  cases are audited as `ok:visibility_mismatch` / `ok:visibility_unconfirmed`, with the
+  warning as the reason. `description` refuses control characters and Unicode line
+  breaks (the HITL notification renders arguments unescaped).
+- **`WriteGlobDenied` names at most 20 paths** in its message (`and N more`); the full
+  list stays on the exception. A denied clone can otherwise list a whole tree. GitHub creates
   under the authenticated account. Gitea creates in an **organization only**: forge's
   token has no `write:user` scope, so `owner` must be an org, and a user name is refused
   with a clear message rather than a bare 404. There is no delete verb and no

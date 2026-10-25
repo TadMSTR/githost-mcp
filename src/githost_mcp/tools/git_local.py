@@ -29,6 +29,7 @@ from ..bootstrap import (
     occupied_message,
     raw_clone_destination,
     run_clone,
+    tree_check_paths,
     validate_depth,
 )
 from ..config import get_config
@@ -1398,7 +1399,15 @@ def register(mcp) -> None:
                 cloned = _open_repo(dest)
                 # A clone writes every path of the tree, so a deny-scoped grant
                 # (developer's manifests/**) is checked against all of them (audit F-03).
-                validate_write_globs(dest, cloned.git.ls_files("-z").split("\0")[:-1])
+                check = tree_check_paths(cloned.git.ls_files("-s", "-z"))
+                try:
+                    validate_write_globs(dest, list(check))
+                except WriteGlobDenied as denied:
+                    raise WriteGlobDenied(
+                        dest,
+                        sorted({check[p] for p in denied.denied_paths}),
+                        config.allowlist_source,
+                    ) from None
                 empty = not cloned.head.is_valid()
                 # `branch` may name a tag, which git checks out detached.
                 on_branch = not empty and not cloned.head.is_detached
@@ -1423,6 +1432,10 @@ def register(mcp) -> None:
         except WriteGlobDenied as e:
             # The same result string git_add/git_commit write (CR-01).
             ac.finish("denied:write_glob", e)
+            return {"error": scrub(str(e))}
+        except NotOwned as e:
+            # The same result string as the GitHub ownership refusal (round 2, R2-02).
+            ac.finish("denied:not_owned", e)
             return {"error": scrub(str(e))}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)

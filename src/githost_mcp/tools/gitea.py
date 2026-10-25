@@ -19,6 +19,7 @@ from ..audit import AuditCtx, audit_rejection, reject_enum
 from ..bootstrap import (
     VISIBILITIES,
     first_bad_segment,
+    readback_result,
     readback_warning,
     validate_description,
 )
@@ -1082,9 +1083,10 @@ def register(mcp) -> None:
                 "ssh_url": created.get("ssh_url"),
                 "html_url": created.get("html_url"),
             }
-            if warning := readback_warning("Gitea", visibility, reported, readback_error):
+            warning = readback_warning("Gitea", visibility, reported, readback_error)
+            if warning:
                 result["warning"] = warning
-            ac.finish("ok")
+            ac.finish(readback_result(reported, warning), warning)
             return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)

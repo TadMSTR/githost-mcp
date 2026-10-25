@@ -27,6 +27,7 @@ from githost_mcp.bootstrap import (
     ensure_whole_tree_writer,
     first_bad_segment,
     run_clone,
+    tree_check_paths,
     validate_depth,
     validate_description,
     validate_segment,
@@ -806,7 +807,8 @@ def test_git_clone_gitea_user_namespace_is_not_owned(local_tools, env):
     org.assert_called_once_with("someuser")
     run.assert_not_called()
     assert "not an organization" in result["error"]
-    assert _entries()[-1]["result"] == "error:NotOwned"
+    # The same result string as the GitHub refusal (round 2, R2-02).
+    assert _entries()[-1]["result"] == "denied:not_owned"
     assert not (env["home"] / "repos/gitea/someuser-mirror").exists()
 
 
@@ -947,7 +949,8 @@ def test_github_repo_create_readback_failure_is_a_warning_not_an_error(gh_tools)
         result = gh_tools["github_repo_create"]("probe", "private")
     assert result["created"] is True and result["visibility"] is None
     assert "reading it back failed" in result["warning"]
-    assert _entries()[-1]["result"] == "ok"
+    # Still a success, but an unconfirmed one (round 2, R2-03).
+    assert _entries()[-1]["result"] == "ok:visibility_unconfirmed"
 
 
 @pytest.mark.asyncio
@@ -967,4 +970,117 @@ async def test_gitea_repo_create_readback_failure_is_a_warning_not_an_error(gite
         result = await gitea_tools["gitea_repo_create"]("host-forge", "probe", "private")
     assert result["created"] is True and result["visibility"] is None
     assert "reading it back failed" in result["warning"]
-    assert _entries()[-1]["result"] == "ok"
+    # Still a success, but an unconfirmed one (round 2, R2-03).
+    assert _entries()[-1]["result"] == "ok:visibility_unconfirmed"
+
+
+# ---------------------------------------------------------------------------
+# Audit round 2 remediation
+# ---------------------------------------------------------------------------
+
+
+def _origin_with_symlink(tmp_path):
+    """A tree tracking `manifests` as a symlink to `evil/` (mode 120000)."""
+    bare = git.Repo.init(tmp_path / "symlinked.git", bare=True, initial_branch="main")
+    work = tmp_path / "seed-symlink"
+    seed = git.Repo.clone_from(bare.git_dir, work)
+    (work / "evil").mkdir()
+    (work / "evil" / "a.yml").write_text("x")
+    (work / "manifests").symlink_to("evil")
+    seed.git.add("evil/a.yml", "manifests")
+    seed.git.commit("-m", "symlinked manifests")
+    seed.git.push("origin", "HEAD:refs/heads/main")
+    return bare
+
+
+def test_tree_check_paths_tests_a_symlink_as_a_directory():
+    listing = (
+        "100644 " + "a" * 40 + " 0\tevil/a.yml\0"
+        "120000 " + "b" * 40 + " 0\tmanifests\0"
+        "100644 " + "c" * 40 + " 0\twith space/f\0"
+    )
+    assert tree_check_paths(listing) == {
+        "evil/a.yml": "evil/a.yml",
+        "manifests": "manifests",
+        "manifests/x": "manifests (symlink)",
+        "with space/f": "with space/f",
+    }
+    assert tree_check_paths("") == {}
+
+
+def test_git_clone_refuses_a_symlinked_denied_directory(local_tools, env, tmp_path):
+    """R2-01: path strings alone pass `manifests -> evil/`; what lands on disk does not."""
+    bare = _origin_with_symlink(tmp_path)
+    fake, _ = _fake_clone(bare.git_dir)
+    scoped = _deny_scoped()
+    with (
+        patch("githost_mcp.tools.git_local.get_config", return_value=scoped),
+        patch("githost_mcp.security.get_config", return_value=scoped),
+        patch("githost_mcp.tools.git_local.run_clone", side_effect=fake),
+    ):
+        result = local_tools["git_clone"]("github", "TadMSTR", "sneaky")
+    assert "manifests (symlink)" in result["error"]
+    assert not (env["home"] / "repos/personal/sneaky").exists()
+    assert _entries()[-1]["result"] == "denied:write_glob"
+
+
+def test_write_glob_denied_message_is_bounded():
+    """R2-04: a clone can deny a whole tree; the message names 20, the attribute keeps all."""
+    paths = [f"manifests/{i}.yml" for i in range(500)]
+    err = WriteGlobDenied("/r", paths, "policy")
+    assert "and 480 more" in str(err)
+    assert len(str(err)) < 1000
+    assert err.denied_paths == paths
+    assert "more" not in str(WriteGlobDenied("/r", paths[:20], "policy"))
+
+
+@pytest.mark.parametrize("ch", ["\u0085", "\u2028", "\u2029", "\u009b"])
+def test_validate_description_refuses_unicode_line_breaks(ch):
+    """R2-05."""
+    with pytest.raises(InvalidArgument, match="control"):
+        validate_description(f"x{ch}  visibility: private")
+
+
+def test_validate_description_keeps_ordinary_unicode():
+    assert validate_description("Café — ünïcode, emoji 🚀, CJK 漢字") is not None
+
+
+@pytest.mark.parametrize(
+    ("reported", "warning", "expected"),
+    [
+        ("private", None, "ok"),
+        ("public", "w", "ok:visibility_mismatch"),
+        (None, "w", "ok:visibility_unconfirmed"),
+    ],
+)
+def test_readback_result(reported, warning, expected):
+    from githost_mcp.bootstrap import readback_result
+
+    assert readback_result(reported, warning) == expected
+
+
+def test_github_repo_create_mismatch_is_visible_in_the_audit(gh_tools):
+    """R2-03: the security-relevant outcome is in the trail, not only the result."""
+    gh, _ = _creating_gh(readback_visibility="public")
+    with patch("githost_mcp.tools.github.get_github", return_value=gh):
+        gh_tools["github_repo_create"]("probe", "private")
+    entry = _entries()[-1]
+    assert entry["result"] == "ok:visibility_mismatch"
+    assert "GitHub reports public" in entry["reason"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_repo_create_unconfirmed_is_visible_in_the_audit(gitea_tools):
+    with respx.mock:
+        respx.get(f"{_API}/orgs/host-forge").mock(return_value=httpx.Response(200, json={}))
+        respx.get(f"{_API}/repos/host-forge/probe").mock(
+            side_effect=[
+                httpx.Response(404, json={"message": "not found"}),
+                httpx.Response(500, json={"message": "boom"}),
+            ]
+        )
+        respx.post(f"{_API}/orgs/host-forge/repos").mock(
+            return_value=httpx.Response(201, json={"full_name": "host-forge/probe"})
+        )
+        await gitea_tools["gitea_repo_create"]("host-forge", "probe", "private")
+    assert _entries()[-1]["result"] == "ok:visibility_unconfirmed"
