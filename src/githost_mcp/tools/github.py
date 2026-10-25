@@ -9,7 +9,12 @@ import structlog
 
 from .._providers.github_client import get_github, github_call
 from ..audit import AuditCtx, audit_rejection, reject_enum
-from ..bootstrap import VISIBILITIES, first_bad_segment, validate_description
+from ..bootstrap import (
+    VISIBILITIES,
+    first_bad_segment,
+    readback_warning,
+    validate_description,
+)
 from ..errors import AlreadyExists, InvalidArgument, MissingArgument
 from ..security import mask_credentials, scrub, validate_branch_name
 
@@ -104,7 +109,7 @@ def github_repo_is_empty(gh_repo) -> bool:
 
 
 def github_repo_metadata(gh_repo) -> dict:
-    """The fields #546 (id 629) and part 3 asked for, from the single-repo representation.
+    """The fields vikunja#546 and part 3 asked for, from the single-repo representation.
 
     `delete_branch_on_merge` is only on GET /repos/{owner}/{repo}, never on the list
     endpoints: part 3 measured it as None for all 70 repos through /user/repos.
@@ -1216,21 +1221,25 @@ def register(mcp) -> None:
                 user.create_repo, name, private=visibility == "private", auto_init=False, **kwargs
             )
             # Report what GitHub says, from a fresh read, not the argument echoed back.
-            readback = get_repo_or_none(gh, created.full_name)
+            reported = empty = readback_error = None
+            try:
+                readback = get_repo_or_none(gh, created.full_name)
+                if readback is not None:
+                    reported = readback.visibility
+                    empty = github_repo_is_empty(readback)
+            except Exception as e:
+                readback_error = scrub(str(e))
             result = {
                 "created": True,
                 "full_name": created.full_name,
                 "requested_visibility": visibility,
-                "visibility": readback.visibility if readback else None,
-                "empty": github_repo_is_empty(readback) if readback else None,
+                "visibility": reported,
+                "empty": empty,
                 "ssh_url": created.ssh_url,
                 "html_url": created.html_url,
             }
-            if result["visibility"] != visibility:
-                result["warning"] = (
-                    f"requested {visibility}, GitHub reports {result['visibility']}. "
-                    "Check the repo before pushing anything to it."
-                )
+            if warning := readback_warning("GitHub", visibility, reported, readback_error):
+                result["warning"] = warning
             ac.finish("ok")
             return result
         except Exception as e:

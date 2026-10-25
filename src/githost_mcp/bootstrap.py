@@ -8,13 +8,14 @@ The shape of git_clone is decided here and is deliberate (Ted, 2026-10-25,
 agent-build-workflow-2026-09 part 4b):
 
 - **No caller URL.** The URL is built from `provider/owner/repo`, so the `ext::`/`fd::`
-  remote-helper surface #764 (id 847) worried about is removed rather than filtered.
+  remote-helper surface vikunja#764 worried about is removed rather than filtered.
   validate_remote_url() still runs on the built URL, as defence in depth.
 - **No caller destination.** The path follows forge's checkout convention, measured from
   40 existing checkouts' `origin`, and is still checked against the agent's write roots.
-- **Owned repos only.** GitHub owners in `forge_owned_owners`, any owner on our Gitea.
-  A third-party clone stays an operator step, so third-party code never lands inside an
-  agent write root.
+- **Owned repos only.** Only repos whose owner forge controls: GitHub owners in
+  `forge_owned_owners`, organizations on our Gitea. A fork of an upstream is one of those
+  and is deliberately cloneable (fork, then clone the fork); cloning the upstream itself
+  stays an operator step.
 """
 
 from __future__ import annotations
@@ -86,12 +87,48 @@ def first_bad_segment(
 
 
 def validate_description(description: str | None) -> str | None:
-    """GitHub caps a repo description at 350 characters; refuse longer before the call."""
-    if description is not None and len(description) > _MAX_DESCRIPTION_CHARS:
+    """GitHub caps a repo description at 350 characters; refuse longer before the call.
+
+    Control characters are refused too (audit F-05). The HITL notification renders each
+    argument on its own line, unescaped, so a newline here could print a second, forged
+    `visibility:` line beside the real one, and visibility is the decision being approved.
+    """
+    if description is None:
+        return None
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in description):
+        raise InvalidArgument("description must not contain control characters or newlines")
+    if len(description) > _MAX_DESCRIPTION_CHARS:
         raise InvalidArgument(
             f"description is {len(description)} characters; the limit is {_MAX_DESCRIPTION_CHARS}"
         )
     return description
+
+
+def readback_warning(
+    provider: str, requested: str, reported: str | None, readback_error: str | None
+) -> str | None:
+    """The warning a create result carries, or None when the read-back confirms the request.
+
+    A failed read-back is reported as a warning on a successful result, never as an error
+    (CR-03/CR-05): the repo exists by then, so an error would misreport a create that is
+    not idempotent, and a retry would only be refused as "already exists".
+    """
+    if readback_error is not None:
+        return (
+            f"created, but reading it back failed ({readback_error}); visibility is "
+            "unconfirmed. Check the repo before pushing anything to it."
+        )
+    if reported is None:
+        return (
+            f"created, but {provider} does not show it yet; visibility is unconfirmed. "
+            "Check the repo before pushing anything to it."
+        )
+    if reported != requested:
+        return (
+            f"requested {requested}, {provider} reports {reported}. "
+            "Check the repo before pushing anything to it."
+        )
+    return None
 
 
 def validate_depth(depth: int | None) -> int | None:
@@ -107,8 +144,10 @@ def ensure_owned(provider: str, owner: str, forge_owners: list[str], gitea_host:
     """Raise NotOwned unless `owner` is one forge controls on `provider`.
 
     GitHub: case-insensitive membership of `forge_owned_owners`, the same comparison
-    identity.py uses. Gitea: every owner on our instance is ours, but only if one is
-    configured — an unset GITEA_URL is not a licence to clone from anywhere.
+    identity.py uses. Gitea: only if an instance is configured — an unset GITEA_URL is not
+    a licence to clone from anywhere. That `owner` is an organization there (not a user
+    namespace, which could hold a mirror of third-party code) needs an API call, so it is
+    checked separately by ensure_gitea_org().
     """
     if provider == "github":
         if owner.lower() not in {o.lower() for o in forge_owners}:
@@ -120,6 +159,32 @@ def ensure_owned(provider: str, owner: str, forge_owners: list[str], gitea_host:
         return
     if not gitea_host:
         raise NotOwned("GITEA_URL is not set, so no Gitea owner can be recognised as ours")
+
+
+def ensure_gitea_org(owner: str, is_org: bool) -> None:
+    """Raise NotOwned unless `owner` is an organization on our Gitea (audit F-04)."""
+    if not is_org:
+        raise NotOwned(
+            f"'{owner}' is not an organization on our Gitea (or is not visible to the token). "
+            "git_clone clones Gitea repos in organizations only; a user namespace is an "
+            "operator step."
+        )
+
+
+def ensure_no_branch_for_denied_paths(branch: str | None, write_globs_deny: list[str]) -> None:
+    """Refuse `branch=` for an agent whose grant denies some paths (audit F-03).
+
+    A clone writes every path of the tree, and `branch` can name any branch on the remote,
+    reviewed or not. For an agent that may not write, say, `manifests/**`, that would make
+    an unmerged branch's denied files land on disk under its roots. The default branch is
+    still cloneable, and its tree is then checked by ensure_no_denied_paths().
+    """
+    if branch is not None and write_globs_deny:
+        raise WriteGlobDenied(
+            f"branch={branch!r}",
+            ["(non-default branch)"],
+            "this agent's grant carries write_globs_deny; clone the default branch",
+        )
 
 
 def ensure_whole_tree_writer(dest: str, write_globs: list[str], source: str) -> None:

@@ -259,6 +259,13 @@ def local_tools(env):
     return _register(git_local)
 
 
+@pytest.fixture()
+def gitea_org():
+    """Our Gitea answers: the owner is an organization."""
+    with patch("githost_mcp.tools.git_local.gitea_org_exists_sync", return_value=True) as m:
+        yield m
+
+
 def _fake_clone(source):
     calls = []
 
@@ -288,7 +295,7 @@ def test_git_clone_github(local_tools, env, origin):
     assert _entries()[-1]["result"] == "ok"
 
 
-def test_git_clone_gitea_destination(local_tools, env, origin):
+def test_git_clone_gitea_destination(local_tools, env, origin, gitea_org):
     fake, calls = _fake_clone(origin.git_dir)
     with patch("githost_mcp.tools.git_local.run_clone", side_effect=fake):
         result = local_tools["git_clone"]("gitea", "host-forge", "scripts", depth=1)
@@ -356,14 +363,6 @@ def test_git_clone_refuses_existing_destination_and_leaves_it(local_tools, env):
     assert _entries()[-1]["result"] == "error:AlreadyExists"
 
 
-def test_git_clone_refuses_existing_symlink(local_tools, env, tmp_path):
-    (env["home"] / "repos/personal/link").symlink_to(tmp_path / "nowhere")
-    with patch("githost_mcp.tools.git_local.run_clone") as run:
-        result = local_tools["git_clone"]("github", "TadMSTR", "link")
-    assert "error" in result
-    run.assert_not_called()
-
-
 def test_git_clone_failure_removes_only_what_it_created(local_tools, env):
     dest = env["home"] / "repos/personal/partial"
 
@@ -398,6 +397,8 @@ def test_git_clone_refuses_a_glob_scoped_agent(local_tools, env):
     assert "write_globs" in result["error"]
     run.assert_not_called()
     assert not (env["home"] / "repos/personal/x").exists()
+    # The same result string git_add/git_commit write (CR-01).
+    assert _entries()[-1]["result"] == "denied:write_glob"
 
 
 def test_git_clone_refuses_bad_depth_and_branch(local_tools, env):
@@ -748,7 +749,7 @@ def test_git_clone_existing_checkout_of_another_repo_is_not_offered(local_tools,
     assert "someone/foo" in result["error"] and "operator decision" in result["error"]
 
 
-def test_git_clone_gitea_collision_is_not_offered(local_tools, env):
+def test_git_clone_gitea_collision_is_not_offered(local_tools, env, gitea_org):
     # a-b/c and a/b-c share ~/repos/gitea/a-b-c.
     _checkout_with_origin(env["home"] / "repos/gitea/a-b-c", "git@gitea.example.com:a-b/c.git")
     with patch("githost_mcp.tools.git_local.run_clone") as run:
@@ -788,3 +789,182 @@ def test_git_clone_same_name_on_another_host_is_not_offered(local_tools, env):
         result = local_tools["git_clone"]("github", "TadMSTR", "foo")
     assert "use that checkout" not in result["error"]
     assert "gitlab.com" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Audit round 1 remediation
+# ---------------------------------------------------------------------------
+
+
+def test_git_clone_gitea_user_namespace_is_not_owned(local_tools, env):
+    """F-04: owned on Gitea means an organization, not any owner."""
+    with (
+        patch("githost_mcp.tools.git_local.gitea_org_exists_sync", return_value=False) as org,
+        patch("githost_mcp.tools.git_local.run_clone") as run,
+    ):
+        result = local_tools["git_clone"]("gitea", "someuser", "mirror")
+    org.assert_called_once_with("someuser")
+    run.assert_not_called()
+    assert "not an organization" in result["error"]
+    assert _entries()[-1]["result"] == "error:NotOwned"
+    assert not (env["home"] / "repos/gitea/someuser-mirror").exists()
+
+
+def test_git_clone_gitea_org_check_failure_fails_closed(local_tools, env):
+    with (
+        patch(
+            "githost_mcp.tools.git_local.gitea_org_exists_sync",
+            side_effect=ValueError("Gitea request failed: ConnectError"),
+        ),
+        patch("githost_mcp.tools.git_local.run_clone") as run,
+    ):
+        result = local_tools["git_clone"]("gitea", "host-forge", "scripts")
+    run.assert_not_called()
+    assert "ConnectError" in result["error"]
+
+
+@pytest.mark.parametrize(("status", "expected"), [(200, True), (404, False)])
+def test_gitea_org_exists_sync(env, status, expected):
+    from githost_mcp._providers.gitea_client import gitea_org_exists_sync
+
+    with respx.mock:
+        respx.get(f"{_API}/orgs/host-forge").mock(return_value=httpx.Response(status, json={}))
+        assert gitea_org_exists_sync("host-forge") is expected
+
+
+def test_gitea_org_exists_sync_raises_on_auth_failure(env):
+    from githost_mcp._providers.gitea_client import gitea_org_exists_sync
+
+    with respx.mock:
+        respx.get(f"{_API}/orgs/host-forge").mock(return_value=httpx.Response(403, json={}))
+        with pytest.raises(ValueError, match="scope"):
+            gitea_org_exists_sync("host-forge")
+
+
+def _deny_scoped():
+    return dataclasses.replace(get_config(), write_globs_deny=["manifests/**", "manifests/*"])
+
+
+def test_git_clone_deny_scoped_agent_cannot_pick_a_branch(local_tools, env):
+    """F-03: a non-default branch could land unreviewed denied files."""
+    scoped = _deny_scoped()
+    with (
+        patch("githost_mcp.tools.git_local.get_config", return_value=scoped),
+        patch("githost_mcp.security.get_config", return_value=scoped),
+        patch("githost_mcp.tools.git_local.run_clone") as run,
+    ):
+        result = local_tools["git_clone"]("github", "TadMSTR", "x", branch="feature")
+    run.assert_not_called()
+    assert "write_globs_deny" in result["error"]
+    assert _entries()[-1]["result"] == "denied:write_glob"
+
+
+def _origin_with(tmp_path, files):
+    bare = git.Repo.init(tmp_path / "withfiles.git", bare=True, initial_branch="main")
+    seed = git.Repo.clone_from(bare.git_dir, tmp_path / "seed-files")
+    for rel in files:
+        (tmp_path / "seed-files" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "seed-files" / rel).write_text("x")
+    seed.index.add(files)
+    seed.index.commit("files")
+    seed.git.push("origin", "HEAD:refs/heads/main")
+    return bare
+
+
+def test_git_clone_removes_a_tree_with_denied_paths(local_tools, env, tmp_path):
+    """F-03: the default branch's tree is checked against the deny globs, then removed."""
+    bare = _origin_with(tmp_path, ["README.md", "manifests/developer-agent.yml"])
+    fake, _ = _fake_clone(bare.git_dir)
+    scoped = _deny_scoped()
+    with (
+        patch("githost_mcp.tools.git_local.get_config", return_value=scoped),
+        patch("githost_mcp.security.get_config", return_value=scoped),
+        patch("githost_mcp.tools.git_local.run_clone", side_effect=fake),
+    ):
+        result = local_tools["git_clone"]("github", "TadMSTR", "scripts")
+    assert "manifests/developer-agent.yml" in result["error"]
+    assert not (env["home"] / "repos/personal/scripts").exists()
+    assert _entries()[-1]["result"] == "denied:write_glob"
+
+
+def test_git_clone_deny_scoped_agent_clones_a_clean_tree(local_tools, env, tmp_path):
+    bare = _origin_with(tmp_path, ["README.md", "src/app.py"])
+    fake, _ = _fake_clone(bare.git_dir)
+    scoped = _deny_scoped()
+    with (
+        patch("githost_mcp.tools.git_local.get_config", return_value=scoped),
+        patch("githost_mcp.security.get_config", return_value=scoped),
+        patch("githost_mcp.tools.git_local.run_clone", side_effect=fake),
+    ):
+        result = local_tools["git_clone"]("github", "TadMSTR", "app")
+    assert result["path"] == str(env["home"] / "repos/personal/app"), result
+    assert (env["home"] / "repos/personal/app/src/app.py").exists()
+
+
+@pytest.mark.parametrize("description", ["x\n  visibility: private", "a\rb", "tab\there", "\x7f"])
+def test_validate_description_refuses_control_characters(description):
+    """F-05: a newline could print a forged visibility line in the HITL notification."""
+    with pytest.raises(InvalidArgument, match="control"):
+        validate_description(description)
+
+
+def test_repo_create_refuses_a_forged_visibility_line(gh_tools, gitea_tools):
+    gh = MagicMock()
+    with patch("githost_mcp.tools.github.get_github", return_value=gh):
+        result = gh_tools["github_repo_create"](
+            "probe", "public", description="x\n  visibility: private"
+        )
+    assert "control" in result["error"]
+    gh.get_user.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("reported", "error", "expect"),
+    [
+        ("private", None, None),
+        ("public", None, "reports public"),
+        (None, None, "does not show it yet"),
+        (None, "boom", "reading it back failed (boom)"),
+    ],
+)
+def test_readback_warning(reported, error, expect):
+    from githost_mcp.bootstrap import readback_warning
+
+    warning = readback_warning("GitHub", "private", reported, error)
+    if expect is None:
+        assert warning is None
+    else:
+        assert expect in warning
+
+
+def test_github_repo_create_readback_failure_is_a_warning_not_an_error(gh_tools):
+    """CR-05: the repo exists by then; an error would misreport the create."""
+    from github import GithubException
+
+    gh, _user = _creating_gh()
+    gh.get_repo.side_effect = [_unknown(), GithubException(502, {"message": "bad gateway"})]
+    with patch("githost_mcp.tools.github.get_github", return_value=gh):
+        result = gh_tools["github_repo_create"]("probe", "private")
+    assert result["created"] is True and result["visibility"] is None
+    assert "reading it back failed" in result["warning"]
+    assert _entries()[-1]["result"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_gitea_repo_create_readback_failure_is_a_warning_not_an_error(gitea_tools):
+    """CR-03."""
+    with respx.mock:
+        respx.get(f"{_API}/orgs/host-forge").mock(return_value=httpx.Response(200, json={}))
+        respx.get(f"{_API}/repos/host-forge/probe").mock(
+            side_effect=[
+                httpx.Response(404, json={"message": "not found"}),
+                httpx.Response(500, json={"message": "boom"}),
+            ]
+        )
+        respx.post(f"{_API}/orgs/host-forge/repos").mock(
+            return_value=httpx.Response(201, json={"full_name": "host-forge/probe"})
+        )
+        result = await gitea_tools["gitea_repo_create"]("host-forge", "probe", "private")
+    assert result["created"] is True and result["visibility"] is None
+    assert "reading it back failed" in result["warning"]
+    assert _entries()[-1]["result"] == "ok"

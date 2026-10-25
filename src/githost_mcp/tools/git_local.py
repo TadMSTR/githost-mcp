@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import git
 import structlog
 
+from .._providers.gitea_client import gitea_org_exists_sync
 from .._providers.github_client import get_github, github_call
 from ..audit import AuditCtx, audit_rejection, reject_enum
 from ..bootstrap import (
@@ -20,6 +21,8 @@ from ..bootstrap import (
     clone_args,
     clone_destination,
     clone_url,
+    ensure_gitea_org,
+    ensure_no_branch_for_denied_paths,
     ensure_owned,
     ensure_whole_tree_writer,
     first_bad_segment,
@@ -1299,9 +1302,13 @@ def register(mcp) -> None:
     ) -> dict:
         """Clone a repo forge owns into its standard checkout location.
 
-        Owned repos only: GitHub owners in forge_owned_owners, any org on our Gitea.
-        A third-party clone is an operator step; to work on one, github_fork it and
-        clone the fork.
+        Only repos whose owner forge controls: GitHub owners in forge_owned_owners,
+        organizations on our Gitea. A fork is deliberately allowed: to work on an
+        upstream, github_fork it and clone the fork. Cloning the upstream itself is an
+        operator step.
+
+        An agent whose grant denies some paths (write_globs_deny) cannot pass `branch`,
+        and a clone whose tree contains a denied path is removed and refused.
 
         There is no url and no destination argument. The SSH URL is built from
         provider/owner/repo, and the path is computed:
@@ -1359,6 +1366,9 @@ def register(mcp) -> None:
                 validate_branch_name(branch)
             dest = validate_write_path(clone_destination(provider, owner, repo))
             ensure_whole_tree_writer(dest, config.write_globs, config.allowlist_source)
+            ensure_no_branch_for_denied_paths(branch, config.write_globs_deny)
+            if provider == "gitea":
+                ensure_gitea_org(owner, gitea_org_exists_sync(owner))
             raw = raw_clone_destination(provider, owner, repo)
             if os.path.lexists(raw) or os.path.lexists(dest):
                 raise AlreadyExists(
@@ -1371,6 +1381,12 @@ def register(mcp) -> None:
             # mkdir, not a later git-side create: it fails if anything appeared since the
             # lexists() check, and it is what makes the cleanup below safe — this call
             # removes only a directory it created itself.
+            # SECURITY[deferred]: between this mkdir and git starting, a same-uid process
+            # could swap the empty directory for a symlink, and git would clone through it.
+            # Nothing to gain while every agent shares one uid; revisit with per-agent uids
+            # (clone into a mkdtemp sibling, then rename). Ticket vikunja#1228.
+            # Target: agent-isolation-2026-10 p4.
+            # Audit: 2026-10-25/agent-build-workflow-2026-09-p4b-githost-bootstrap F-07.
             try:
                 os.mkdir(dest)
             except FileExistsError:
@@ -1380,6 +1396,9 @@ def register(mcp) -> None:
             try:
                 run_clone(url, dest, clone_args(depth, branch))
                 cloned = _open_repo(dest)
+                # A clone writes every path of the tree, so a deny-scoped grant
+                # (developer's manifests/**) is checked against all of them (audit F-03).
+                validate_write_globs(dest, cloned.git.ls_files("-z").split("\0")[:-1])
                 empty = not cloned.head.is_valid()
                 # `branch` may name a tag, which git checks out detached.
                 on_branch = not empty and not cloned.head.is_detached
@@ -1401,6 +1420,10 @@ def register(mcp) -> None:
                 "depth": depth,
                 "note": "Use `path` as repo_path for every git_* call on this repo.",
             }
+        except WriteGlobDenied as e:
+            # The same result string git_add/git_commit write (CR-01).
+            ac.finish("denied:write_glob", e)
+            return {"error": scrub(str(e))}
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}

@@ -80,11 +80,12 @@ Each `method` still writes its own per-operation audit entry.
 `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_branch_delete_remote`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_push_force_with_lease`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*, `git_worktree` *(add/list/remove)*, `git_clone`
 
 `git_clone(provider, owner, repo, depth=None, branch=None)` (as of 0.16.0) clones **only
-repos forge owns**: GitHub owners in `FORGE_OWNED_OWNERS` (default `TadMSTR`) and any org
-on the configured Gitea. Anything else is refused before any network or filesystem
-access, as `denied:not_owned`. Third-party code never lands inside an agent write root;
-to work on an upstream, `github_fork` it and clone the fork. The tool takes **no URL and
-no destination**. It builds the scp-form SSH URL itself and computes the path:
+repos whose owner forge controls**: GitHub owners in `FORGE_OWNED_OWNERS` (default
+`TadMSTR`), and **organizations** on the configured Gitea (a user namespace is refused, and
+the org check is one API call to our own Gitea). A GitHub owner outside the list is refused
+before any network or filesystem access, as `denied:not_owned`. Forks are deliberately
+allowed: to work on an upstream, `github_fork` it and clone the fork; cloning the upstream
+itself stays an operator step. The tool takes **no URL and no destination**. It builds the scp-form SSH URL itself and computes the path:
 
 | Provider | Destination |
 |---|---|
@@ -95,7 +96,11 @@ no destination**. It builds the scp-form SSH URL itself and computes the path:
 existing path is refused, never merged into. Submodules are not cloned, since
 `.gitmodules` URLs are content the cloned repo controls. The clone is killed after 120 s,
 and a failed clone removes only the directory the call created. An agent whose grant is
-scoped by `write_globs` is refused outright, because a clone writes a whole tree.
+scoped by `write_globs` is refused outright, because a clone writes a whole tree. An agent
+whose grant carries `write_globs_deny` (developer's `manifests/**`) cannot pass `branch`,
+and a clone whose tree contains a denied path is removed and refused as
+`denied:write_glob`. So developer cannot clone `host-forge/scripts`, whose manifests
+sysadmin owns.
 
 `git_worktree` (as of 0.15.0) is the one sanctioned way to get a scratch checkout. The
 destination is **computed, never caller-supplied**: `<worktree_root>/<repo>-<name>`, where
@@ -190,7 +195,9 @@ repo. An absent repo, or one the token cannot see, returns `{"exists": false}`.
 **empty** repo, with no initial commit, so existing local work can be pushed in.
 `visibility` (`public`/`private`) is required, with no default. An existing name is
 refused before the create call. The reported `visibility` is read back from the
-provider, not echoed. GitHub creates under the token's account; Gitea creates in an
+provider, not echoed; if the read-back fails or disagrees, the result still says
+`created: true` and carries a `warning`. `description` refuses control characters, so it
+cannot print a forged `visibility:` line in the HITL notification. GitHub creates under the token's account; Gitea creates in an
 organization only. There is deliberately no delete verb and no visibility-change verb.
 Gate both create tools with HITL.
 

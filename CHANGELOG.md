@@ -9,10 +9,12 @@ repo was public. Closes #546 and #764. Ted decided the three constraints below o
 
 ### Added
 
-- **`git_clone(provider, owner, repo, depth=None, branch=None)`**. Owned repos only:
-  GitHub owners in `forge_owned_owners`, any org on our Gitea. Anything else is refused
-  before any network or filesystem access, as `denied:not_owned`; a third-party clone is
-  an operator step. There is **no `url` and no destination parameter.** The scp-form SSH
+- **`git_clone(provider, owner, repo, depth=None, branch=None)`**. Only repos whose owner
+  forge controls: GitHub owners in `forge_owned_owners` (anything else is refused before
+  any network or filesystem access, as `denied:not_owned`), and **organizations** on our
+  Gitea, confirmed with `GET /orgs/{owner}` (a user namespace is refused as `NotOwned`).
+  Forks are deliberately allowed (fork, then clone the fork); cloning an upstream directly
+  is an operator step. There is **no `url` and no destination parameter.** The scp-form SSH
   URL is built from the arguments and still passed through `validate_remote_url()`. The
   path follows forge's checkout convention: GitHub → `~/repos/personal/<repo>`, Gitea →
   `~/repos/gitea/<owner>-<repo>` (or `<repo>` if it already starts with `<owner>-`). It is
@@ -22,13 +24,18 @@ repo was public. Closes #546 and #764. Ted decided the three constraints below o
   `origin` is this repo, and names the other origin otherwise. A symlink at the
   destination is refused, never followed. Submodules are never cloned. The clone is killed after 120 s, and a failed clone
   removes only the directory this call created. An agent whose grant is scoped by
-  `write_globs` (writer) is refused: a clone writes a whole tree.
+  `write_globs` (writer) is refused: a clone writes a whole tree. An agent whose grant
+  carries `write_globs_deny` cannot pass `branch`, and a clone whose tree holds a denied
+  path is removed and refused as `denied:write_glob`, the same result `git_add` and
+  `git_commit` write.
 - **`github_repo_create(name, visibility, description=None)`** and
   **`gitea_repo_create(owner, name, visibility, description=None)`**. `visibility` is
   `public` or `private`, required, with no default. Repos are created **empty**
   (`auto_init=False`), ready for existing local work to be pushed in. An existing name
   is refused before the create call. The result's `visibility` is read back from the
-  provider, and a `warning` is added if it differs from the request. GitHub creates
+  provider. A `warning` is added if it differs from the request, or if the read-back
+  fails; a failed read-back never turns a successful create into an error. `description`
+  refuses control characters (the HITL notification renders arguments unescaped). GitHub creates
   under the authenticated account. Gitea creates in an **organization only**: forge's
   token has no `write:user` scope, so `owner` must be an org, and a user name is refused
   with a clear message rather than a bare 404. There is no delete verb and no

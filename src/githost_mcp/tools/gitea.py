@@ -16,7 +16,12 @@ from .._providers.gitea_client import (
     gitea_post_void,
 )
 from ..audit import AuditCtx, audit_rejection, reject_enum
-from ..bootstrap import VISIBILITIES, first_bad_segment, validate_description
+from ..bootstrap import (
+    VISIBILITIES,
+    first_bad_segment,
+    readback_warning,
+    validate_description,
+)
 from ..config import get_config
 from ..errors import AlreadyExists, InvalidArgument, MissingArgument
 from ..security import scrub
@@ -1060,21 +1065,25 @@ def register(mcp) -> None:
             if description:
                 data["description"] = description
             created = await gitea_post(f"/orgs/{owner}/repos", data)
-            readback = await gitea_get_optional(f"/repos/{owner}/{name}")
+            reported = empty = readback_error = None
+            try:
+                readback = await gitea_get_optional(f"/repos/{owner}/{name}")
+                if readback is not None:
+                    reported = gitea_visibility(readback)
+                    empty = readback.get("empty")
+            except Exception as e:
+                readback_error = scrub(str(e))
             result = {
                 "created": True,
                 "full_name": created.get("full_name", full_name),
                 "requested_visibility": visibility,
-                "visibility": gitea_visibility(readback) if readback else None,
-                "empty": readback.get("empty") if readback else None,
+                "visibility": reported,
+                "empty": empty,
                 "ssh_url": created.get("ssh_url"),
                 "html_url": created.get("html_url"),
             }
-            if result["visibility"] != visibility:
-                result["warning"] = (
-                    f"requested {visibility}, Gitea reports {result['visibility']}. "
-                    "Check the repo before pushing anything to it."
-                )
+            if warning := readback_warning("Gitea", visibility, reported, readback_error):
+                result["warning"] = warning
             ac.finish("ok")
             return result
         except Exception as e:
