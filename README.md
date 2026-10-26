@@ -80,40 +80,59 @@ Each `method` still writes its own per-operation audit entry.
 `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_branch_delete_remote`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_push_force_with_lease`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*, `git_worktree` *(add/list/remove)*, `git_clone`
 
 `git_clone(provider, owner, repo, depth=None, branch=None)` (as of 0.16.0) clones **only
-repos whose owner forge controls**: GitHub owners in `FORGE_OWNED_OWNERS` (default
-`TadMSTR`), and **organizations** on the configured Gitea (a user namespace is refused, and
-the org check is one API call to our own Gitea). A GitHub owner outside the list is refused
-before any network or filesystem access, as `denied:not_owned`. Forks are deliberately
-allowed: to work on an upstream, `github_fork` it and clone the fork; cloning the upstream
-itself stays an operator step. The tool takes **no URL and no destination**. It builds the scp-form SSH URL itself and computes the path:
+repos whose owner forge controls**:
+
+- **GitHub**: owners listed in `FORGE_OWNED_OWNERS` (default `TadMSTR`). Any other owner
+  is refused before any network or filesystem access.
+- **Gitea**: **organizations** on the configured `GITEA_URL`, confirmed with one
+  `GET /orgs/{owner}` call. A user namespace is refused.
+
+Both refusals are audited as `denied:not_owned`. Forks are deliberately allowed: to work
+on an upstream, `github_fork` it and clone the fork. Cloning the upstream itself stays an
+operator step.
+
+The tool takes **no URL and no destination**. It builds the scp-form SSH URL from the
+arguments (still passed through the same remote-URL validation as `git_remote add`) and
+computes the path:
 
 | Provider | Destination |
 |---|---|
 | `github` | `~/repos/personal/<repo>` |
 | `gitea` | `~/repos/gitea/<owner>-<repo>`, or `~/repos/gitea/<repo>` if `<repo>` already starts with `<owner>-` |
 
-`~` is the broker's own home. The path is validated against the write roots, and an
-existing path is refused, never merged into. Submodules are not cloned, since
-`.gitmodules` URLs are content the cloned repo controls. The clone is killed after 120 s,
-and a failed clone removes only the directory the call created. An agent whose grant is
-scoped by `write_globs` is refused outright, because a clone writes a whole tree. An agent
-whose grant carries `write_globs_deny` (developer's `manifests/**`) cannot pass `branch`,
-and a clone whose tree contains a denied path is removed and refused as
-`denied:write_glob`. A tracked symlink is refused if it sits above any denied area, at
-any depth (`config -> evil/` under a `config/secrets/*` deny); a file symlink such as
-`AGENTS.md -> CLAUDE.md` is not affected. So developer cannot clone `host-forge/scripts`, whose manifests
-sysadmin owns.
+`~` is the broker's own home. The path is validated against the write roots. An existing
+path is refused, never merged into, and a symlink at the destination is refused, never
+followed. Submodules are not cloned, since `.gitmodules` URLs are content the cloned repo
+controls. The clone is killed after 120 s, and a failed clone removes only the directory
+the call created.
 
-`git_worktree` (as of 0.15.0) is the one sanctioned way to get a scratch checkout. The
-destination is **computed, never caller-supplied**: `<worktree_root>/<repo>-<name>`, where
-`worktree_root` is `GITHOST_WORKTREE_ROOT` (default `~/repos/personal/_worktrees`, expanded
-at startup). `add` returns the path; run every later call against it. The root is a
-location, not a grant — each destination is still checked against the agent's write roots.
+Glob-scoped grants (see [Write glob scoping](#write-glob-scoping)) are handled strictly:
+
+- An agent whose grant carries `write_globs` is refused outright, because a clone writes a
+  whole tree.
+- An agent whose grant carries `write_globs_deny` (e.g. `manifests/**`) cannot pass
+  `branch` at all, not even the default branch's name; omit it to clone the default
+  branch. A clone whose tree contains a denied path is removed and refused as
+  `denied:write_glob`, the same result `git_add` and `git_commit` write.
+- A tracked symlink is refused if it sits above any denied area, at any depth
+  (`config -> evil/` under a `config/secrets/*` deny). A file symlink such as
+  `AGENTS.md -> CLAUDE.md` is not affected.
+
+So an agent denied `manifests/**` cannot clone a repo that contains manifests.
+
+`git_worktree(repo_path, method, name=None, branch=None, base=None)` (as of 0.15.0) is
+the one sanctioned way to get a scratch checkout. The destination is **computed, never
+caller-supplied**: `<worktree_root>/<repo>-<name>`, where `worktree_root` is
+`GITHOST_WORKTREE_ROOT` (default `~/repos/personal/_worktrees`, `~` expanded at startup).
+`add` returns the path; run every later call against it. `list` marks each worktree with
+`under_worktree_root`. The root is a location, not a grant — each destination is still
+checked against the agent's write roots.
 `remove` never forces: a worktree with uncommitted or untracked files is refused with
 git's own message. Before this verb, agents guessed `/tmp/…`, `~/scratch/…` and
 `~/worktrees/…`, and githost-mcp refused every one.
 
-`git_push_force_with_lease` (as of 0.15.0) updates a rebased branch. It always sends
+`git_push_force_with_lease(repo_path, branch, expected_sha, remote="origin")` (as of
+0.15.0) updates a rebased branch. It always sends
 `--force-with-lease=refs/heads/<branch>:<expected_sha>`, with `expected_sha` required as a
 full 40-hex sha — without an explicit sha the lease compares against the remote-tracking
 ref, which a `git fetch` silently moves, and protects nothing. `main`, `master` and the
@@ -182,27 +201,39 @@ set automatically and reported as `upstream_set: true`.
 ### GitHub (20)
 `github_repo_get`, `github_repo_create`, `github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_update`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
 
-`github_pr_update` (as of 0.15.0) edits title, body or base, and with
+`github_pr_update(repo, pr_number, title=None, body=None, base=None,
+ready_for_review=False)` (as of 0.15.0) edits title, body or base, and with
 `ready_for_review=True` takes a draft out of draft through PyGithub's
 `mark_ready_for_review()` — REST cannot change `draft`. The PR number and its review
 threads survive, which close-and-recreate did not. It cannot close a PR.
 
 `github_repo_get(repo)` and `gitea_repo_get(repo)` (as of 0.16.0) return a repo's
-`visibility`, `default_branch`, `empty`, `archived`, `fork`, `parent`,
-`delete_branch_on_merge`, `ssh_url` and `html_url`. They are read-only and work for any
-repo. An absent repo, or one the token cannot see, returns `{"exists": false}`.
+`full_name`, `visibility` (`public`/`private`/`internal`), `default_branch`, `empty`,
+`archived`, `fork`, `parent`, `delete_branch_on_merge`, `ssh_url` and `html_url`. They are
+read-only and work for any repo, owned or not. An absent repo, or one the token cannot
+see, returns `{"exists": false}` rather than an error. `delete_branch_on_merge` is `null`
+when the token is not an admin of the repo, because GitHub only returns that field to
+admins: read `null` as "unknown", not "off" (vikunja#1230). On Gitea the field carries the
+repo's merge-UI default, `default_delete_branch_after_merge`.
 
 `github_repo_create(name, visibility, description=None)` and
 `gitea_repo_create(owner, name, visibility, description=None)` (as of 0.16.0) create an
-**empty** repo, with no initial commit, so existing local work can be pushed in.
-`visibility` (`public`/`private`) is required, with no default. An existing name is
-refused before the create call. The reported `visibility` is read back from the
-provider, not echoed; if the read-back fails or disagrees, the result still says
-`created: true` and carries a `warning`, and the audit record says
-`ok:visibility_unconfirmed` or `ok:visibility_mismatch` rather than plain `ok`. `description` refuses control characters, so it
-cannot print a forged `visibility:` line in the HITL notification. GitHub creates under the token's account; Gitea creates in an
-organization only. There is deliberately no delete verb and no visibility-change verb.
-Gate both create tools with HITL.
+**empty** repo, with no initial commit, so existing local work can be pushed in
+(`git_remote add`, then `git_push`).
+
+- `visibility` (`public`/`private`) is required, with no default.
+- GitHub creates under the token's own account. Gitea creates in an **organization
+  only**; a user name as `owner` is refused.
+- An existing name is refused before the create call.
+- The reported `visibility` is read back from the provider, not echoed. If the read-back
+  fails or disagrees, the result still says `created: true` and carries a `warning`, and
+  the audit record says `ok:visibility_unconfirmed` or `ok:visibility_mismatch` rather
+  than plain `ok`.
+- `description` refuses control characters and Unicode line breaks, so it cannot print a
+  forged `visibility:` line in the HITL notification.
+
+There is deliberately no delete verb and no visibility-change verb; both stay operator
+steps. **Gate both create tools with HITL.**
 
 ### Gitea (16)
 `gitea_repo_get`, `gitea_repo_create`, `gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_release_update`, `gitea_release_delete`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`, `gitea_pr_review` *(get_diff/get_files/submit_review/dismiss_review)*, `gitea_actions` *(list_runs/get_run/list_jobs/get_job_log/dispatch_workflow/rerun_run/rerun_failed_jobs)*, `gitea_issue_read` *(get/list/comments)*, `gitea_issue_write` *(create/update/add_comment/close/reopen)*
@@ -276,6 +307,30 @@ cardinality. The bounded counterpart is `reason_class` on `githost_tool_denied_t
 drawn from a closed vocabulary in `errors.py` and derived from the exception type rather
 than from a regex over its message.
 
+A call refused for a bad argument value (as of 0.15.0, e.g. an unknown `method`) also
+records which argument was rejected and what was passed, in `params`:
+
+```json
+{
+  "tool": "github_issue_write",
+  "params": {"repo": "owner/repo", "argument": "method", "rejected_value": "comment"},
+  "result": "denied:invalid_argument",
+  "reason": "method 'comment' is not valid; must be one of: add_comment, close, create, reopen, update. To read an issue, list issues or read comments, use github_issue_read"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `params.argument` | Name of the rejected argument. |
+| `params.rejected_value` | The value passed, `null` when it was absent. Scrubbed through `security.scrub()` first, then cut to 64 characters. |
+| `params.rejected_value_truncated` | Present, and `true`, only when the value was cut. |
+
+Scrubbing happens before truncation so a credential is never split into a prefix the
+scrubber no longer recognises. The scrub has a known limit; see
+[Credential isolation](#credential-isolation). An empty value is audited as
+`denied:missing_argument` rather than `denied:invalid_argument`. **Audit consumers that
+parse `params` will see these keys.**
+
 Each entry is HMAC-SHA256 signed **when `AUDIT_SIGNING_KEY` is set** — with no key the `hmac`
 field is simply absent and the entry carries no tamper evidence at all. `audit_log_query`
 classifies every returned entry in an `integrity` field, and reports `integrity_summary` counts
@@ -302,11 +357,12 @@ audit_log_query(agent_id="sysadmin", tool="git_push", since="2026-05-20")
 ### Repo path allowlist
 
 `Config` carries separate `allowed_read_roots` and `allowed_write_roots`. Read tools
-(`git_status`, `git_diff`, `git_log`, `git_show`, `git_remote list`) validate against the
-read list; write tools (`git_add`, `git_commit`, `git_push`, `git_tag`, `git_checkout`,
-`git_branch create/delete`, `git_branch_delete_remote`, `git_remote add/remove`, `release`)
-validate against the write
-list. `allowed_repo_roots` remains
+(`git_status`, `git_diff`, `git_log`, `git_show`, `git_branch list`, `git_remote list`,
+`git_worktree list`) validate against the read list; write tools (`git_add`, `git_commit`,
+`git_push`, `git_push_force_with_lease`, `git_pull`, `git_tag`, `git_checkout`,
+`git_branch create/delete`, `git_branch_delete_remote`, `git_remote add/remove`,
+`git_worktree add/remove`, `release`) validate against the write list, as does the
+destination `git_clone` computes. `allowed_repo_roots` remains
 as a deprecated alias of `allowed_write_roots` for any caller not yet migrated.
 
 Resolution order (first match wins, see Architecture diagram above):
@@ -327,7 +383,7 @@ Resolution order (first match wins, see Architecture diagram above):
 **Deployed in production on forge.** The policy declares a small set of *container
 roots* (e.g. `~/repos/gitea`, `~/repos/personal`) rather than per-repo paths, so a repo
 created inside an already-granted root is covered automatically — this is what closed
-the recurring "new repo, no access" gap class (vikunja #203/#332/#308) that per-repo
+the recurring "new repo, no access" gap class (vikunja#203, vikunja#332, vikunja#308) that per-repo
 manifest entries kept reproducing. `default_read: all` grants every agent listed in
 `agents:` read across every declared root regardless of that agent's own `write_roots`;
 `write_roots` and `write_globs`/`write_globs_deny` are then set per agent (e.g. writer is
@@ -479,6 +535,14 @@ scheme and are left readable — that's the form every forge remote actually use
 closes the gap where `git_push`'s new `summary` field (the remote's raw rejection text)
 could otherwise have surfaced a credential verbatim.
 
+**Known limit (vikunja#913, deferred).** `scrub()` removes githost-mcp's own configured
+token values and URL userinfo, and nothing else. A credential the process does not hold
+in its config, appearing **outside** a URL (e.g. `Authorization: Bearer <token>` in a
+remote's error text), passes through both passes intact, into the tool's return value and
+into the audit log, including `rejected_value`. A shape-based redactor was deliberately
+not added: `scrub()` sits on every return path, and an over-broad one would silently
+mangle legitimate error text.
+
 Each provider has its own env vars — a compromised GitHub token does not expose Gitea or GitLab credentials.
 
 ### HMAC tamper-evidence
@@ -557,7 +621,24 @@ GIT_PUBLIC_EMAIL=12345+YourAccount@users.noreply.github.com
 # Accounts/orgs you control, comma-separated (default: TadMSTR). Repos whose remotes
 # all sit under one of these — or on the GITEA_URL host — keep the agent identity.
 FORGE_OWNED_OWNERS=YourAccount,YourOrg
+
+# GPG key ID to sign commits with (optional; unsigned when unset)
+GIT_SIGNING_KEY=
 ```
+
+`FORGE_OWNED_OWNERS` also bounds `git_clone`: it is the GitHub owner allowlist.
+
+### Worktrees and clones (optional)
+
+```env
+# Where git_worktree creates scratch worktrees: <root>/<repo>-<name>.
+# Default ~/repos/personal/_worktrees; ~ is expanded at startup.
+GITHOST_WORKTREE_ROOT=~/repos/personal/_worktrees
+```
+
+The root is a location, not a grant: put it inside the agent's write roots, or every
+`git_worktree add` is refused. `git_clone` has no setting; its destinations are fixed (see
+[Local Git](#local-git-16)).
 
 ### GitHub
 
@@ -581,16 +662,25 @@ GITLAB_URL=https://gitlab.com
 GITLAB_TOKEN=<PAT>
 ```
 
+### Woodpecker CI
+
+```env
+WOODPECKER_URL=https://ci.example.com
+WOODPECKER_TOKEN=<API token>
+```
+
 ### Registry
 
 ```env
 PYPI_TOKEN=<API token>
+PYPI_TEST_TOKEN=<API token>      # only for pypi_publish(target="testpypi")
 NPM_TOKEN=<automation token>
 ```
 
 ### Logging (always on)
 
 ```env
+LOG_LEVEL=INFO
 LOG_FILE=/opt/appdata/githost-mcp/logs/githost-mcp.log
 AUDIT_LOG_FILE=/opt/appdata/githost-mcp/audit/githost.jsonl
 
@@ -620,12 +710,14 @@ OTEL_SERVICE_NAME=githost-mcp-<agent>
 
 # Loki
 LOKI_URL=http://localhost:3100
+LOKI_LABELS=app=githost-mcp      # extra static labels, k=v comma-separated
 
 # Prometheus scrape endpoint
 METRICS_PORT=9185
 
 # NATS
 NATS_URL=nats://localhost:4222
+NATS_SUBJECT_PREFIX=githost      # default
 ```
 
 > **`METRICS_PORT` is re-enabled on the forge PM2 deploy (0.9.0+), loopback-only.**
