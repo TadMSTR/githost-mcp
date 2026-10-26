@@ -755,12 +755,19 @@ GITHOST_MCP_AUTH_TOKEN=  # required whenever TRANSPORT=http; must be >= 16 chars
 
 ## Installation
 
-```bash
-pip install githost-mcp
+githost-mcp is not published to PyPI. Install from a checkout of a release tag, from
+the committed `uv.lock`, so the dependency set is the one CI tested and audited:
 
-# With observability extras
-pip install "githost-mcp[observability]"
+```bash
+# Into the venv the service runs from. --no-editable installs a copy of the package,
+# so the service does not follow later changes to the checkout.
+UV_PROJECT_ENVIRONMENT=/opt/venvs/githost-mcp \
+  uv sync --frozen --no-editable --extra observability
 ```
+
+Build a fresh venv rather than installing into an existing one. `pip install .` into an
+existing venv keeps whatever older dependency versions it finds there, if they still
+satisfy the declared ranges.
 
 ## Launcher pattern (scoped-mcp subprocess)
 

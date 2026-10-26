@@ -93,9 +93,12 @@ pyproject.toml
 ## Testing
 
 ```bash
-pip install -e ".[dev]"
-pytest
+uv sync --frozen --extra dev --extra observability
+.venv/bin/python -m pytest
 ```
+
+Dependencies are locked in `uv.lock`. After changing `pyproject.toml`, run `uv lock` and
+commit both files. CI fails if they are out of sync (`uv lock --check`).
 
 ## Git workflow
 
