@@ -11,10 +11,12 @@ Dependencies are locked. No tool or behaviour changes.
   that is deployed. Install from the lock: see README, Installation.
 - **Dependency floors raised.** `fastmcp>=3.4.10,<4` (capped below the next major),
   `mcp>=1.30,<2`, `cryptography>=50.0.0`, and new floors on the transitive dependencies
-  `python-multipart`, `pyjwt`, `urllib3`, `anyio` and (in the `otel` extra)
-  `opentelemetry-api`. Each floor carries a comment in `pyproject.toml` naming what it
-  fixes. They exist so that an install which re-resolves into an existing venv cannot
-  keep an older version it finds there.
+  `python-multipart`, `pyjwt`, `urllib3`, `anyio`, `h11`, `requests`, `idna`, `authlib`,
+  `joserfc` and (in the `otel` extra) `opentelemetry-api`. Each floor carries a comment in
+  `pyproject.toml` naming what it fixes. `uv.lock` is the control; the floors are a second
+  line for an install that re-resolves into an existing venv. They cover the HTTP transport
+  (including fastmcp's auth stack) and the GitHub/Gitea client path. The packages off those
+  paths that are held only by the lock are listed in `pyproject.toml`.
 - **CI audits the lock.** The dependency audit now exports the locked runtime and dev
   sets and audits those with a pinned `pip-audit`. It used to audit a fresh resolve of
   the declared ranges, which is not what is installed. `uv lock --check` fails the build

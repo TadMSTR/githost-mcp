@@ -24,9 +24,19 @@ dependencies = [
     "structlog>=24.0",
     "pyyaml>=6.0",
     # Security floors on transitive deps. None is imported here directly; each is declared
-    # only to hold its floor, so that an install which re-resolves into an existing venv
-    # (`pip install .`) cannot keep an old vulnerable version it finds there. All sit on the
-    # HTTP transport this server serves or on the path that carries the git credentials.
+    # only to hold its floor. uv.lock is the control: it pins every package, and a deploy
+    # builds a fresh venv from it. These floors are the second line, for an install that
+    # re-resolves into an existing venv (`pip install .`) and would otherwise keep an old
+    # version it finds there.
+    #
+    # Scope, checked 2026-10-26 against every published advisory for every package in the
+    # locked runtime set: each package on the HTTP transport this server serves (including
+    # fastmcp's auth stack, which checks the bearer token) and on the GitHub/Gitea client
+    # path that carries the credentials has a floor at or above its newest fix. Packages
+    # off those paths whose ranges still admit an advisory are held only by the lock:
+    # certifi, dnspython, jaraco-context, protobuf, pydantic-settings, pygments, pynacl,
+    # python-dotenv.
+    #
     # starlette 1.3.1: PYSEC-2026-248/249.
     "starlette>=1.3.1",
     # mcp 1.30.0: CVE-2026-59951 (StreamableHTTP, the transport this server runs) and
@@ -43,6 +53,16 @@ dependencies = [
     "urllib3>=2.8.0",
     # anyio 4.14.2: PYSEC-2026-4024/4025.
     "anyio>=4.14.2",
+    # h11 0.16.0: GHSA-vqfr-h8mv-ghfj. uvicorn's HTTP/1.1 parser.
+    "h11>=0.16.0",
+    # requests 2.33.0: GHSA-gc5v-m9x4-r6x2 and earlier. PyGithub's and python-gitlab's client.
+    "requests>=2.33.0",
+    # idna 3.15: GHSA-65pc-fj4g-8rjx. Host encoding for httpx and requests.
+    "idna>=3.15",
+    # authlib 1.7.1 (GHSA-r95x-qfjj-fjj2) and joserfc 1.6.8 (GHSA-gg9x-qcx2-xmrh):
+    # fastmcp's auth stack.
+    "authlib>=1.7.1",
+    "joserfc>=1.6.8",
 ]
 
 [project.optional-dependencies]
