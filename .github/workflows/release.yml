@@ -19,6 +19,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # gh reads GH_TOKEN from the step env; no token is needed in .git/config.
+          persist-credentials: false
 
       - name: Create GitHub Release (source only)
         env:
