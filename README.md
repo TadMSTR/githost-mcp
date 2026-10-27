@@ -80,7 +80,7 @@ Each `method` still writes its own per-operation audit entry.
 `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_branch_delete_remote`, `git_checkout`, `git_add`, `git_commit`, `git_push`, `git_push_force_with_lease`, `git_pull`, `git_tag`, `git_remote` *(list/add/remove)*, `git_worktree` *(add/list/remove)*, `git_clone`
 
 `git_clone(provider, owner, repo, depth=None, branch=None)` (as of 0.16.0) clones **only
-repos whose owner forge controls**:
+repos whose owner you control**:
 
 - **GitHub**: owners listed in `FORGE_OWNED_OWNERS` (default `TadMSTR`). Any other owner
   is refused before any network or filesystem access.
@@ -279,7 +279,7 @@ Every tool call writes a JSONL entry before returning:
   "agent_id": "sysadmin",
   "tool": "git_push",
   "provider": "local",
-  "repo": "/home/ted/repos/personal/signoz-mcp",
+  "repo": "/home/user/repos/personal/example-repo",
   "params": {"remote": "origin", "branch": "main"},
   "result": "ok",
   "duration_ms": 312,
@@ -380,14 +380,13 @@ Resolution order (first match wins, see Architecture diagram above):
    `AGENT_MANIFEST_PATH` — now the third fallback rather than the second.
 4. Empty — fail closed, all operations disabled.
 
-**Deployed in production on forge.** The policy declares a small set of *container
-roots* (e.g. `~/repos/gitea`, `~/repos/personal`) rather than per-repo paths, so a repo
-created inside an already-granted root is covered automatically — this is what closed
-the recurring "new repo, no access" gap class (vikunja#203, vikunja#332, vikunja#308) that per-repo
-manifest entries kept reproducing. `default_read: all` grants every agent listed in
+**Recommended shape.** Declare a small set of *container roots* (e.g. `~/repos/gitea`,
+`~/repos/personal`) rather than per-repo paths, so a repo created inside an
+already-granted root is covered automatically — per-repo manifest entries leave every new
+repo without access until someone adds it. `default_read: all` grants every agent listed in
 `agents:` read across every declared root regardless of that agent's own `write_roots`;
-`write_roots` and `write_globs`/`write_globs_deny` are then set per agent (e.g. writer is
-scoped to `docs/**`-style globs within its write roots — see
+`write_roots` and `write_globs`/`write_globs_deny` are then set per agent (e.g. a
+docs-writing agent scoped to `docs/**`-style globs within its write roots — see
 [Write glob scoping](#write-glob-scoping) below). Agents not listed in `agents:` or
 `explicit_agents:` get nothing.
 
@@ -531,7 +530,7 @@ own *configured* token values, so a credential a human embedded in a remote by h
 (`https://user:token@host/...`) previously survived it. `redact_url_credentials()` strips
 the userinfo component from any scheme-qualified URL by shape, independent of whether
 githost-mcp knows the token. scp-style remotes (`git@github.com:owner/repo.git`) have no
-scheme and are left readable — that's the form every forge remote actually uses. This
+scheme and are left readable — that's the form most SSH remotes use. This
 closes the gap where `git_push`'s new `summary` field (the remote's raw rejection text)
 could otherwise have surfaced a credential verbatim.
 
@@ -570,8 +569,8 @@ none. Two controls are mandatory together, not either/or:
   is set explicitly. There is no default that silently exposes the port beyond the host.
 - **Bearer token auth.** When `GITHOST_MCP_AUTH_TOKEN` is set, FastMCP's built-in
   `StaticTokenVerifier` rejects any request without a matching `Authorization: Bearer <token>`
-  header (401). scoped-mcp's manifest `headers` block supplies it — see the Configuration block
-  in the build plan. The token is included in the credential filter (`audit.py` / `security.py`),
+  header (401). scoped-mcp's manifest `headers` block supplies it — see
+  [Running as PM2 services](#running-as-pm2-services). The token is included in the credential filter (`audit.py` / `security.py`),
   so it's never written to logs or the audit trail — **provided it's at least 16 characters**;
   the scrub only redacts tokens over 4 characters, so `main()` separately hard-fails on a
   shorter token rather than silently accepting one the filter can't reliably catch.
@@ -597,13 +596,13 @@ of the two must yield at least one root, or every path-taking tool is denied.
 ```env
 AGENT_MANIFEST_PATH=/home/user/.claude/manifests/dev-agent.yml  # optional — allowlist fallback
 # Default: ~/.claude/manifests/{AGENT_ID}-agent.yml (only when AGENT_ID is set to a real identity)
-# On forge, ecosystem.config.js overrides this per-process to
+# The shipped ecosystem.config.js overrides this per-process to
 # /etc/forge/manifests/<agent>-agent.yml — see Deploy > Manifest allowlist path.
 
 WORKSPACE_POLICY_PATH=/etc/forge/workspace-policy.yml  # optional — checked ahead of the manifest
 # Default: /etc/forge/workspace-policy.yml. See Security Model > Repo path allowlist for
-# the full env > policy > manifest > empty resolution order. Deployed in production on
-# forge — see that section for the container-root grant model.
+# the full env > policy > manifest > empty resolution order, and for the container-root
+# grant model.
 ```
 
 ### Agent Identity (optional)
@@ -681,8 +680,8 @@ NPM_TOKEN=<automation token>
 
 ```env
 LOG_LEVEL=INFO
-LOG_FILE=/opt/appdata/githost-mcp/logs/githost-mcp.log
-AUDIT_LOG_FILE=/opt/appdata/githost-mcp/audit/githost.jsonl
+LOG_FILE=/opt/appdata/githost-mcp/logs/githost-mcp.log      # default
+AUDIT_LOG_FILE=/opt/appdata/githost-mcp/audit/githost.jsonl  # default
 
 # Audit JSONL rotation
 AUDIT_LOG_MAX_BYTES=10485760     # default 10 MB; 0 disables rotation
@@ -720,7 +719,7 @@ NATS_URL=nats://localhost:4222
 NATS_SUBJECT_PREFIX=githost      # default
 ```
 
-> **`METRICS_PORT` is re-enabled on the forge PM2 deploy (0.9.0+), loopback-only.**
+> **`METRICS_PORT` binds loopback only (0.9.0+).**
 > `start_http_server()` in `observability.py` now binds `addr=127.0.0.1` explicitly, via
 > a hardcoded `observability.METRICS_BIND_ADDR` (not itself configurable — no deployment
 > wants a LAN-reachable metrics endpoint, and an env knob is how the previous `0.0.0.0`
@@ -737,8 +736,8 @@ NATS_SUBJECT_PREFIX=githost      # default
 > reading one place. Verify by querying the backend for a `githost.*` series — an
 > exporter that initialised proves nothing about whether anything arrived.
 
-> **`OTEL_SERVICE_NAME` defaults to `githost-mcp` for every process.** With seven agents
-> that is one service with seven writers, which makes "which agent hit this limit"
+> **`OTEL_SERVICE_NAME` defaults to `githost-mcp` for every process.** With several agents
+> that is one service with several writers, which makes "which agent hit this limit"
 > unanswerable from traces — the question the telemetry exists to answer.
 > `ecosystem.config.js` sets `githost-mcp-<agent>`, matching the `scoped-mcp-<agent>`
 > convention.
@@ -796,13 +795,13 @@ result unless you watch it. Audit the deployed venv where it runs as well (for e
 #!/bin/bash
 # run-githost-mcp-dev.sh
 export AGENT_ID="dev"
-export ALLOWED_REPO_ROOTS="/home/ted/repos/personal,/home/ted/repos/work"
+export ALLOWED_REPO_ROOTS="/home/user/repos/personal,/home/user/repos/work"
 export AUDIT_SIGNING_KEY="$(cat /run/secrets/githost_audit_key)"
 export GITHUB_TOKEN="$(cat /run/secrets/github_token)"
 export GITEA_TOKEN="$(cat /run/secrets/gitea_token)"
-export LOG_FILE="/opt/appdata/githost-mcp/logs/githost-mcp.log"
-export AUDIT_LOG_FILE="/opt/appdata/githost-mcp/audit/githost.jsonl"
-exec /opt/agents/dev/venv/bin/python3 -m githost_mcp.server
+export LOG_FILE="/var/log/githost-mcp/githost-mcp.log"
+export AUDIT_LOG_FILE="/var/log/githost-mcp/githost.jsonl"
+exec /opt/venvs/githost-mcp/bin/githost-mcp
 ```
 
 This is `TRANSPORT=stdio` (the default): scoped-mcp spawns a fresh subprocess per call and
@@ -824,15 +823,15 @@ by the same codebase — no fork, no rewrite to move between them.
 **Per-agent processes, not one shared process.** Each agent gets its own OS process (own
 `AGENT_ID`, own tokens, own `ALLOWED_REPO_ROOTS`), so a compromised process can't see another
 agent's credentials and `AGENT_ID` can't be spoofed via a request header. This is a deliberate
-security tradeoff over a single shared process with per-request identity — see the build plan's
-"Option A vs Option B" rationale if that tradeoff ever needs revisiting.
+security tradeoff over a single shared process with per-request identity, which is
+deliberately deferred.
 
 ### Running as PM2 services
 
 `ecosystem.config.js` in this repo builds one app per agent from a single `AGENT_ID -> {httpPort,
-metricsPort}` map, reusing the same per-agent secrets files (`~/.secrets/githost-mcp-<agent>.env`)
-and shared tokens (`~/.secrets/forge.env`) the stdio launchers already read — no separate secret
-plumbing to maintain.
+metricsPort}` map, reading a per-agent env file (`githost-mcp-<agent>.env`) and a shared env file
+of tokens — the same files the stdio launchers read, so there is no separate secret plumbing to
+maintain. Both paths are set near the top of the file; adjust them for your host.
 
 ```bash
 pm2 start ecosystem.config.js
@@ -840,7 +839,7 @@ pm2 save
 ```
 
 Each service comes up with `TRANSPORT=http`, `HTTP_HOST=127.0.0.1`, its own `HTTP_PORT` /
-`METRICS_PORT`, and `GITHOST_MCP_AUTH_TOKEN` sourced from `~/.secrets/forge.env`. Point
+`METRICS_PORT`, and `GITHOST_MCP_AUTH_TOKEN` sourced from the shared env file. Point
 scoped-mcp's manifest at the corresponding `http://127.0.0.1:<port>/mcp/` URL with the token in
 an `Authorization: Bearer` header (requires `type: http` on the manifest block — a bare
 `{url, headers}` entry is silently skipped).
@@ -848,13 +847,13 @@ an `Authorization: Bearer` header (requires `type: http` on the manifest block �
 ### Manifest allowlist path
 
 When `ALLOWED_REPO_ROOTS` is unset for an agent, `AGENT_MANIFEST_PATH` (default
-`~/.claude/manifests/{AGENT_ID}-agent.yml`) is the allowlist's only other source. On forge,
-`ecosystem.config.js` overrides that default to `/etc/forge/manifests/<agent>-agent.yml` for
-every agent process — a root-owned, `0644` copy published from `origin/main` by
-`host-forge-scripts/scripts/agent-manifests-deploy.sh`, not a symlink into a live git working
-tree. The target directory matters as much as the file mode: directory *write* permission
-governs `rename`/`unlink` regardless of who owns the file inside it, so a root-owned file
-under a `ted`-writable parent (e.g. `/opt/appdata`) isn't actually protected — anyone who can
+`~/.claude/manifests/{AGENT_ID}-agent.yml`) is the allowlist's only other source. The
+shipped `ecosystem.config.js` overrides that default to `/etc/forge/manifests/<agent>-agent.yml`
+for every agent process — intended to be a root-owned, `0644` copy published from the
+manifests repo's `main` by a deploy script, not a symlink into a live git working tree. The
+target directory matters as much as the file mode: directory *write* permission governs
+`rename`/`unlink` regardless of who owns the file inside it, so a root-owned file under a
+directory the service user can write isn't actually protected — anyone who can
 write the directory can swap the file out from under its own permissions. `/etc` is root-owned
 end to end, which is why the deployed copy lives there instead.
 
