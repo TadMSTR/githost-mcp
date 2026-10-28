@@ -522,7 +522,7 @@ Token values never appear in:
 - tool return values (scrubbed before return)
 - exception messages (caught at provider layer and re-raised without token value)
 
-As of 0.9.0, every caller-facing error return across all 27 sites (`git_local.py`,
+As of 0.9.0, every caller-facing error return in the tool modules (`git_local.py`,
 `release.py`, `woodpecker.py`, `registry.py`, `gitea.py`/`github.py`/`gitlab.py`) is
 scrubbed via **`security.scrub()`** — `redact_url_credentials(mask_credentials(text))` —
 rather than `mask_credentials()` alone. `mask_credentials()` only replaces githost-mcp's
@@ -723,8 +723,9 @@ NATS_SUBJECT_PREFIX=githost      # default
 > `start_http_server()` in `observability.py` now binds `addr=127.0.0.1` explicitly, via
 > a hardcoded `observability.METRICS_BIND_ADDR` (not itself configurable — no deployment
 > wants a LAN-reachable metrics endpoint, and an env knob is how the previous `0.0.0.0`
-> bind regressed). `ecosystem.config.js` sets one port per agent, 9620-9625, mirroring
-> the 8620-8625 HTTP block. Verify with `ss -tlnp` showing `127.0.0.1` — a successful
+> bind regressed). The shipped `ecosystem.config.js` gives each agent its own metrics
+> port, from a contiguous block that parallels the per-agent HTTP port block (see its
+> `AGENTS` map; pick ranges that are free on your host). Verify with `ss -tlnp` showing `127.0.0.1` — a successful
 > `curl` to localhost alone doesn't distinguish a loopback bind from a `0.0.0.0` one.
 
 > **`OTEL_EXPORTER_OTLP_PROTOCOL` must agree with the port in the endpoint.** It defaults
@@ -747,7 +748,7 @@ NATS_SUBJECT_PREFIX=githost      # default
 ```env
 TRANSPORT=stdio          # or "http" — see Deploy below
 HTTP_HOST=127.0.0.1      # http mode only; must be loopback unless overridden below
-HTTP_PORT=8620           # http mode only
+HTTP_PORT=<port>         # http mode only; one free loopback port per agent
 GITHOST_MCP_ALLOW_NONLOOPBACK=   # set to "1" to bind a non-loopback HTTP_HOST (not recommended)
 GITHOST_MCP_AUTH_TOKEN=  # required whenever TRANSPORT=http; must be >= 16 chars
 ```
