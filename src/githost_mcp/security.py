@@ -34,6 +34,7 @@ __all__ = [
     "scrub",
     "validate_branch_name",
     "validate_read_path",
+    "validate_ref",
     "validate_remote_name",
     "validate_remote_url",
     "validate_write_globs",
@@ -295,6 +296,26 @@ def validate_branch_name(name: str) -> None:
     if name.startswith("/") or "//" in name:
         raise BranchNameInvalid(
             f"Invalid branch name '{name}': must not start with '/' or contain '//'"
+        )
+
+
+# A commit ref for the CI status reads: a SHA, or a branch/tag name. It lands in a URL path
+# (Gitea, via httpx, which resolves dot segments) or in PyGithub's, so `..`, a leading `-`
+# and anything outside the characters forge's branch and tag names use are refused.
+_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]*$")
+_REF_MAX = 255
+
+
+def validate_ref(ref: str) -> None:
+    """Raise InvalidArgument unless `ref` is a SHA or a plain branch/tag name."""
+    if not ref or len(ref) > _REF_MAX:
+        raise InvalidArgument(f"ref must be 1-{_REF_MAX} characters")
+    if ref.startswith("-"):
+        raise InvalidArgument(f"ref {_LEADING_DASH_ERR}")
+    if ".." in ref or not _REF_RE.match(ref) or ref.endswith("/") or "//" in ref:
+        raise InvalidArgument(
+            "ref must be a SHA or a branch/tag name (letters, digits, '.', '_', '/', '+', "
+            "'-'; no '..', no leading '-', no empty path segment)"
         )
 
 

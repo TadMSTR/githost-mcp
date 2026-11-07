@@ -84,34 +84,23 @@ async def test_woodpecker_list_pipelines_success(tools):
 
 @pytest.mark.asyncio
 async def test_woodpecker_list_pipelines_status_filter(tools):
-    mock_data = [
-        {
-            "id": 1,
-            "number": 1,
-            "status": "success",
-            "branch": "main",
-            "event": "push",
-            "created": 1000,
-            "started": 1001,
-            "finished": 1010,
-        },
-        {
-            "id": 2,
-            "number": 2,
-            "status": "failure",
-            "branch": "feature",
-            "event": "push",
-            "created": 2000,
-            "started": 2001,
-            "finished": 2010,
-        },
-    ]
+    """The status filter is sent to the server, not applied to one fetched page.
+
+    The old code fetched a single page and filtered it locally, so a failure older than
+    that page could not be found (#1425 (id 1508)). The mock returns only what a
+    filtering server would, and the assertion is on the outgoing query.
+    """
+    mock_data = [{"id": 2, "number": 2, "status": "failure", "branch": "feature"}]
     with respx.mock:
         _lookup_mock()
-        respx.get(f"{REPO_URL}/pipelines").mock(return_value=httpx.Response(200, json=mock_data))
-        result = await tools["woodpecker_list_pipelines"]("owner/repo", status="success")
+        route = respx.get(f"{REPO_URL}/pipelines").mock(
+            return_value=httpx.Response(200, json=mock_data)
+        )
+        result = await tools["woodpecker_list_pipelines"]("owner/repo", status="failure")
+    params = route.calls.last.request.url.params
+    assert params["status"] == "failure"
     assert len(result["pipelines"]) == 1
-    assert result["pipelines"][0]["status"] == "success"
+    assert result["pipelines"][0]["status"] == "failure"
 
 
 def _b64_entry(text: str, **extra) -> dict:
@@ -156,12 +145,22 @@ async def test_woodpecker_get_logs_by_step_name(tools):
     assert len(result["lines"]) == 2
     assert result["lines"][0] == "step output line 1"
     assert result["lines"][1] == "step output line 2"
-    assert "truncated" not in result
+    assert result["truncated"] is False
+    assert result["selected_by"] == "named"
 
 
 @pytest.mark.asyncio
-async def test_woodpecker_get_logs_truncation(tools):
-    mock_steps = [{"id": 10, "name": "build"}]
+@pytest.mark.parametrize(
+    ("state", "first", "last"),
+    [
+        # A failed step is read from the end: the old reader kept lines[:500] and the
+        # failure at the bottom of pipeline 1235's python step was never reached.
+        ("failure", "line 100", "line 599"),
+        ("success", "line 0", "line 499"),
+    ],
+)
+async def test_woodpecker_get_logs_truncation(tools, state, first, last):
+    mock_steps = [{"id": 10, "name": "build", "state": state, "started": 1}]
     mock_logs = [_b64_entry(f"line {i}\n", pos=i, time=i) for i in range(600)]
     with respx.mock:
         _lookup_mock()
@@ -174,9 +173,10 @@ async def test_woodpecker_get_logs_truncation(tools):
         result = await tools["woodpecker_get_logs"]("owner/repo", 1)
     assert logs_route.called
     assert len(result["lines"]) == 500
-    assert result["lines"][0] == "line 0"
+    assert result["lines"][0] == first
+    assert result["lines"][-1] == last
     assert result["truncated"] is True
-    assert "notice" in result
+    assert result["total_lines"] == 600
 
 
 @pytest.mark.asyncio
@@ -336,7 +336,8 @@ async def test_woodpecker_status_success(tools):
             return_value=httpx.Response(
                 200,
                 json={
-                    "id": 9,
+                    "id": 2359,
+                    "number": 9,
                     "status": "success",
                     "branch": "main",
                     "started": 1000,
@@ -345,7 +346,11 @@ async def test_woodpecker_status_success(tools):
             )
         )
         result = await tools["woodpecker_status"]("owner/repo", 9)
-    assert result["id"] == 9
+    # The per-repo number is the handle; the global id used to come back as "id" and
+    # agents fed it into get_logs/cancel (#1425 (id 1508)).
+    assert result["pipeline_id"] == 9
+    assert result["internal_id"] == 2359
+    assert "id" not in result
     assert result["status"] == "success"
     assert result["finished_at"] == 1010
 

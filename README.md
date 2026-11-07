@@ -68,7 +68,7 @@ flowchart TD
 
 **githost-mcp fills the gap:** local git + multi-provider remote via native APIs + per-agent structured audit trail. As of the Tier-1 parity release it matches the single-provider servers on PR/MR review + diff, CI trigger/rerun/cancel, full release CRUD, and issues — across all three providers behind one audited server.
 
-## Tools (74 total)
+## Tools (79 total)
 
 Higher-verb-count capabilities (PR/MR review, CI control, issues) are exposed as
 **method-dispatch** tools — one tool takes a `method` argument and routes internally —
@@ -198,8 +198,8 @@ rejected push as a success. `flags` are decoded to reason names (e.g. `["REJECTE
 credential-scrubbed (see Credential isolation below). On success, a missing upstream is
 set automatically and reported as `upstream_set: true`.
 
-### GitHub (20)
-`github_repo_get`, `github_repo_create`, `github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs)*, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_update`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
+### GitHub (21)
+`github_repo_get`, `github_repo_create`, `github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs/list_jobs/get_job_log)*, `github_commit_checks`, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_update`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
 
 `github_pr_update(repo, pr_number, title=None, body=None, base=None,
 ready_for_review=False)` (as of 0.15.0) edits title, body or base, and with
@@ -235,8 +235,8 @@ repo's merge-UI default, `default_delete_branch_after_merge`.
 There is deliberately no delete verb and no visibility-change verb; both stay operator
 steps. **Gate both create tools with HITL.**
 
-### Gitea (16)
-`gitea_repo_get`, `gitea_repo_create`, `gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_release_update`, `gitea_release_delete`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`, `gitea_pr_review` *(get_diff/get_files/submit_review/dismiss_review)*, `gitea_actions` *(list_runs/get_run/list_jobs/get_job_log/dispatch_workflow/rerun_run/rerun_failed_jobs)*, `gitea_issue_read` *(get/list/comments)*, `gitea_issue_write` *(create/update/add_comment/close/reopen)*
+### Gitea (17)
+`gitea_repo_get`, `gitea_repo_create`, `gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_release_update`, `gitea_release_delete`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`, `gitea_pr_review` *(get_diff/get_files/submit_review/dismiss_review)*, `gitea_actions` *(list_runs/get_run/list_jobs/get_job_log/dispatch_workflow/rerun_run/rerun_failed_jobs)*, `gitea_commit_status`, `gitea_issue_read` *(get/list/comments)*, `gitea_issue_write` *(create/update/add_comment/close/reopen)*
 
 ### GitLab (13)
 `gitlab_create_release`, `gitlab_get_release`, `gitlab_list_releases`, `gitlab_release_update`, `gitlab_release_delete`, `gitlab_mr_list`, `gitlab_mr_create`, `gitlab_mr_get`, `gitlab_mr_merge`, `gitlab_mr_review` *(get_diffs/get_changed_files/approve/unapprove/get_approval_state)*, `gitlab_pipeline` *(list/get/create/retry/cancel/get_job_log)*, `gitlab_issue_read` *(get/list/comments)*, `gitlab_issue_write` *(create/update/add_comment/close/reopen)*
@@ -247,24 +247,58 @@ steps. **Gate both create tools with HITL.**
 ### Registry (2)
 `pypi_publish`, `npm_publish`
 
-### Woodpecker CI (5)
-`woodpecker_trigger`, `woodpecker_list_pipelines`, `woodpecker_get_logs`, `woodpecker_pipeline_cancel`, `woodpecker_status`
+### Woodpecker CI (8)
+`woodpecker_trigger`, `woodpecker_restart`, `woodpecker_list_pipelines`, `woodpecker_status`, `woodpecker_get_logs`, `woodpecker_pipeline_config`, `woodpecker_queue_info`, `woodpecker_pipeline_cancel`
 
-`woodpecker_trigger` returns the per-repo pipeline **number** as `pipeline_id` (as of
-0.9.0) — this is the value to pass straight into `woodpecker_status`,
-`woodpecker_get_logs`, and `woodpecker_pipeline_cancel`, which all resolve `pipeline_id`
-as a per-repo number, not Woodpecker's global id. The global id is still returned, as
-`internal_id`, for reference only. Previously `trigger` returned the global id, which the
-other three tools 404 on — chaining `trigger` into `status`/`get_logs`/`cancel` never
-worked prior to this fix.
+`pipeline_id` means the per-repo pipeline **number** in every Woodpecker tool, as input and
+as output (status, list and restart return it since 0.18.0; trigger since 0.9.0). The global
+id comes back separately as `internal_id`, for reference only; no tool accepts it.
 
-`woodpecker_get_logs(repo, pipeline_id, step_name=None)` returns `{"step": <name>,
-"lines": [...]}`. `step_name` defaults to the pipeline's first step when omitted. Output
-is base64-decoded from Woodpecker's log entries and truncates at 500 lines, adding
-`truncated: true` and a `notice` field when the cap is hit. As of 0.12.0 this tool
-actually works — three stacked defects (two mismatched API routes and a Woodpecker
-1.x/3.x log-field mismatch) meant every call failed with an opaque JSON-decode error
-since the tool was first added; see CHANGELOG.md `[0.12.0]` for the fix.
+- `woodpecker_status` returns the event, ref, commit, `errors[]` (config and linter, with
+  `is_warning`), `cancel_info`, `steps[]` (`workflow`, `name`, `type`, `state`,
+  `exit_code`, `error`, `started`, `finished`, `uuid`) and a `stalled_hint`: the first
+  unfinished step and how long it has been in that state.
+- `woodpecker_list_pipelines` sends `perPage`, and passes `status`, `branch`, `event`,
+  `ref`, `before` and `after` to the server as filters, so a failure older than the latest
+  page is still found. Rows carry `commit` and a bounded `message`.
+- `woodpecker_restart` re-runs a pipeline with its original event (push, pull_request), so
+  an event-specific failure reproduces. `woodpecker_trigger` creates a `manual` run
+  instead. No event or deploy-target override is exposed. It is a write verb: grant it as
+  you grant `woodpecker_trigger`.
+- `woodpecker_pipeline_config` returns the compiled config files a run used, through the
+  same bounded reader as the logs.
+- `woodpecker_queue_info` lists running and pending queue items (repo id, pipeline
+  number, workflow, agent, age; never labels or environment). It needs an admin token.
+
+### CI log reader
+
+`woodpecker_get_logs`, `woodpecker_pipeline_config`, `gitea_actions get_job_log` and
+`github_actions get_job_log` share one bounded, scrubbed reader (`logview.py`, 0.18.0):
+
+- `mode`: `tail`, `head` or `range` (`offset`, `limit`). Line numbers are 0-based;
+  `returned_to` is exclusive, so the next page starts at `offset=returned_to`.
+- `grep`: a **literal substring**, not a regex (at most 200 characters, no control
+  characters), with `ignore_case` and `context` (0–20 lines). Hits come back as
+  `segments`, with overlapping windows merged. Matching runs on the scrubbed text.
+- At most 500 lines and about 64 KB per response; `total_lines` and `truncated` are
+  always present. Carriage-return progress redraws collapse to the last one. Every line
+  is credential-scrubbed.
+- Log text and the `grep` string are never written to the audit trail or the app log.
+
+`woodpecker_get_logs` with no `step_name` reads the first failed step, else the first
+running step, else the first step, and says which in `selected_by`. A failed step defaults
+to `tail`, anything else to `head`. A step name used in more than one workflow needs
+`workflow`. A step that has not started returns its `state` and `lines: null`.
+
+`github_actions get_job_log` reads one job's plain-text log. GitHub redirects that request
+to a signed blob URL; githost-mcp checks the redirect host against an allowlist of Actions
+log hosts and fetches it **without** the GitHub token. `github_actions list_jobs` gives the
+job ids and their steps.
+
+`gitea_commit_status(repo, ref)` and `github_commit_checks(repo, ref, annotations=False)`
+answer "did CI pass on this commit". Woodpecker posts to Gitea as a commit status, so the
+Gitea read covers it. With `annotations=True`, the GitHub read returns up to 50 annotations
+from failed check runs, which is where GitHub puts readable failure text.
 
 ### Audit (1)
 `audit_log_query` — query the JSONL audit log by agent, tool, repo, or time range
