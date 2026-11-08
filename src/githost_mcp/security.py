@@ -302,6 +302,9 @@ def validate_branch_name(name: str) -> None:
 # A commit ref for the CI status reads: a SHA, or a branch/tag name. It lands in a URL path
 # (Gitea, via httpx, which resolves dot segments) or in PyGithub's, so `..`, a leading `-`
 # and anything outside the characters forge's branch and tag names use are refused.
+# SECURITY[deferred]: stricter than git (refuses a leading `_` and `#`); fails closed.
+# Widening tracked in vikunja#1429.
+# Audit: 2026-11-08/githost-scoped-2026-11-p1-ci-diagnostics (CR-11).
 _REF_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/+-]*\Z")
 _REF_MAX = 255
 

@@ -747,6 +747,9 @@ def register(mcp) -> None:
             owner, name = repo.split("/", 1)
             # Encoded as one segment: a branch like feature/x is accepted either way
             # (checked live), and an encoded slash cannot add a path segment.
+            # SECURITY[deferred]: whether Gitea computes `state` over every context or one
+            # page is unverified (vikunja#1430).
+            # Audit: 2026-11-08/githost-scoped-2026-11-p1-ci-diagnostics (CR-12).
             data = await gitea_get(f"/repos/{owner}/{name}/commits/{quote(ref, safe='')}/status")
             if not isinstance(data, dict):
                 raise ValueError("Unexpected Gitea commit status response shape")

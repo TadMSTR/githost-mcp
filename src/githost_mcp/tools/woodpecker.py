@@ -876,6 +876,9 @@ def register(mcp) -> None:
             return {"error": scrub(str(e))}
 
     @mcp.tool
+    # SECURITY[deferred]: works only because the Woodpecker token's user is a human admin;
+    # agent restarts are attributed to that user. Dedicated bot account tracked in
+    # vikunja#1428. Audit: 2026-11-08/githost-scoped-2026-11-p1-ci-diagnostics (F-02).
     async def woodpecker_queue_info(repo: str | None = None) -> dict:
         """Show what Woodpecker's queue is running and waiting on.
 
