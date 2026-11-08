@@ -186,6 +186,8 @@ async def test_list_refuses_a_filter_validate_ref_refuses(tools, arg, value):
         route = respx.get(f"{REPO_URL}/pipelines").mock(return_value=httpx.Response(200, json=[]))
         result = await tools["woodpecker_list_pipelines"]("owner/repo", **{arg: value})
     assert "error" in result
+    # The refusal is validate_ref's, not a failure of some unmocked request (CR-14).
+    assert "ref must" in result["error"] or "must not start with '-'" in result["error"]
     assert not route.called
 
 

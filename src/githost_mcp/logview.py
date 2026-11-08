@@ -164,6 +164,9 @@ class TextLines(Sequence):
         """(index of the first line returned, up to `count` lines from one end)."""
         if self._empty or count <= 0:
             return (len(self) if from_end else 0), []
+        if self._list is not None:  # already split (and _text cleared): slice the list
+            picked = self._list[-count:] if from_end else self._list[:count]
+            return (len(self._list) - len(picked) if from_end else 0), picked
         if from_end:
             parts = self._text.rsplit("\n", count)
             picked = parts[-count:] if len(parts) > count else parts

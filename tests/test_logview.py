@@ -448,3 +448,13 @@ def test_grep_never_matches_inside_a_redacted_credential():
     assert r["match_count"] == 0
     r = view(lines, mode="tail", grep="***")
     assert r["match_count"] == 1
+
+
+def test_text_lines_end_after_a_full_split():
+    # CR-02: a head/tail read after an indexing read sliced the cleared text and got [""].
+    from githost_mcp.logview import TextLines
+
+    lines = TextLines("a\nb\nc\n")
+    assert lines[1] == "b"  # forces the full split
+    assert lines.end(2, from_end=True) == (1, ["b", "c"])
+    assert lines.end(2, from_end=False) == (0, ["a", "b"])

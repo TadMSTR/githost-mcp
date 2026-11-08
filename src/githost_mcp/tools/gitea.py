@@ -832,6 +832,11 @@ def register(mcp) -> None:
             statuses = list(data.get("statuses") or [])
             state = data.get("state")
             page = 1
+            # Later pages by the sha page 1 answered for, not by the ref: a branch that
+            # moves mid-read would otherwise mix two commits' statuses (CR-08).
+            sha = data.get("sha")
+            if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+                path = f"/repos/{owner}/{name}/commits/{sha}/status"
             while total is not None and len(statuses) < total and page < STATUS_MAX_PAGES:
                 page += 1
                 more, _ = await gitea_get_with_total(f"{path}?limit={STATUS_PAGE_SIZE}&page={page}")
