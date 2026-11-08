@@ -2,8 +2,8 @@
 
 Every registered tool is in exactly one of EFFECT_TOOLS or READ_TOOLS. The closed-world
 test (tests/test_effects.py) enumerates the server's tools and fails on one that is in
-neither, so a new verb cannot ship unclassified. githost-scoped-2026-11 p3 adds and
-regates verbs: each goes in one of these sets in the same change.
+neither, so a new verb cannot ship unclassified. HITL_TOOLS is a subset of EFFECT_TOOLS:
+the verbs a manifest may grant only behind a HITL approval (githost-scoped-2026-11 p3).
 
 An effect tool records, on success, what it changed through AuditCtx.effect(): ids,
 SHAs, refs and counts. A tool whose methods or actions are partly reads names the
@@ -110,6 +110,45 @@ EFFECT_TOOLS = frozenset(
         "woodpecker_pipeline_cancel",
         "woodpecker_restart",
         "woodpecker_trigger",
+    }
+)
+
+#: The effect tools an agent may call only through a HITL approval. host-forge/scripts
+#: `grant-lint.py --tools` reads this class from `githost-mcp --list-tools --json`. It
+#: refuses a manifest that grants one of these tools unless that tool is in
+#: `hitl.approval_required` under `hitl.mode: enforce`. `githost-grant-gate.sh` runs the
+#: same check before githost-mcp restarts on a new wheel (githost-scoped-2026-11 p3).
+#:
+#: A new verb goes in READ_TOOLS or EFFECT_TOOLS. If it goes in EFFECT_TOOLS, its author
+#: also decides whether it belongs here, and says why in the group comment.
+#:
+#: Outside the class on purpose: `*_create_release`, `git_tag`, `*_release_update`,
+#: `woodpecker_restart` and `woodpecker_trigger`. Developer runs them ungated during
+#: finalize, and each is reversible.
+HITL_TOOLS = frozenset(
+    {
+        # Merges land on a default branch. For several forge repos that is a deploy: the
+        # skills and scripts clones fast-forward from main.
+        "gitea_pr_merge",
+        "github_pr_merge",
+        "gitlab_mr_merge",
+        # These destroy state that nothing in githost restores: a remote branch, a remote
+        # ref rewritten by a force push, a published release.
+        "git_branch_delete_remote",
+        "git_push_force_with_lease",
+        "gitea_release_delete",
+        "github_release_delete",
+        "gitlab_release_delete",
+        # Stops a running pipeline, which may be another agent's deploy.
+        "woodpecker_pipeline_cancel",
+        # These publish to the world. A registry version can never be reused once
+        # uploaded, and `release` tags, publishes and rolls back across several targets.
+        "release",
+        "npm_publish",
+        "pypi_publish",
+        # These create a repository under a forge-owned owner, which is a new public surface.
+        "github_repo_create",
+        "gitea_repo_create",
     }
 )
 

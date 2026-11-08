@@ -812,7 +812,7 @@ wheels = [
 
 [[package]]
 name = "githost-mcp"
-version = "0.19.0"
+version = "0.20.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },

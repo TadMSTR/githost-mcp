@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.20.0] — 2026-11-08
+
+Grant model (githost-scoped-2026-11 part 3). githost-mcp now says which of its tools are
+destructive enough to need a HITL gate, and prints its tool surface for a deploy gate to
+check before the service restarts. The tool surface is unchanged: 79 tools.
+
+### Added
+
+- `effects.HITL_TOOLS`: the 14 effect tools a manifest may grant only behind a HITL
+  approval (three merges, `git_branch_delete_remote`, `git_push_force_with_lease`, three
+  `*_release_delete`, `woodpecker_pipeline_cancel`, `release`, `npm_publish`,
+  `pypi_publish`, two `*_repo_create`). The closed-world classification test now also
+  checks `HITL_TOOLS` is a subset of `EFFECT_TOOLS` and that every name in it is
+  registered. The class is pinned by a test, so changing it is a visible review decision.
+- `githost-mcp --list-tools [--json]` prints every tool with `kind` and `hitl`, then exits.
+  It does not import the server module, so it needs no env var and writes no log. It
+  registers the tools through the same `tools.register_all()` the server now uses.
+  host-forge/scripts `grant-lint.py` and `githost-grant-gate.sh` consume the JSON
+  (vikunja#947, #1225).
+- README: "Grant coverage".
+
+### Changed
+
+- The `githost-mcp` console script now points at `githost_mcp.cli:main`. With no arguments
+  it runs the server as before. PM2 runs `python -m githost_mcp.server`, which is
+  unchanged.
+
 ## [0.19.0] — 2026-11-08
 
 Attribution and telemetry (githost-scoped-2026-11 part 2). An audit entry now records what a

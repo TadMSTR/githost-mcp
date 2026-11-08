@@ -311,6 +311,33 @@ from failed check runs, which is where GitHub puts readable failure text.
 `audit_log_query` — query the JSONL audit log by agent, tool, repo, time range, or (0.19.0+)
 `run_id`, `task_id` or `trace_id`
 
+## Grant coverage
+
+A new githost verb must not reach an agent by accident, and a destructive one must not
+ship without a HITL gate. Three pieces make that checkable by a machine:
+
+- **Every tool is classified.** `effects.py` puts each tool in `READ_TOOLS` or
+  `EFFECT_TOOLS`. `HITL_TOOLS` is the subset of effect tools a manifest may grant only
+  behind a HITL approval: the three merges, `git_branch_delete_remote`,
+  `git_push_force_with_lease`, the three `*_release_delete`, `woodpecker_pipeline_cancel`,
+  `release`, `npm_publish`, `pypi_publish` and the two `*_repo_create` (14 tools). A
+  closed-world test fails on a registered tool that is unclassified, and on a HITL tool
+  that is not an effect tool. A new effect verb's author decides on `HITL_TOOLS` too.
+- **`githost-mcp --list-tools [--json]`** prints every registered tool with its `kind`
+  (`read` | `effect`) and `hitl` flag, then exits. It starts no server, needs no env var,
+  and writes neither the audit log nor the app log, so it runs against a freshly built
+  venv before the service restarts. Exit 0, or 2 on an internal error.
+
+  ```bash
+  $ githost-mcp --list-tools --json
+  {"server": "githost-mcp", "version": "0.20.0",
+   "tools": [{"name": "audit_log_query", "kind": "read", "hitl": false}, ...]}
+  ```
+- **The consumer is in forge's host-forge/scripts:** `grant-lint.py --tools
+  githost-mcp=-` reads that JSON. It refuses a manifest that grants a `hitl: true` tool not
+  listed in its `hitl.approval_required`, and names allowlist entries the server no longer
+  serves. `githost-grant-gate.sh <venv>` runs it before githost-mcp restarts on a new wheel.
+
 ## Audit Architecture
 
 Every tool call writes a JSONL entry before returning:
@@ -897,7 +924,7 @@ githost-mcp is not published to PyPI. Install from a checkout of a release tag, 
 the committed `uv.lock`, so the dependency set is the one CI tested and audited.
 
 ```bash
-VERSION=0.19.0
+VERSION=0.20.0
 VENV=/opt/venvs/githost-mcp
 
 # 1. The checkout is clean and is exactly the release tag on the remote. A local tag
