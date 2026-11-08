@@ -790,8 +790,8 @@ URL userinfo is found with one authority parser (`security.split_authority`), sh
 the remote-URL validator, the redactor, `url_host` and the npm registry target. The
 userinfo runs to the last `@` of the authority, and a credential in front of `/`, `?` or
 `#` before an `@` (`https://<token>/x@host/...`) counts as userinfo when the part before
-the first `/` is not host-shaped. A dotted credential (a JWT) in that position still reads
-as a host.
+the first `/` is not host-shaped. A dotted credential (a JWT), or a `name:<1-5 digits>`
+pair (it has the shape of `host:port`), in that position still reads as a host.
 
 Subprocess output (`twine`, `npm`, `python -m build`) is scrubbed before it is cut to 500
 characters, not after: cutting first could split a token past recognition.

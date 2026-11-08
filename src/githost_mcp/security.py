@@ -56,7 +56,8 @@ __all__ = [
 # head (a dotted name, an IP, `localhost`, or `label:port`) keeps ordinary URLs with an `@`
 # in the path intact: npm's `https://registry.npmjs.org/@scope%2fpkg`.
 #
-# Residual, stated: a dotted credential (a JWT) in front of `/…@host` reads as a host.
+# Residual, stated: a dotted credential (a JWT), or a `name:<1-5 digits>` pair, in front of
+# `/…@host` reads as a host.
 #
 # scp-style remotes (`git@github.com:owner/repo.git`) have no scheme and are left
 # readable: that is the form every forge remote actually uses.
