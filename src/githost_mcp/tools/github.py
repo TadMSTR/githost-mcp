@@ -800,7 +800,8 @@ def register(mcp) -> None:
             conclusion). Requires `run_id`.
           - get_job_log: a bounded, scrubbed view of one job's plain-text log (at most
             500 lines and about 64 KB). Requires `job_id` (from list_jobs). Default
-            `mode` is `tail`, where a failure is; page with `mode='range'`.
+            `mode` is `tail`, where a failure is; page with `mode='range'`. Scrubbed of
+            githost-mcp's own tokens and URL userinfo only; other secrets may remain.
 
         Read-only workflow listing/status stays in github_workflow_list /
         github_workflow_status. DESTRUCTIVE methods (run_workflow, rerun_workflow,

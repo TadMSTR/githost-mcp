@@ -496,7 +496,8 @@ def register(mcp) -> None:
         `mode='range'`. A step that has not started returns its state and no lines.
 
         Log text is never written to the audit trail; only these parameters are, with
-        `grep` recorded as present/absent.
+        `grep` recorded as present/absent. Output is scrubbed of githost-mcp's own
+        tokens and URL userinfo only; other secrets a pipeline printed may remain.
 
         Args:
             repo: Repository in 'owner/repo' format.
@@ -786,7 +787,8 @@ def register(mcp) -> None:
 
         Returns the list of config file names and a bounded, scrubbed view of one of them
         (the same reader and caps as woodpecker_get_logs). Config carries `from_secret`
-        names, never secret values.
+        names, never secret values. Output is scrubbed of githost-mcp's own tokens and
+        URL userinfo only; other secrets a pipeline printed may remain.
 
         Args:
             repo: Repository in 'owner/repo' format.

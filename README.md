@@ -281,8 +281,12 @@ id comes back separately as `internal_id`, for reference only; no tool accepts i
   characters), with `ignore_case` and `context` (0–20 lines). Hits come back as
   `segments`, with overlapping windows merged. Matching runs on the scrubbed text.
 - At most 500 lines and about 64 KB per response; `total_lines` and `truncated` are
-  always present. Carriage-return progress redraws collapse to the last one. Every line
-  is credential-scrubbed.
+  present whenever lines come back (a step that has not started returns `lines: null`
+  and a `note` instead). Carriage-return progress redraws collapse to the last one.
+- Every line goes through `scrub()`, which removes **only githost-mcp's own configured
+  tokens and URL userinfo**. Other credentials a pipeline prints (unmasked environment
+  values, third-party tokens) pass through, so treat log text as sensitive and don't
+  paste it into public PRs or issues. See [Credential isolation](#credential-isolation).
 - Log text and the `grep` string are never written to the audit trail or the app log.
 
 `woodpecker_get_logs` with no `step_name` reads the first failed step, else the first

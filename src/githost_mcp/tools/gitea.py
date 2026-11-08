@@ -562,7 +562,8 @@ def register(mcp) -> None:
           - list_jobs: list jobs for a run (id, name, status, conclusion). Requires `run_id`.
           - get_job_log: a bounded, scrubbed view of a job's log (at most 500 lines and
             about 64 KB). Requires `job_id`. Default `mode` is `tail`, where a failure is;
-            page with `mode='range'` using `returned_to`.
+            page with `mode='range'` using `returned_to`. Scrubbed of githost-mcp's own
+            tokens and URL userinfo only; other secrets in the log may remain.
           - dispatch_workflow: trigger a workflow_dispatch. Requires `workflow` (file name,
             e.g. 'ci.yml') and `ref`; optional `inputs` dict.
           - rerun_run: re-run all jobs of a run. Requires `run_id`.

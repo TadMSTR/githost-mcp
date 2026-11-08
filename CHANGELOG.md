@@ -15,7 +15,8 @@ Closes #1425 (id 1508); the githost half of #1389 (id 1472).
   control characters) with `ignore_case` and 0–20 lines of `context`. At most 500 lines
   and about 64 KB per response, with `total_lines`, `returned_from`, `returned_to` and
   `truncated` for paging. Carriage-return progress redraws collapse to the last one. Every
-  line is scrubbed, and grep matches on the scrubbed text. Log text and the grep string
+  line goes through `scrub()` (githost-mcp's own tokens and URL userinfo only; other
+  credentials in a log pass through), and grep matches on the scrubbed text. Log text and the grep string
   never reach the audit trail or the app log.
 - **`woodpecker_restart`** (write): re-runs a pipeline with its original event, so a
   push-only failure reproduces. `woodpecker_trigger` makes a `manual` run. No event or
