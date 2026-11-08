@@ -249,7 +249,8 @@ entry records `custom_body: true|false`, never the text.
 
 `gitea_pr_merge(repo, pr_number, merge_style="merge", message=None,
 delete_branch_after_merge=False)`: `delete_branch_after_merge` (0.21.0) deletes the PR's
-head branch once merged, and the effect records `branch_deleted`. It is Gitea-only:
+head branch once merged, and the effect records `branch_delete_requested` (what was asked;
+Gitea answers 200 even when it declines or fails the deletion). It is Gitea-only:
 GitHub has no merge parameter for it, and the repository's "Automatically delete head
 branches" setting does it there. Before 0.21.0 `message` went out under a field name
 Gitea does not have (`merge_message_title`), so it was ignored; it is now sent as
@@ -277,9 +278,12 @@ Both run their tools (`python -m build`, `twine`, `npm`) with an allowlisted env
   path, or a symlink that resolves outside the repo is refused.
 - `npm_publish` `registry` must be an `https://` URL with a host and no credentials, and
   `tag` must be 1-64 of `[A-Za-z0-9._-]`.
-- With no `registry`, the effect's `target` is the host of the registry npm resolved
-  (`npm config get registry`, `.npmrc` included), not an assumed `registry.npmjs.org`.
-  If that lookup fails, `target` is null and named in `effect_incomplete`.
+- The effect's `target` is the host of the registry npm picks for this package: a scoped
+  package's `@scope:registry` when one is set, else the `registry` argument, else
+  `npm config get registry` (`.npmrc` included). It is null, and named in
+  `effect_incomplete`, when `package.json` `publishConfig` sets a registry, when a scope
+  registry competes with an explicit `registry` argument, when the URL's host is
+  ambiguous, or when the lookup fails.
 - The effect's `package`/`version` are null (and incomplete) when `dist/` holds more than
   one package or version, and when `package.json` is not a regular file, is over 1 MiB,
   or is not a JSON object.
@@ -438,7 +442,7 @@ said only that the call succeeded — `git_commit` recorded `{repo_path, identit
 | `git_remote` | `name`, `action` (add: the URL's `host`) |
 | `*_pr_create` / `gitlab_mr_create` | `pr_number`, `head_sha`, `base` |
 | `github_pr_merge` | `pr_number`, `merge_sha`, `method`, `custom_body` (whether `commit_message` was given; never the text) |
-| `gitea_pr_merge` | `pr_number`, `merge_sha`, `method`, `branch_deleted` |
+| `gitea_pr_merge` | `pr_number`, `merge_sha`, `method`, `branch_delete_requested` |
 | `gitlab_mr_merge` | `pr_number`, `merge_sha`, `method` |
 | `github_pr_review`, `gitea_pr_review` | `pr_number`, `review_id`, `state` |
 | `gitlab_mr_review` | `pr_number`, `state` |

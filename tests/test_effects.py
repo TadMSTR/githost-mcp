@@ -385,7 +385,7 @@ async def test_gitea_pr_merge_reads_back_the_merge_sha(audit_env):
         "pr_number": 5,
         "merge_sha": "d" * 40,
         "method": "squash",
-        "branch_deleted": False,
+        "branch_delete_requested": False,
     }
 
 
@@ -404,7 +404,7 @@ async def test_gitea_pr_merge_sends_title_and_branch_deletion_in_swagger_field_n
     body = json.loads(route.calls.last.request.content)
     assert body == {"Do": "squash", "merge_title_field": "Title", "delete_branch_after_merge": True}
     entry = _entries(audit_env)[-1]
-    assert entry["effect"]["branch_deleted"] is True
+    assert entry["effect"]["branch_delete_requested"] is True
     assert entry["params"]["delete_branch_after_merge"] is True
 
 

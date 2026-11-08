@@ -11,7 +11,7 @@ optional parameters.
 - `github_pr_merge(commit_message=None)`: the merge commit body. The audit entry records
   `custom_body: true|false`, never the text (vikunja#1445).
 - `gitea_pr_merge(delete_branch_after_merge=False)`: delete the head branch once merged;
-  the effect records `branch_deleted` (vikunja#628).
+  the effect records `branch_delete_requested` (vikunja#628).
 - `git_commit`'s effect records `merge_parents` (every parent, first first) for a merge
   commit (vikunja#1300).
 
@@ -41,10 +41,11 @@ optional parameters.
   `expected_sha` was stale: git skips the lease check when nothing moves.
 - `push_effect_fields` marks its fallback (`ref_matched: null`, in `effect_incomplete`)
   when no PushInfo names the branch (vikunja#1434).
-- `npm_publish` records the host of the registry npm resolved, not an assumed
-  `registry.npmjs.org` (vikunja#1435). `npm_identity` reads a regular file only, bounded,
+- `npm_publish` records the host of the registry npm picks for the package (scope
+  registry, argument, or `.npmrc`), and null when `publishConfig` or a competing scope
+  registry leaves it in doubt, not an assumed `registry.npmjs.org` (vikunja#1435). `npm_identity` reads a regular file only, bounded,
   and a JSON object; `dist_identity` is null when `dist/` holds more than one package or
-  version (vikunja#1434).
+  version, or a file whose name it can't read (vikunja#1434).
 - README: the effect table now matches what each tool emits.
 
 ### Security

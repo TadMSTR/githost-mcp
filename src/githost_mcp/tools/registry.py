@@ -51,16 +51,21 @@ def dist_identity(dist_path: str) -> tuple[str | None, str | None]:
         return None, None
     found: dict[tuple[str, str], tuple[str, str]] = {}
     for name in names:
+        if name.startswith("."):  # `twine upload dist/*` skips dotfiles
+            continue
         m = _DIST_RE.fullmatch(name)
-        if m:
-            found.setdefault((_normalized(m.group(1)), m.group(2)), (m.group(1), m.group(2)))
+        if not m:
+            # twine uploads it too, and its name can't be read: the pair would be a guess
+            # about part of what went up (CR-09).
+            return None, None
+        found.setdefault((_normalized(m.group(1)), m.group(2)), (m.group(1), m.group(2)))
     if len(found) != 1:
         return None, None
     return next(iter(found.values()))
 
 
-def npm_identity(repo_path: str) -> tuple[str | None, str | None]:
-    """(name, version) from package.json, each only if it has the expected shape.
+def _read_package_json(repo_path: str) -> dict | None:
+    """package.json as a dict, or None.
 
     Read after the publish, so it never fails the call and never hangs it (#1434 F-03): a
     regular file only (lstat, then an O_NOFOLLOW|O_NONBLOCK open and fstat, so a symlink
@@ -70,18 +75,24 @@ def npm_identity(repo_path: str) -> tuple[str | None, str | None]:
     path = os.path.join(repo_path, "package.json")
     try:
         if not stat.S_ISREG(os.lstat(path).st_mode):
-            return None, None
+            return None
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as f:
             if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                return None, None
+                return None
             raw = f.read(_PACKAGE_JSON_MAX + 1)
         if len(raw) > _PACKAGE_JSON_MAX:
-            return None, None
+            return None
         data = json.loads(raw)
     except (OSError, ValueError):
-        return None, None
-    if not isinstance(data, dict):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def npm_identity(repo_path: str) -> tuple[str | None, str | None]:
+    """(name, version) from package.json, each only if it has the expected shape."""
+    data = _read_package_json(repo_path)
+    if data is None:
         return None, None
     name, version = data.get("name"), data.get("version")
     return (
@@ -129,16 +140,11 @@ def validate_npm_tag(tag: str | None) -> None:
         raise InvalidArgument("tag must be 1-64 of letters, digits, '.', '_' or '-'")
 
 
-def npm_registry_host(repo_path: str, env: dict) -> str | None:
-    """The host of the registry npm resolved for this package (.npmrc included), or None.
-
-    `npm config get registry` reads the same configuration `npm publish` just used, so the
-    effect names where the package really went, not an assumed registry.npmjs.org
-    (vikunja#1435). Host only: a registry URL may carry userinfo.
-    """
+def _npm_config_get(repo_path: str, env: dict, key: str) -> str | None:
+    """`npm config get <key>` in the repo (its .npmrc included), or None when unset."""
     try:
         result = subprocess.run(
-            ["npm", "config", "get", "registry"],
+            ["npm", "config", "get", key],
             cwd=repo_path,
             env=env,
             capture_output=True,
@@ -147,9 +153,44 @@ def npm_registry_host(repo_path: str, env: dict) -> str | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if result.returncode != 0:
+    value = result.stdout.strip()
+    if result.returncode != 0 or value in ("", "undefined", "null"):
         return None
-    return url_host(result.stdout.strip())
+    return value
+
+
+def npm_publish_target(repo_path: str, env: dict, registry: str | None) -> str | None:
+    """The host npm published to, or None when it can't be said for certain.
+
+    npm takes the registry from package.json `publishConfig` first, then the package
+    scope's `@scope:registry`, then `registry` (the argument, or .npmrc). Recording the
+    generic registry for a scoped or publishConfig package named a host npm never used
+    (audit F-04), so:
+    - a `publishConfig` that sets a registry: None (its precedence over the argument is
+      npm-version dependent);
+    - a scoped package whose scope has a registry: that host, or None when an explicit
+      `registry` argument competes with it;
+    - otherwise the argument's host, or the generic `npm config get registry` host.
+    Host only: a registry URL may carry userinfo. An ambiguous URL has no host (url_host).
+    """
+    data = _read_package_json(repo_path)
+    if data is None:
+        return None
+    publish_config = data.get("publishConfig")
+    if isinstance(publish_config, dict) and any(
+        key == "registry" or key.endswith(":registry") for key in publish_config
+    ):
+        return None
+    name = data.get("name")
+    if isinstance(name, str) and name.startswith("@") and "/" in name:
+        scope = name.split("/", 1)[0]
+        scoped = _npm_config_get(repo_path, env, f"{scope}:registry")
+        if scoped is not None:
+            return None if registry else url_host(scoped)
+    if registry:
+        return url_host(registry)
+    generic = _npm_config_get(repo_path, env, "registry")
+    return url_host(generic) if generic else None
 
 
 def register(mcp) -> None:
@@ -303,10 +344,10 @@ def register(mcp) -> None:
                 raise ValueError(f"npm publish failed: {scrub(result.stderr)[:500]}")
 
             package, version = npm_identity(repo_path)
-            # The registry is recorded as its host only (a URL may carry userinfo). With no
-            # `registry` argument, it is the one npm resolved, .npmrc included.
+            # The registry npm resolved for this package, as a host, or null (with
+            # effect_incomplete) when publishConfig or a scope registry leaves it in doubt.
             ac.effect(
-                target=url_host(registry) if registry else npm_registry_host(repo_path, pub_env),
+                target=npm_publish_target(repo_path, pub_env, registry),
                 package=package,
                 version=version,
             )

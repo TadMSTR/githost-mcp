@@ -476,7 +476,9 @@ def register(mcp) -> None:
                 pr_number=pr_number,
                 merge_sha=merge_sha,
                 method=merge_style,
-                branch_deleted=delete_branch_after_merge,
+                # What was asked for, not what happened: Gitea answers 200 even when it
+                # declines or fails the deletion (audit F-04).
+                branch_delete_requested=delete_branch_after_merge,
             )
             ac.finish("ok")
             return {"merged": True, "pr_number": pr_number}

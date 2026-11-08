@@ -479,10 +479,12 @@ def test_npm_identity_reads_a_normal_package_json(tmp_path):
 def test_dist_identity_one_package_wheel_and_sdist(tmp_path):
     from githost_mcp.tools.registry import dist_identity
 
-    (tmp_path / "My_Pkg-1.0.0-py3-none-any.whl").write_text("")
-    (tmp_path / "my_pkg-1.0.0.tar.gz").write_text("")
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "My_Pkg-1.0.0-py3-none-any.whl").write_text("")
+    (dist / "my_pkg-1.0.0.tar.gz").write_text("")
     # One (name, version) once names are normalised: a wheel and its sdist.
-    assert dist_identity(str(tmp_path)) == ("My_Pkg", "1.0.0")
+    assert dist_identity(str(dist)) == ("My_Pkg", "1.0.0")
 
 
 @pytest.mark.parametrize(
@@ -509,3 +511,97 @@ def test_publish_output_is_scrubbed_before_it_is_cut(tools, pkg_repo):
     with patch("githost_mcp.tools.registry.subprocess.run", side_effect=[check_ok, upload_fail]):
         result = tools["pypi_publish"](str(pkg_repo))
     assert token[:12] not in result["error"]
+
+
+# --- audit F-04 / CR-20: the registry npm picks for this package -------------------------
+
+
+class _KeyedNpmRunner(_NpmRunner):
+    """Answers `npm config get <key>` per key; an unset key prints `undefined`."""
+
+    def __init__(self, config: dict):
+        super().__init__()
+        self.keys = config
+
+    def __call__(self, cmd, *args, **kwargs):
+        if cmd[:3] == ["npm", "config", "get"]:
+            self.calls.append((cmd, kwargs))
+            return _mock_run(returncode=0, stdout=self.keys.get(cmd[3], "undefined") + "\n")
+        return super().__call__(cmd, *args, **kwargs)
+
+
+_GENERIC = {"registry": "https://registry.npmjs.org/"}
+
+
+@pytest.mark.parametrize(
+    ("package_json", "config", "registry_arg", "target"),
+    [
+        # A scoped package goes to its scope's registry, not the generic one.
+        (
+            {"name": "@acme/pkg", "version": "1.0.0"},
+            {**_GENERIC, "@acme:registry": "https://npm.acme.example/"},
+            None,
+            "npm.acme.example",
+        ),
+        # A scope with no registry of its own uses the generic one.
+        ({"name": "@acme/pkg", "version": "1.0.0"}, _GENERIC, None, "registry.npmjs.org"),
+        # publishConfig sets the registry: precedence over the rest is npm's call.
+        (
+            {
+                "name": "pkg",
+                "version": "1.0.0",
+                "publishConfig": {"registry": "https://x.example/"},
+            },
+            _GENERIC,
+            None,
+            None,
+        ),
+        # A scope registry competing with an explicit argument: not said for certain.
+        (
+            {"name": "@acme/pkg", "version": "1.0.0"},
+            {**_GENERIC, "@acme:registry": "https://npm.acme.example/"},
+            "https://registry.npmjs.org/",
+            None,
+        ),
+        # Unscoped, explicit argument: the argument's host.
+        ({"name": "pkg", "version": "1.0.0"}, _GENERIC, "https://r.example/", "r.example"),
+        # An ambiguous authority in .npmrc has no host to record.
+        (
+            {"name": "pkg", "version": "1.0.0"},
+            {"registry": "https://2130706433/x@registry.npmjs.org/"},
+            None,
+            None,
+        ),
+    ],
+)
+def test_npm_publish_target_follows_npms_registry_choice(
+    tools, tmp_path, npm_on_path, package_json, config, registry_arg, target
+):
+    import json
+
+    repo = tmp_path / "npmpkg"
+    repo.mkdir()
+    (repo / "package.json").write_text(json.dumps(package_json))
+    with patch("githost_mcp.tools.registry.subprocess.run", _KeyedNpmRunner(config)):
+        result = tools["npm_publish"](str(repo), registry=registry_arg)
+    assert "error" not in result
+    entry = _audit_entries(tmp_path)[-1]
+    assert entry["effect"]["target"] == target
+    if target is None:
+        assert "target" in entry["effect_incomplete"]
+
+
+def test_dist_identity_unknown_with_an_unreadable_file_name(tmp_path):
+    # CR-09: twine uploads every file in dist/; a name the pattern can't read means the
+    # (package, version) would describe only part of the upload.
+    from githost_mcp.tools.registry import dist_identity
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "pkg-1.0.0-py3-none-any.whl").write_text("x")
+    (dist / "pkg-1.0.0.tar.gz").write_text("x")
+    assert dist_identity(str(dist)) == ("pkg", "1.0.0")
+    (dist / ".gitignore").write_text("*")  # dotfiles are not uploaded
+    assert dist_identity(str(dist)) == ("pkg", "1.0.0")
+    (dist / "other.zip").write_text("x")
+    assert dist_identity(str(dist)) == (None, None)
