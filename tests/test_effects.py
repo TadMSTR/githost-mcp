@@ -161,6 +161,50 @@ def test_the_hitl_class_is_the_reviewed_set():
     } == effects.HITL_TOOLS
 
 
+def test_the_ungated_effect_set_is_the_reviewed_set():
+    """The other half of the pin (audit F-02, githost-scoped-2026-11 p3).
+
+    Pinning HITL_TOOLS alone lets a verb leave the class, or a new effect verb land
+    outside it, without anyone deciding that it should be ungated. Each name here is
+    ungated on purpose, for the reason in effects.py's comment above HITL_TOOLS.
+    """
+    assert {
+        "git_add",
+        "git_branch",
+        "git_checkout",
+        "git_clone",
+        "git_commit",
+        "git_pull",
+        "git_push",
+        "git_remote",
+        "git_tag",
+        "git_worktree",
+        "gitea_actions",
+        "gitea_create_release",
+        "gitea_issue_write",
+        "gitea_pr_comment",
+        "gitea_pr_create",
+        "gitea_pr_review",
+        "gitea_release_update",
+        "github_actions",
+        "github_create_release",
+        "github_fork",
+        "github_issue_write",
+        "github_pr_create",
+        "github_pr_review",
+        "github_pr_update",
+        "github_release_update",
+        "gitlab_create_release",
+        "gitlab_issue_write",
+        "gitlab_mr_create",
+        "gitlab_mr_review",
+        "gitlab_pipeline",
+        "gitlab_release_update",
+        "woodpecker_restart",
+        "woodpecker_trigger",
+    } == effects.UNGATED_EFFECT_TOOLS
+
+
 def test_the_server_registers_the_same_tools(monkeypatch, tmp_path):
     """The module-level registration above is what server.py does; check the real list."""
     monkeypatch.setenv("AUDIT_LOG_FILE", str(tmp_path / "audit.jsonl"))

@@ -2,7 +2,7 @@
 
 ## [0.20.0] — 2026-11-08
 
-Grant model (githost-scoped-2026-11 part 3). githost-mcp now says which of its tools are
+Grant model. githost-mcp now says which of its tools are
 destructive enough to need a HITL gate, and prints its tool surface for a deploy gate to
 check before the service restarts. The tool surface is unchanged: 79 tools.
 
@@ -20,6 +20,20 @@ check before the service restarts. The tool surface is unchanged: 79 tools.
   host-forge/scripts `grant-lint.py` and `githost-grant-gate.sh` consume the JSON
   (vikunja#947, #1225).
 - README: "Grant coverage".
+
+### Security
+
+- `git_push` takes a plain branch name only. It handed `branch` to the push as a raw
+  refspec, so `:x` deleted a remote branch and `+x` force-updated one (with no lease and
+  no protected-branch check): the effects of the HITL-gated `git_branch_delete_remote`
+  and `git_push_force_with_lease`, through an ungated verb. `validate_branch_name` now
+  also refuses a leading `+`, and `git_push` validates `remote` too.
+- `git_tag` and `release` validate the tag name the same way (`validate_tag_name`), so
+  `git_tag(push=True)` cannot force-move a remote tag with `+v1.0.0`.
+- `effects.UNGATED_EFFECT_TOOLS` is pinned by a test alongside `HITL_TOOLS`, and the
+  rationale for the ungated publish paths (`git_tag`, release create/update, the
+  `github_actions`/`gitlab_pipeline` cancel methods) is corrected: they are not
+  reversible in every repo. The gating decision is vikunja#1440.
 
 ### Changed
 

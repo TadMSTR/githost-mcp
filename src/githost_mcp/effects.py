@@ -122,13 +122,25 @@ EFFECT_TOOLS = frozenset(
 #: A new verb goes in READ_TOOLS or EFFECT_TOOLS. If it goes in EFFECT_TOOLS, its author
 #: also decides whether it belongs here, and says why in the group comment.
 #:
-#: Outside the class on purpose: `*_create_release`, `git_tag`, `*_release_update`,
-#: `woodpecker_restart` and `woodpecker_trigger`. Developer runs them ungated during
-#: finalize, and each is reversible.
+#: Outside the class, and why (each is an effect tool; UNGATED_EFFECT_TOOLS below pins the
+#: set so moving a verb out of the class takes a deliberate edit):
+#:
+#: - `git_push` takes a plain branch name only. A refspec (`:x`, `+x`, `a:b`) would reach
+#:   the delete and force effects gated below, so `validate_branch_name` refuses it.
+#: - `git_tag`, `*_create_release`, `*_release_update`: NOT reversible in every repo.
+#:   Where a pushed `v*` tag, or a published release, triggers a registry publish, one
+#:   ungated call publishes a version that can never be reused. Today the control is
+#:   that only the build agents hold them ungated, and that `release` is the documented
+#:   path. Whether to gate them, or to require a reviewer environment on every
+#:   tag-triggered publish job instead, is an open decision (vikunja#1440).
+#: - `github_actions` and `gitlab_pipeline`: one tool each, dispatching on `method`, and
+#:   the class is per tool. Their `cancel_run`/`cancel` methods stop a pipeline exactly
+#:   as `woodpecker_pipeline_cancel` does, ungated. Same decision (vikunja#1440).
+#: - `woodpecker_restart`, `woodpecker_trigger`: re-run or start a pipeline; a duplicate
+#:   run is the worst case.
 HITL_TOOLS = frozenset(
     {
-        # Merges land on a default branch. For several forge repos that is a deploy: the
-        # skills and scripts clones fast-forward from main.
+        # Merges land on a default branch, which for some repos is what deploys.
         "gitea_pr_merge",
         "github_pr_merge",
         "gitlab_mr_merge",
@@ -151,6 +163,11 @@ HITL_TOOLS = frozenset(
         "gitea_repo_create",
     }
 )
+
+#: The effect tools deliberately left outside HITL_TOOLS (see the comment above it).
+#: Pinned by tests/test_effects.py, so a verb leaving the class, or a new effect verb
+#: landing outside it, is a reviewed edit to this set rather than a silent default.
+UNGATED_EFFECT_TOOLS = EFFECT_TOOLS - HITL_TOOLS
 
 #: Tools that are an effect only for some values of one argument, keyed by the name the
 #: argument has in the tool's audit `params`.
