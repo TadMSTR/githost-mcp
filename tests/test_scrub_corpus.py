@@ -87,6 +87,13 @@ def test_every_planted_credential_is_redacted(case):
         ("github_pat_" + "A1_" * 20, "github_pat_***"),
         ("tok=" + "xoxb-" + "1234-abcd-5678", "tok=xoxb-***"),
         ("NPM_TOKEN=" + "npm_" + "z9" * 18, "NPM_TOKEN=npm_***"),
+        # Serialised and env forms (audit F-02).
+        ("{'Authorization': 'Bearer abc.def'}", "{'Authorization': 'Bearer ***'}"),
+        ('{"Authorization": "token deadbeef"}', '{"Authorization": "token ***"}'),
+        ("HTTP_AUTHORIZATION=Bearer abc.def x", "HTTP_AUTHORIZATION=Bearer *** x"),
+        ("X-Authorization: Negotiate YIIabc", "X-Authorization: Negotiate ***"),
+        ("Authorization: Digest username", "Authorization: Digest ***"),
+        ("Authorization: " + "f0" * 20, "Authorization: ***"),
     ],
 )
 def test_shapes_redact(text, expected):
@@ -104,6 +111,9 @@ def test_shapes_redact(text, expected):
         "xghp_" + "a1" * 18,
         "set npm_config_registry=https://registry.npmjs.org/",
         "run github_pat_check before release",
+        "authorization: required",
+        "{'Authorization': 'Bearer'}",
+        "unauthorization: abcdefghijklmnopqrstuvwxyz",
     ],
 )
 def test_lookalikes_are_untouched(text):
@@ -118,6 +128,8 @@ def test_shapes_are_linear():
         "_" * 64000,
         "a" * 64000,
         "authorization:bearer " * 3000,
+        "'Authorization': '" * 3500,
+        "HTTP_AUTHORIZATION=" * 3400,
     ]
     start = time.perf_counter()
     for blob in blobs:

@@ -49,8 +49,10 @@ optional parameters.
 
 ### Security
 
-- `scrub()` redacts credential shapes too: an `Authorization` header value and
-  vendor-prefixed tokens. Tested against a corpus of real failure text in both directions
+- `scrub()` redacts credential shapes too: an `Authorization` value after a `Bearer`,
+  `token`, `Basic`, `Digest` or `Negotiate` scheme word (or a bare value of 20+
+  characters), in header, dict, JSON and `HTTP_AUTHORIZATION=` forms; and vendor-prefixed
+  tokens (`ghp_` and the other GitHub prefixes, `glpat-`, `xoxb-`/`xoxp-`, `npm_`, `pypi-`). Tested against a corpus of real failure text in both directions
   (vikunja#913).
 - Publish children (`python -m build`, `twine`, `npm`) get an allowlisted environment, not
   githost's own (vikunja#610).

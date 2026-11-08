@@ -325,9 +325,10 @@ id comes back separately as `internal_id`, for reference only; no tool accepts i
 - At most 500 lines and about 64 KB per response; `total_lines` and `truncated` are
   present whenever lines come back (a step that has not started returns `lines: null`
   and a `note` instead). Carriage-return progress redraws collapse to the last one.
-- Every line goes through `scrub()`, which removes **only githost-mcp's own configured
-  tokens and URL userinfo**. Other credentials a pipeline prints (unmasked environment
-  values, third-party tokens) pass through, so treat log text as sensitive and don't
+- Every line goes through `scrub()`, which removes githost-mcp's own configured tokens,
+  URL userinfo, `Authorization` values and vendor-prefixed tokens (see
+  [Credential shapes](#credential-isolation)). Other credentials a pipeline prints
+  (unmasked environment values, unprefixed third-party tokens) pass through, so treat log text as sensitive and don't
   paste it into public PRs or issues. See [Credential isolation](#credential-isolation).
 - Log text and the `grep` string are never written to the audit trail or the app log.
 
@@ -766,8 +767,8 @@ Token values never appear in:
 
 As of 0.9.0, every caller-facing error return in the tool modules (`git_local.py`,
 `release.py`, `woodpecker.py`, `registry.py`, `gitea.py`/`github.py`/`gitlab.py`) is
-scrubbed via **`security.scrub()`** — `redact_url_credentials(mask_credentials(text))` —
-rather than `mask_credentials()` alone. `mask_credentials()` only replaces githost-mcp's
+scrubbed via **`security.scrub()`** (configured tokens, then URL userinfo, then credential
+shapes since 0.21.0) rather than `mask_credentials()` alone. `mask_credentials()` only replaces githost-mcp's
 own *configured* token values, so a credential a human embedded in a remote by hand
 (`https://user:token@host/...`) previously survived it. `redact_url_credentials()` strips
 the userinfo component from any scheme-qualified URL by shape, independent of whether
@@ -777,7 +778,9 @@ closes the gap where `git_push`'s new `summary` field (the remote's raw rejectio
 could otherwise have surfaced a credential verbatim.
 
 **Credential shapes (0.21.0, vikunja#913).** `scrub()` also redacts by shape: the value
-after `Authorization: Bearer|token|Basic`, and vendor-prefixed tokens (`ghp_`, `gho_`,
+after an `Authorization` keyword (quoted as in a dict or JSON repr, or prefixed as in
+`HTTP_AUTHORIZATION=`) that follows a `Bearer`, `token`, `Basic`, `Digest` or `Negotiate`
+scheme word, or is at least 20 characters with no scheme word; and vendor-prefixed tokens (`ghp_`, `gho_`,
 `ghs_`, `ghu_`, `ghr_`, `github_pat_`, `glpat-`, `xoxb-`/`xoxp-`, `npm_`, `pypi-`), keeping
 the prefix (`ghp_***`). Because `scrub()` sits on every return path, the shapes are narrow,
 and a corpus of real failure text from git, PyGithub, httpx, twine and npm
