@@ -88,14 +88,16 @@ def split_authority(after_scheme: str) -> tuple[str | None, str, str]:
     return None, head, after_scheme[first:]
 
 
-# A scheme-qualified URL in free text, up to whitespace or a quote. Linear (audit F-02,
+# The start of a scheme-qualified URL in free text. Linear (audit F-02,
 # agent-build-workflow-2026-09 p4): the lookbehind lets an attempt start only at the
 # beginning of a run of scheme characters, and every quantifier is possessive, so a long
 # run is scanned once. `pre` keeps leading digits/`+.-` so `1https://tok@h` is still found.
-_URL_IN_TEXT_RE = re.compile(
-    r"(?<![a-zA-Z0-9+.\-])(?P<pre>[0-9+.\-]*+)"
-    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*+://)(?P<rest>[^\s'\"<>]*+)"
+# Each URL runs to whitespace, a quote, or the next URL's start, whichever comes first, so
+# a URL nested in another's query or joined to it by a comma is redacted on its own.
+_URL_START_RE = re.compile(
+    r"(?<![a-zA-Z0-9+.\-])(?P<pre>[0-9+.\-]*+)(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*+://)"
 )
+_URL_END_RE = re.compile(r"[\s'\"<>]")
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 
 
@@ -526,14 +528,20 @@ def redact_url_credentials(text: str) -> str:
     Complements mask_credentials(), which can only redact tokens it already knows
     about from config. Use both on anything derived from git remote output.
     """
-
-    def _redact(m: re.Match) -> str:
-        userinfo, hostport, rest = split_authority(m.group("rest"))
-        if not userinfo:  # None, or an empty `scheme://@host`: nothing to hide
-            return m.group(0)
-        return f"{m.group('pre')}{m.group('scheme')}***@{hostport}{rest}"
-
-    return _URL_IN_TEXT_RE.sub(_redact, text)
+    starts = list(_URL_START_RE.finditer(text))
+    out: list[str] = []
+    pos = 0
+    for i, m in enumerate(starts):
+        body = m.end()
+        limit = starts[i + 1].start() if i + 1 < len(starts) else len(text)
+        stop = _URL_END_RE.search(text, body, limit)
+        end = stop.start() if stop else limit
+        userinfo, hostport, rest = split_authority(text[body:end])
+        if userinfo:  # None, or an empty `scheme://@host`: nothing to hide
+            out.append(f"{text[pos:body]}***@{hostport}{rest}")
+            pos = end
+    out.append(text[pos:])
+    return "".join(out)
 
 
 # Credentials this process does not hold in its own config, redacted by shape (vikunja#913).

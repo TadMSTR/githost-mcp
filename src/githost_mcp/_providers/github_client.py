@@ -142,8 +142,10 @@ def _is_log_host(host: str | None) -> bool:
 
 # Case-insensitive scheme: the redirect allowlist follows an uppercase `HTTPS://` Location
 # too (#1431 R2-01). The groups cannot overlap (the host stops at `:`, `/` or `?`, and the
-# path must start with `/`) and every quantifier is possessive, so a long run with no `?`
-# is scanned once, not once per split point.
+# path must start with `/`) and every quantifier is possessive, so one long URL with no
+# `?` is scanned once, not once per split point. A run of many `https://` starts is still
+# scanned once per start (64 KB of `https://a/` takes ~0.6 s); this runs only on httpx and
+# httpcore log messages, which are one request line each.
 _URL_WITH_QUERY_RE = re.compile(
     r"(?i)(?P<scheme>https://)(?P<host>[A-Za-z0-9.-]++)(?P<port>:\d++)?"
     r"(?P<path>/[^\s'\"?]*+)?\?[^\s'\"]*+"

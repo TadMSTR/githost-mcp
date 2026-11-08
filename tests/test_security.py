@@ -786,3 +786,32 @@ def test_redaction_is_linear_on_a_long_url_with_many_ats():
         t0 = time.perf_counter()
         redact_url_credentials(value)
         assert time.perf_counter() - t0 < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "redirect https://h.example/login?next=https://user:SECRETTOK@evil.example/x",
+        "remotes=https://a:SECRETTOK@h1.example,https://b:SECRETTOK@h2.example",
+        "https://h.example/?u=https://SECRETTOK@h2.example;ftp://SECRETTOK@h3.example",
+    ],
+)
+def test_redaction_reaches_a_url_nested_in_or_joined_to_another(text):
+    # The 0.21.0 rewrite first matched each URL to the end of its token, so a second URL in
+    # the first one's query, or after a comma, was never looked at (0.20.0 redacted both).
+    from githost_mcp.security import redact_url_credentials
+
+    out = redact_url_credentials(text)
+    assert "SECRETTOK" not in out
+    assert out.count("***@") == text.count("SECRETTOK")
+
+
+def test_redaction_is_linear_on_many_nested_schemes():
+    import time
+
+    from githost_mcp.security import redact_url_credentials
+
+    for value in ("a://" * 16000, "https://h/?u=" * 5000 + "https://t@h", "x://t@h," * 8000):
+        t0 = time.perf_counter()
+        redact_url_credentials(value)
+        assert time.perf_counter() - t0 < 0.5
