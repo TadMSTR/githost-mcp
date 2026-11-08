@@ -366,7 +366,7 @@ def _lookup_fork_provenance(
                 verdict = PROVENANCE_THIRD_PARTY
                 break
     except Exception as e:
-        log.warning("fork_provenance_lookup_failed", repos=full_names, error=str(e))
+        log.warning("fork_provenance_lookup_failed", repos=full_names, error=scrub(str(e)))
         return None
     _write_cached_provenance(repo, verdict)
     return verdict
@@ -1268,7 +1268,7 @@ def register(mcp) -> None:
                     head.set_tracking_branch(repo.remotes[remote].refs[branch_name])
                 upstream_set = head.tracking_branch() is not None
             except Exception as e:  # never fail a good push over upstream bookkeeping
-                log.warning("push_upstream_not_set", branch=branch_name, error=str(e))
+                log.warning("push_upstream_not_set", branch=branch_name, error=scrub(str(e)))
 
             ac.effect(
                 remote=remote,
