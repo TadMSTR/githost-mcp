@@ -182,10 +182,8 @@ the refspec as one argv element, so this is not a shell boundary — but a refsp
 never named.
 
 The same check covers every caller-supplied name that reaches a push (as of 0.20.0):
-`git_push`'s `branch` (and `remote`), `git_tag`'s `tag_name` and `release`'s tag. A name
-with a leading `+`, `:` or `-`, or a `:` anywhere, is refused before anything is pushed.
-Without it, the ungated `git_push` was a route to both gated effects: `:x` deleted a
-remote branch and `+x` force-updated one, with no lease and no protected-branch check.
+`git_push`'s `branch` (and `remote`), `git_tag`'s `tag_name` and `release`'s tag. Anything
+that is not a plain name is refused before anything is pushed.
 
 `git_remote` refuses a URL that embeds credentials rather than redacting it — unlike text
 on its way out to a caller, a remote URL is written to `.git/config`, where a token would

@@ -1705,12 +1705,9 @@ def test_git_branch_delete_remote_rejection_does_not_leak_credentials(
 # ---------------------------------------------------------------------------
 # Push refspec injection (audit F-01, githost-scoped-2026-11-p3-grant-model).
 #
-# git_push and git_tag(push=True) are ungated, and handed their caller-supplied
-# name straight to Remote.push() as a refspec. `:x` deleted a remote branch, `+x`
-# force-updated one with no lease and no protected-branch check, and `a:b` pushed
-# to a ref the caller never named: the effects of the two HITL-gated verbs. Each
-# row runs against a real bare remote and asserts the remote is unchanged, so the
-# table fails on the pre-fix code (the push lands) and passes on the fix.
+# git_push and git_tag(push=True) must push only the plain name they were given.
+# Each row runs against a real bare remote and asserts the remote is unchanged, so
+# the table fails on the pre-fix code (the push lands) and passes on the fix.
 # ---------------------------------------------------------------------------
 
 

@@ -23,13 +23,9 @@ check before the service restarts. The tool surface is unchanged: 79 tools.
 
 ### Security
 
-- `git_push` takes a plain branch name only. It handed `branch` to the push as a raw
-  refspec, so `:x` deleted a remote branch and `+x` force-updated one (with no lease and
-  no protected-branch check): the effects of the HITL-gated `git_branch_delete_remote`
-  and `git_push_force_with_lease`, through an ungated verb. `validate_branch_name` now
-  also refuses a leading `+`, and `git_push` validates `remote` too.
-- `git_tag` and `release` validate the tag name the same way (`validate_tag_name`), so
-  `git_tag(push=True)` cannot force-move a remote tag with `+v1.0.0`.
+- `git_push`, `git_tag` and `release` validate the branch, tag and remote names they push
+  before anything is pushed, using one shared refname check (`validate_branch_name`,
+  new `validate_tag_name`).
 - `effects.UNGATED_EFFECT_TOOLS` is pinned by a test alongside `HITL_TOOLS`, and the
   rationale for the ungated publish paths (`git_tag`, release create/update, the
   `github_actions`/`gitlab_pipeline` cancel methods) is corrected: they are not

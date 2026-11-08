@@ -1042,9 +1042,8 @@ def register(mcp) -> None:
             repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             branch_name = branch or repo.active_branch.name
-            # The branch is pushed as a refspec: `:x` deletes, `+x` force-updates and
-            # `a:b` retargets. Those are the HITL-gated verbs' effects, so this
-            # ungated verb takes a plain branch name only (audit F-01, p3).
+            # This verb is ungated, so it takes a plain branch name only: never a
+            # refspec that would reach a gated verb's effect.
             validate_remote_name(remote)
             validate_branch_name(branch_name)
             # Captured before the push so the reported sha is the one that was
