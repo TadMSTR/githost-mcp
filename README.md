@@ -328,11 +328,12 @@ ship without a HITL gate. Three pieces make that checkable by a machine:
   closed-world test fails on a registered tool that is unclassified, and on a HITL tool
   that is not an effect tool. A new effect verb's author decides on `HITL_TOOLS` too.
   The rest, `UNGATED_EFFECT_TOOLS`, is pinned by a test as well, so taking a verb out of
-  the class is a reviewed edit. Ungated is not the same as harmless: `git_tag` and the
-  release create/update tools can trigger an irreversible registry publish in repos that
-  publish on a `v*` tag, and `github_actions`/`gitlab_pipeline` can cancel a pipeline.
-  `effects.py` gives the reason for each, and their gating is an open decision
-  (vikunja#1440).
+  the class is a reviewed edit. Ungated is not the same as harmless: `git_tag` push, the
+  release create/update tools and `github_actions` workflow dispatch can trigger an
+  irreversible registry publish in a repo that publishes on a tag, a release or a
+  dispatch, and `github_actions`/`gitlab_pipeline` can cancel a pipeline. githost puts
+  no control on those today. `effects.py` gives the reason for each, and their gating is
+  an open decision (vikunja#1440).
 - **`githost-mcp --list-tools [--json]`** prints every registered tool with its `kind`
   (`read` | `effect`) and `hitl` flag, then exits. It starts no server, needs no env var,
   and writes neither the audit log nor the app log, so it runs against a freshly built

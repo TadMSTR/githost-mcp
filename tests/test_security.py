@@ -610,3 +610,12 @@ def test_tag_name_refuses_refspec_forms(name):
 @pytest.mark.parametrize("name", ["v1.2.3", "v1.2.0+build", "release/v2", "fix/#383"])
 def test_tag_name_accepts_plain_names(name):
     validate_tag_name(name)
+
+
+@pytest.mark.parametrize("name", ["refs/heads/main", "refs/tags/v1", "HEAD", "@"])
+def test_push_names_refuse_full_refs_and_head(name):
+    """R2-01: the push pins the namespace, so a full ref or HEAD is never a plain name."""
+    with pytest.raises(ValueError):
+        validate_branch_name(name)
+    with pytest.raises(ValueError):
+        validate_tag_name(name)

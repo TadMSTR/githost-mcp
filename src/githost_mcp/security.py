@@ -274,6 +274,11 @@ def _check_refname(name: str, kind: str, exc: type[ValueError]) -> None:
         raise exc(f"{kind} name is required")
     if name.startswith("-"):
         raise exc(f"{kind} name {_LEADING_DASH_ERR}")
+    if name.startswith("refs/") or name in ("HEAD", "@"):
+        raise exc(
+            f"Invalid {kind} name '{name}': give the plain {kind} name, not a full ref or "
+            f"HEAD; the push pins the namespace itself"
+        )
     if name.startswith("+"):
         raise exc(
             f"Invalid {kind} name '{name}': a leading '+' makes the push refspec a force update"

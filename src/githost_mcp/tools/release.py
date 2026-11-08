@@ -114,7 +114,7 @@ def register(mcp) -> None:
         try:
             repo.create_tag(tag, message=f"Release {tag}")
             created.append("git_tag")
-            outcome = evaluate_push(repo.remotes["origin"].push(tag))
+            outcome = evaluate_push(repo.remotes["origin"].push(f"refs/tags/{tag}:refs/tags/{tag}"))
             if not outcome.failed:
                 # Tracked separately from the local tag: rollback must not delete a
                 # remote tag this release never managed to create.

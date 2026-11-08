@@ -125,19 +125,22 @@ EFFECT_TOOLS = frozenset(
 #: Outside the class, and why (each is an effect tool; UNGATED_EFFECT_TOOLS below pins the
 #: set so moving a verb out of the class takes a deliberate edit):
 #:
-#: - `git_push` takes a plain branch name only. A refspec (`:x`, `+x`, `a:b`) would reach
-#:   the delete and force effects gated below, so `validate_branch_name` refuses it.
-#: - `git_tag`, `*_create_release`, `*_release_update`: NOT reversible in every repo.
-#:   Where a pushed `v*` tag, or a published release, triggers a registry publish, one
-#:   ungated call publishes a version that can never be reused. Today the control is
-#:   that only the build agents hold them ungated, and that `release` is the documented
-#:   path. Whether to gate them, or to require a reviewer environment on every
-#:   tag-triggered publish job instead, is an open decision (vikunja#1440).
-#: - `github_actions` and `gitlab_pipeline`: one tool each, dispatching on `method`, and
-#:   the class is per tool. Their `cancel_run`/`cancel` methods stop a pipeline exactly
-#:   as `woodpecker_pipeline_cancel` does, ungated. Same decision (vikunja#1440).
-#: - `woodpecker_restart`, `woodpecker_trigger`: re-run or start a pipeline; a duplicate
-#:   run is the worst case.
+#: - `git_push` pushes one existing local branch to the same-named remote branch, with the
+#:   namespace pinned (`refs/heads/<n>:refs/heads/<n>`). It cannot push a tag, delete a ref
+#:   or force an update, so it reaches none of the gated effects below.
+#: - `git_tag(push=True)`, `*_create_release`, `*_release_update`, and the
+#:   `github_actions` `run_workflow`/`rerun_*` methods: NOT reversible in every repo. Where
+#:   a pushed `v*` tag, a published release or a dispatched workflow runs a registry
+#:   publish, one ungated call publishes a version that can never be reused. There is no
+#:   githost-side control on these today: `git_tag` and the release tools are held by the
+#:   build agents only, but `github_actions` is also held by agents that read untrusted
+#:   content, and nothing here limits which workflow it dispatches. Gate them, or require
+#:   a reviewer environment on every publish job: an open decision (vikunja#1440).
+#: - `github_actions` and `gitlab_pipeline` dispatch on `method`, and the class is per
+#:   tool. Their `cancel_run`/`cancel` methods stop a pipeline exactly as
+#:   `woodpecker_pipeline_cancel` does, ungated. Same decision (vikunja#1440).
+#: - `woodpecker_restart`, `woodpecker_trigger`: start or re-run whatever pipeline the
+#:   repo defines, ungated. Same decision (vikunja#1440).
 HITL_TOOLS = frozenset(
     {
         # Merges land on a default branch, which for some repos is what deploys.

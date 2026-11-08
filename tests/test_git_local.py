@@ -1802,3 +1802,56 @@ def test_git_tag_push_refuses_refspec_forms(tools, bare_remote, value):
     assert "error" in result, f"tag refspec {value!r} was accepted: {result}"
     assert _remote_tags(bare) == before
     assert _remote_heads(bare) == heads_before
+
+
+# ---------------------------------------------------------------------------
+# Push namespace pinning (audit round 2 R2-01, githost-scoped-2026-11-p3-grant-model).
+#
+# A plain name is not enough: git_push accepted a tag name or a full ref and pushed
+# it, so an unpushed local tag reached the remote (a tag-triggered publish), and
+# a `refs/heads/x` tag name reached the push as a branch ref. The git_push rows fail
+# on 4695853 (the remote gains a ref) and pass once the push pins its namespace.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["v9.9.9", "refs/tags/v9.9.9", "HEAD", "@", "refs/heads/BRANCH"])
+def test_git_push_pushes_local_branches_only(tools, bare_remote, value):
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+    local.create_tag("v9.9.9", message="unpublished")
+    _commit_file(local, "ahead.txt", "unpushed work")  # so a HEAD/branch push would move a ref
+    tags_before, heads_before = _remote_tags(bare), _remote_heads(bare)
+
+    result = fns["git_push"](str(path), branch=value.replace("BRANCH", branch))
+
+    assert "error" in result, f"{value!r} was pushed: {result}"
+    assert _remote_tags(bare) == tags_before, f"{value!r} published a tag"
+    assert _remote_heads(bare) == heads_before, f"{value!r} moved a remote branch"
+
+
+def test_git_push_of_a_local_branch_still_pushes_it(tools, bare_remote):
+    """The control for the table above: the pinned refspec still pushes a branch."""
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+    _commit_file(local, "ahead.txt", "work")
+    result = fns["git_push"](str(path), branch=branch)
+    assert "error" not in result, result
+    assert _remote_heads(bare)[branch] == local.heads[branch].commit.hexsha
+
+
+def test_git_tag_cannot_push_a_branch_by_full_ref(tools, bare_remote):
+    """Defence in depth, not a live route: on 4695853 git already refused this push,
+    because create_tag made refs/tags/refs/heads/x and the source became ambiguous.
+    The name is now refused before any tag is created."""
+    fns, path = tools
+    bare, _branch = bare_remote
+    local = git.Repo(str(path))
+    local.create_head("x")
+    heads_before = _remote_heads(bare)
+
+    result = fns["git_tag"](str(path), "refs/heads/x", push=True)
+
+    assert "error" in result, result
+    assert _remote_heads(bare) == heads_before, "git_tag pushed a branch"

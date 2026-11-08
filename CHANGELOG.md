@@ -25,11 +25,14 @@ check before the service restarts. The tool surface is unchanged: 79 tools.
 
 - `git_push`, `git_tag` and `release` validate the branch, tag and remote names they push
   before anything is pushed, using one shared refname check (`validate_branch_name`,
-  new `validate_tag_name`).
-- `effects.UNGATED_EFFECT_TOOLS` is pinned by a test alongside `HITL_TOOLS`, and the
-  rationale for the ungated publish paths (`git_tag`, release create/update, the
-  `github_actions`/`gitlab_pipeline` cancel methods) is corrected: they are not
-  reversible in every repo. The gating decision is vikunja#1440.
+  new `validate_tag_name`), and push with the ref namespace pinned. `git_push` pushes an
+  existing local branch only, never a tag or another ref; `git_tag` and `release` push
+  under `refs/tags/` only.
+- `effects.UNGATED_EFFECT_TOOLS` is pinned by a test alongside `HITL_TOOLS`. The comment
+  on the ungated publish and pipeline paths (`git_tag` push, release create/update, the
+  `github_actions` dispatch and cancel methods, `gitlab_pipeline`, the Woodpecker
+  triggers) now says they are not reversible in every repo and have no githost-side
+  control today. The gating decision is vikunja#1440.
 
 ### Changed
 
