@@ -2,8 +2,8 @@
 
 Every registered tool is in exactly one of EFFECT_TOOLS or READ_TOOLS. The closed-world
 test (tests/test_effects.py) enumerates the server's tools and fails on one that is in
-neither, so a new verb cannot ship unclassified. githost-scoped-2026-11 p3 adds and
-regates verbs: each goes in one of these sets in the same change.
+neither, so a new verb cannot ship unclassified. HITL_TOOLS is a subset of EFFECT_TOOLS:
+the verbs a manifest may grant only behind a HITL approval (githost-scoped-2026-11 p3).
 
 An effect tool records, on success, what it changed through AuditCtx.effect(): ids,
 SHAs, refs and counts. A tool whose methods or actions are partly reads names the
@@ -112,6 +112,69 @@ EFFECT_TOOLS = frozenset(
         "woodpecker_trigger",
     }
 )
+
+#: The effect tools an agent may call only through a HITL approval. host-forge/scripts
+#: `grant-lint.py --tools` reads this class from `githost-mcp --list-tools --json`. It
+#: refuses a manifest that grants one of these tools unless that tool is in
+#: `hitl.approval_required` under `hitl.mode: enforce`. `githost-grant-gate.sh` runs the
+#: same check before githost-mcp restarts on a new wheel (githost-scoped-2026-11 p3).
+#:
+#: A new verb goes in READ_TOOLS or EFFECT_TOOLS. If it goes in EFFECT_TOOLS, its author
+#: also decides whether it belongs here, and says why in the group comment.
+#:
+#: Outside the class, and why (each is an effect tool; UNGATED_EFFECT_TOOLS below pins the
+#: set so moving a verb out of the class takes a deliberate edit):
+#:
+#: - `git_push` pushes one existing local branch to the same-named remote branch, with the
+#:   namespace pinned (`refs/heads/<n>:refs/heads/<n>`). It cannot push a tag, delete a ref
+#:   or force an update. It CAN fast-forward any branch, the default branch included, which
+#:   is the effect the merge gate below exists for, and the push starts that branch's
+#:   push-triggered pipelines. githost applies no protected-branch check here, because doc
+#:   repos are committed to their default branch directly; server-side branch protection
+#:   is the only control on that route. Same decision (vikunja#1440).
+#: - `git_tag(push=True)`, `*_create_release`, `*_release_update`, and the
+#:   `github_actions` `run_workflow`/`rerun_*` methods: NOT reversible in every repo. Where
+#:   a pushed `v*` tag, a published release or a dispatched workflow runs a registry
+#:   publish, one ungated call publishes a version that can never be reused. There is no
+#:   githost-side control on these today: `git_tag` and the release tools are held by the
+#:   build agents only, but `github_actions` is also held by agents that read untrusted
+#:   content, and nothing here limits which workflow it dispatches. Gate them, or require
+#:   a reviewer environment on every publish job: an open decision (vikunja#1440).
+#: - `github_actions` and `gitlab_pipeline` dispatch on `method`, and the class is per
+#:   tool. Their `cancel_run`/`cancel` methods stop a pipeline exactly as
+#:   `woodpecker_pipeline_cancel` does, ungated. Same decision (vikunja#1440).
+#: - `woodpecker_restart`, `woodpecker_trigger`: start or re-run whatever pipeline the
+#:   repo defines, ungated. Same decision (vikunja#1440).
+HITL_TOOLS = frozenset(
+    {
+        # Merges land on a default branch, which for some repos is what deploys.
+        "gitea_pr_merge",
+        "github_pr_merge",
+        "gitlab_mr_merge",
+        # These destroy state that nothing in githost restores: a remote branch, a remote
+        # ref rewritten by a force push, a published release.
+        "git_branch_delete_remote",
+        "git_push_force_with_lease",
+        "gitea_release_delete",
+        "github_release_delete",
+        "gitlab_release_delete",
+        # Stops a running pipeline, which may be another agent's deploy.
+        "woodpecker_pipeline_cancel",
+        # These publish to the world. A registry version can never be reused once
+        # uploaded, and `release` tags, publishes and rolls back across several targets.
+        "release",
+        "npm_publish",
+        "pypi_publish",
+        # These create a repository under a forge-owned owner, which is a new public surface.
+        "github_repo_create",
+        "gitea_repo_create",
+    }
+)
+
+#: The effect tools deliberately left outside HITL_TOOLS (see the comment above it).
+#: Pinned by tests/test_effects.py, so a verb leaving the class, or a new effect verb
+#: landing outside it, is a reviewed edit to this set rather than a silent default.
+UNGATED_EFFECT_TOOLS = EFFECT_TOOLS - HITL_TOOLS
 
 #: Tools that are an effect only for some values of one argument, keyed by the name the
 #: argument has in the tool's audit `params`.

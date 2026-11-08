@@ -1,7 +1,7 @@
 """
 githost-mcp FastMCP server — tool registration and startup.
 
-65 tools across 8 categories: local git, GitHub, Gitea, GitLab, release,
+79 tools across 8 categories: local git, GitHub, Gitea, GitLab, release,
 registry (PyPI/npm), Woodpecker CI, and audit query. Higher-verb-count
 capabilities (PR/MR review, CI control, issues) use method-dispatch tools.
 """
@@ -18,7 +18,7 @@ from .audit import init_logging
 from .config import get_config
 from .correlation import CallScopeMiddleware
 from .observability import init_sync
-from .tools import audit_query, git_local, gitea, github, gitlab, registry, release, woodpecker
+from .tools import register_all
 
 log = structlog.get_logger(__name__)
 
@@ -67,15 +67,9 @@ mcp = FastMCP(
 # and finishes any AuditCtx a tool left open so no span leaks (correlation.py).
 mcp.add_middleware(CallScopeMiddleware())
 
-# Register tools from each module
-git_local.register(mcp)
-github.register(mcp)
-gitea.register(mcp)
-gitlab.register(mcp)
-release.register(mcp)
-registry.register(mcp)
-woodpecker.register(mcp)
-audit_query.register(mcp)
+# Register tools from each module. `githost-mcp --list-tools` (cli.py) lists through the
+# same call, so the served and listed sets cannot drift.
+register_all(mcp)
 
 # Sync init (logging, OTel) runs at import time so it's ready before first tool call
 init_logging()

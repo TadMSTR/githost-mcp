@@ -95,15 +95,114 @@ def _all_tools():
     return tools
 
 
-def test_every_registered_tool_is_classified_exactly_once():
-    names = set(_all_tools())
+def _classification_problems(names):
+    """Every way `names` (the registered tools) and the effects classes disagree."""
+    problems = []
     unclassified = names - effects.EFFECT_TOOLS - effects.READ_TOOLS
-    assert not unclassified, (
-        f"classify these in effects.EFFECT_TOOLS or READ_TOOLS: {sorted(unclassified)}"
-    )
-    assert not effects.EFFECT_TOOLS & effects.READ_TOOLS
-    stale = (effects.EFFECT_TOOLS | effects.READ_TOOLS) - names
-    assert not stale, f"classified but not registered: {sorted(stale)}"
+    if unclassified:
+        problems.append(
+            f"classify these in effects.EFFECT_TOOLS or READ_TOOLS: {sorted(unclassified)}"
+        )
+    if effects.EFFECT_TOOLS & effects.READ_TOOLS:
+        problems.append(f"in both classes: {sorted(effects.EFFECT_TOOLS & effects.READ_TOOLS)}")
+    stale = (effects.EFFECT_TOOLS | effects.READ_TOOLS | effects.HITL_TOOLS) - names
+    if stale:
+        problems.append(f"classified but not registered: {sorted(stale)}")
+    not_effect = effects.HITL_TOOLS - effects.EFFECT_TOOLS
+    if not_effect:
+        problems.append(f"in HITL_TOOLS but not EFFECT_TOOLS: {sorted(not_effect)}")
+    return problems
+
+
+def test_every_registered_tool_is_classified_exactly_once():
+    assert _classification_problems(set(_all_tools())) == []
+
+
+def test_an_unclassified_tool_is_named():
+    """The control for the test above: a new verb nobody classified must fail it, by name."""
+    problems = _classification_problems(set(_all_tools()) | {"gitea_branch_protect"})
+    assert len(problems) == 1
+    assert "gitea_branch_protect" in problems[0]
+
+
+def test_a_hitl_tool_must_be_an_effect_tool(monkeypatch):
+    monkeypatch.setattr(effects, "HITL_TOOLS", effects.HITL_TOOLS | {"git_status"})
+    problems = _classification_problems(set(_all_tools()))
+    assert problems == ["in HITL_TOOLS but not EFFECT_TOOLS: ['git_status']"]
+
+
+def test_a_hitl_tool_must_be_registered(monkeypatch):
+    monkeypatch.setattr(effects, "HITL_TOOLS", effects.HITL_TOOLS | {"gitea_branch_protect"})
+    problems = _classification_problems(set(_all_tools()))
+    assert any("not registered" in p and "gitea_branch_protect" in p for p in problems)
+
+
+def test_the_hitl_class_is_the_reviewed_set():
+    """Pinned so a change to the class is a visible decision in review, not a side edit.
+
+    The 14 tools of githost-scoped-2026-11 p3: what developer's and sysadmin's manifests
+    already gate, plus npm_publish, pypi_publish and the three *_release_delete.
+    """
+    assert {
+        "gitea_pr_merge",
+        "github_pr_merge",
+        "gitlab_mr_merge",
+        "git_branch_delete_remote",
+        "git_push_force_with_lease",
+        "gitea_release_delete",
+        "github_release_delete",
+        "gitlab_release_delete",
+        "woodpecker_pipeline_cancel",
+        "release",
+        "npm_publish",
+        "pypi_publish",
+        "github_repo_create",
+        "gitea_repo_create",
+    } == effects.HITL_TOOLS
+
+
+def test_the_ungated_effect_set_is_the_reviewed_set():
+    """The other half of the pin (audit F-02, githost-scoped-2026-11 p3).
+
+    Pinning HITL_TOOLS alone lets a verb leave the class, or a new effect verb land
+    outside it, without anyone deciding that it should be ungated. Each name here is
+    ungated on purpose, for the reason in effects.py's comment above HITL_TOOLS.
+    """
+    assert {
+        "git_add",
+        "git_branch",
+        "git_checkout",
+        "git_clone",
+        "git_commit",
+        "git_pull",
+        "git_push",
+        "git_remote",
+        "git_tag",
+        "git_worktree",
+        "gitea_actions",
+        "gitea_create_release",
+        "gitea_issue_write",
+        "gitea_pr_comment",
+        "gitea_pr_create",
+        "gitea_pr_review",
+        "gitea_release_update",
+        "github_actions",
+        "github_create_release",
+        "github_fork",
+        "github_issue_write",
+        "github_pr_create",
+        "github_pr_review",
+        "github_pr_update",
+        "github_release_update",
+        "gitlab_create_release",
+        "gitlab_issue_write",
+        "gitlab_mr_create",
+        "gitlab_mr_review",
+        "gitlab_pipeline",
+        "gitlab_release_update",
+        "woodpecker_restart",
+        "woodpecker_trigger",
+    } == effects.UNGATED_EFFECT_TOOLS
 
 
 def test_the_server_registers_the_same_tools(monkeypatch, tmp_path):

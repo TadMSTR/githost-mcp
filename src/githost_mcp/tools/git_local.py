@@ -66,6 +66,7 @@ from ..security import (
     validate_read_path,
     validate_remote_name,
     validate_remote_url,
+    validate_tag_name,
     validate_write_globs,
     validate_write_path,
 )
@@ -1041,14 +1042,23 @@ def register(mcp) -> None:
             repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             branch_name = branch or repo.active_branch.name
+            # This verb is ungated, so it pushes one existing local branch to the
+            # same-named remote branch and nothing else: never a refspec, a tag or
+            # another ref namespace that would reach a gated or publishing effect.
+            validate_remote_name(remote)
+            validate_branch_name(branch_name)
+            try:
+                head = repo.heads[branch_name]
+            except (IndexError, KeyError):
+                raise InvalidArgument(
+                    f"'{branch_name}' is not a local branch: git_push pushes local branches only"
+                ) from None
             # Captured before the push so the reported sha is the one that was
             # actually sent, not whatever the ref moved to afterwards.
-            try:
-                pushed_sha = repo.heads[branch_name].commit.hexsha
-            except (IndexError, KeyError):
-                pushed_sha = None
+            pushed_sha = head.commit.hexsha
+            refspec = f"refs/heads/{branch_name}:refs/heads/{branch_name}"
             with ac.child("git.push", **{"githost.remote": remote}):
-                push_info = repo.remotes[remote].push(branch_name)
+                push_info = repo.remotes[remote].push(refspec)
 
             outcome = evaluate_push(push_info)
             decoded = outcome.flags
@@ -1168,13 +1178,18 @@ def register(mcp) -> None:
         ac = AuditCtx("git_tag", "local", repo_path, params)
         try:
             repo_path = validate_write_path(repo_path)
+            validate_tag_name(tag_name)
+            if push:
+                validate_remote_name(remote)
             repo = _open_repo(repo_path)
             tag_msg = message or tag_name
             tag = repo.create_tag(tag_name, message=tag_msg)
             result = {"tag": tag_name, "sha": tag.commit.hexsha[:12]}
             if push:
                 with ac.child("git.push", **{"githost.remote": remote}):
-                    outcome = evaluate_push(repo.remotes[remote].push(tag_name))
+                    outcome = evaluate_push(
+                        repo.remotes[remote].push(f"refs/tags/{tag_name}:refs/tags/{tag_name}")
+                    )
                 if outcome.failed:
                     reason = outcome.summary or "tag push rejected by remote"
                     log.warning(

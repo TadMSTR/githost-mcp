@@ -37,6 +37,7 @@ __all__ = [
     "validate_ref",
     "validate_remote_name",
     "validate_remote_url",
+    "validate_tag_name",
     "validate_write_globs",
     "validate_write_path",
 ]
@@ -254,49 +255,71 @@ def validate_remote_name(name: str) -> None:
         )
 
 
-def validate_branch_name(name: str) -> None:
-    """Raise BranchNameInvalid unless `name` is safe to interpolate into a push refspec.
+def _check_refname(name: str, kind: str, exc: type[ValueError]) -> None:
+    """Raise `exc` unless `name` is safe to hand to a push as a refspec.
 
-    ``git_branch_delete_remote`` builds ``":refs/heads/" + name``. GitPython passes
-    that as one argv element, so this is not a shell-injection boundary — but a
-    refspec is ``src:dst``, so an embedded colon silently re-points the delete at a
-    ref the caller never named, and the leading ``:`` means git parses the whole
-    thing rather than rejecting it. Deleting the wrong remote ref is not a failure
-    the caller can notice from a success result.
+    A refspec is ``[+]src[:dst]``. A leading ``+`` force-updates the destination, a
+    leading ``:`` (empty source) deletes it, and an embedded colon pushes ``src`` to
+    a ref the caller never named. GitPython passes the value as one argv element, so
+    this is not a shell-injection boundary — it is the boundary between the ungated
+    push verbs and the HITL-gated ones (``git_branch_delete_remote``,
+    ``git_push_force_with_lease``), which a raw refspec would otherwise reach.
 
     The checks are git's own refname rules (``git check-ref-format``) restricted to
-    the ones that matter for a destructive call, expressed as a denylist rather than
-    a character allowlist so legitimate names like ``fix/#383`` or
-    ``release/v1.2.0+build`` are not rejected for no reason.
+    the ones that matter for a push, expressed as a denylist rather than a character
+    allowlist so legitimate names like ``fix/#383`` or ``release/v1.2.0+build`` are
+    not rejected for no reason.
     """
     if not name:
-        raise BranchNameInvalid("branch name is required")
+        raise exc(f"{kind} name is required")
     if name.startswith("-"):
-        raise BranchNameInvalid(f"branch name {_LEADING_DASH_ERR}")
+        raise exc(f"{kind} name {_LEADING_DASH_ERR}")
+    if name.startswith("refs/") or name in ("HEAD", "@"):
+        raise exc(
+            f"Invalid {kind} name '{name}': give the plain {kind} name, not a full ref or "
+            f"HEAD; the push pins the namespace itself"
+        )
+    if name.startswith("+"):
+        raise exc(
+            f"Invalid {kind} name '{name}': a leading '+' makes the push refspec a force update"
+        )
     if ":" in name:
-        raise BranchNameInvalid(
-            f"Invalid branch name '{name}': ':' would split the push refspec and "
-            f"retarget the deletion at a different ref"
+        raise exc(
+            f"Invalid {kind} name '{name}': ':' would split the push refspec and "
+            f"retarget it at a different ref (or delete one)"
         )
     if _WHITESPACE_RE.search(name):
-        raise BranchNameInvalid(f"Invalid branch name '{name}': must not contain whitespace")
+        raise exc(f"Invalid {kind} name '{name}': must not contain whitespace")
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
-        raise BranchNameInvalid(
-            f"Invalid branch name '{name!r}': must not contain control characters"
-        )
+        raise exc(f"Invalid {kind} name '{name!r}': must not contain control characters")
     for bad in ("*", "?", "[", "~", "^", "\\"):
         if bad in name:
-            raise BranchNameInvalid(f"Invalid branch name '{name}': must not contain '{bad}'")
+            raise exc(f"Invalid {kind} name '{name}': must not contain '{bad}'")
     if ".." in name or "@{" in name:
-        raise BranchNameInvalid(f"Invalid branch name '{name}': must not contain '..' or '@{{'")
+        raise exc(f"Invalid {kind} name '{name}': must not contain '..' or '@{{'")
     if name.endswith(".lock") or name.endswith("/") or name.endswith("."):
-        raise BranchNameInvalid(
-            f"Invalid branch name '{name}': must not end with '.lock', '/' or '.'"
-        )
+        raise exc(f"Invalid {kind} name '{name}': must not end with '.lock', '/' or '.'")
     if name.startswith("/") or "//" in name:
-        raise BranchNameInvalid(
-            f"Invalid branch name '{name}': must not start with '/' or contain '//'"
-        )
+        raise exc(f"Invalid {kind} name '{name}': must not start with '/' or contain '//'")
+
+
+def validate_branch_name(name: str) -> None:
+    """Raise BranchNameInvalid unless `name` is a plain branch name, safe as a refspec.
+
+    Every caller-supplied branch that reaches a push goes through here: ``git_push``,
+    ``git_branch_delete_remote`` (which builds ``":refs/heads/" + name``) and
+    ``git_push_force_with_lease``. See `_check_refname` for the rules.
+    """
+    _check_refname(name, "branch", BranchNameInvalid)
+
+
+def validate_tag_name(name: str) -> None:
+    """Raise InvalidArgument unless `name` is a plain tag name, safe as a refspec.
+
+    ``git_tag(push=True)`` and ``release`` push the tag by name, so a ``+`` prefix
+    would force-move an existing remote tag (and re-run its tag-triggered publish).
+    """
+    _check_refname(name, "tag", InvalidArgument)
 
 
 # A commit ref for the CI status reads: a SHA, or a branch/tag name. It lands in a URL path

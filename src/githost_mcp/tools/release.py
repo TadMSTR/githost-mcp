@@ -10,7 +10,7 @@ from ..audit import AuditCtx
 from ..config import get_config
 from ..gitflags import evaluate_push
 from ..observability import emit_release_target
-from ..security import scrub, validate_write_path
+from ..security import scrub, validate_tag_name, validate_write_path
 
 log = structlog.get_logger(__name__)
 
@@ -54,6 +54,7 @@ def register(mcp) -> None:
 
         try:
             repo_path = validate_write_path(repo_path)
+            validate_tag_name(tag)
         except ValueError as e:
             ac.finish("error:ValueError", e)
             return {"error": scrub(str(e))}
@@ -113,7 +114,7 @@ def register(mcp) -> None:
         try:
             repo.create_tag(tag, message=f"Release {tag}")
             created.append("git_tag")
-            outcome = evaluate_push(repo.remotes["origin"].push(tag))
+            outcome = evaluate_push(repo.remotes["origin"].push(f"refs/tags/{tag}:refs/tags/{tag}"))
             if not outcome.failed:
                 # Tracked separately from the local tag: rollback must not delete a
                 # remote tag this release never managed to create.

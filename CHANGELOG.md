@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.20.0] — 2026-11-08
+
+Grant model. githost-mcp now says which of its tools are
+destructive enough to need a HITL gate, and prints its tool surface for a deploy gate to
+check before the service restarts. The tool surface is unchanged: 79 tools.
+
+### Added
+
+- `effects.HITL_TOOLS`: the 14 effect tools a manifest may grant only behind a HITL
+  approval (three merges, `git_branch_delete_remote`, `git_push_force_with_lease`, three
+  `*_release_delete`, `woodpecker_pipeline_cancel`, `release`, `npm_publish`,
+  `pypi_publish`, two `*_repo_create`). The closed-world classification test now also
+  checks `HITL_TOOLS` is a subset of `EFFECT_TOOLS` and that every name in it is
+  registered. The class is pinned by a test, so changing it is a visible review decision.
+- `githost-mcp --list-tools [--json]` prints every tool with `kind` and `hitl`, then exits.
+  It does not import the server module, so it needs no env var and writes no log. It
+  registers the tools through the same `tools.register_all()` the server now uses.
+  host-forge/scripts `grant-lint.py` and `githost-grant-gate.sh` consume the JSON
+  (vikunja#947, #1225).
+- README: "Grant coverage".
+
+### Security
+
+- `git_push`, `git_tag` and `release` validate the branch, tag and remote names they push
+  before anything is pushed, using one shared refname check (`validate_branch_name`,
+  new `validate_tag_name`), and push with the ref namespace pinned. `git_push` pushes an
+  existing local branch only, never a tag or another ref; `git_tag` and `release` push
+  under `refs/tags/` only.
+- `effects.UNGATED_EFFECT_TOOLS` is pinned by a test alongside `HITL_TOOLS`. The comment
+  on the ungated publish and pipeline paths (`git_tag` push, release create/update, the
+  `github_actions` dispatch and cancel methods, `gitlab_pipeline`, the Woodpecker
+  triggers) now says they are not reversible in every repo and have no githost-side
+  control today. The gating decision is vikunja#1440.
+
+### Changed
+
+- The `githost-mcp` console script now points at `githost_mcp.cli:main`. With no arguments
+  it runs the server as before. PM2 runs `python -m githost_mcp.server`, which is
+  unchanged.
+
 ## [0.19.0] — 2026-11-08
 
 Attribution and telemetry (githost-scoped-2026-11 part 2). An audit entry now records what a

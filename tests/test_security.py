@@ -13,6 +13,7 @@ from githost_mcp.security import (
     validate_read_path,
     validate_remote_name,
     validate_remote_url,
+    validate_tag_name,
     validate_write_globs,
     validate_write_path,
 )
@@ -587,3 +588,34 @@ def test_validators_refuse_a_trailing_newline():
         validate_ref("main\n")
     with pytest.raises(RemoteUrlRejected):
         validate_remote_url("git@github.com:o/r.git\n")
+
+
+# ---------------------------------------------------------------------------
+# Push refspec flags (audit F-01, githost-scoped-2026-11-p3-grant-model)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["+main", "+refs/heads/main", ":main", "a:b", "-f", ""])
+def test_branch_name_refuses_refspec_forms(name):
+    with pytest.raises(ValueError):
+        validate_branch_name(name)
+
+
+@pytest.mark.parametrize("name", ["+v1.0.0", ":v1.0.0", "v1:refs/heads/main", "-v1", "v1 x", ""])
+def test_tag_name_refuses_refspec_forms(name):
+    with pytest.raises(ValueError):
+        validate_tag_name(name)
+
+
+@pytest.mark.parametrize("name", ["v1.2.3", "v1.2.0+build", "release/v2", "fix/#383"])
+def test_tag_name_accepts_plain_names(name):
+    validate_tag_name(name)
+
+
+@pytest.mark.parametrize("name", ["refs/heads/main", "refs/tags/v1", "HEAD", "@"])
+def test_push_names_refuse_full_refs_and_head(name):
+    """R2-01: the push pins the namespace, so a full ref or HEAD is never a plain name."""
+    with pytest.raises(ValueError):
+        validate_branch_name(name)
+    with pytest.raises(ValueError):
+        validate_tag_name(name)

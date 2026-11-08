@@ -181,6 +181,10 @@ the refspec as one argv element, so this is not a shell boundary — but a refsp
 `src:dst`, and an embedded colon would silently retarget the deletion at a ref the caller
 never named.
 
+The same check covers every caller-supplied name that reaches a push (as of 0.20.0):
+`git_push`'s `branch` (and `remote`), `git_tag`'s `tag_name` and `release`'s tag. Anything
+that is not a plain name is refused before anything is pushed.
+
 `git_remote` refuses a URL that embeds credentials rather than redacting it — unlike text
 on its way out to a caller, a remote URL is written to `.git/config`, where a token would
 outlive the call and be reused by every later fetch and push. Only `http(s)://`, `ssh://`,
@@ -310,6 +314,41 @@ from failed check runs, which is where GitHub puts readable failure text.
 ### Audit (1)
 `audit_log_query` — query the JSONL audit log by agent, tool, repo, time range, or (0.19.0+)
 `run_id`, `task_id` or `trace_id`
+
+## Grant coverage
+
+A new githost verb must not reach an agent by accident, and a destructive one must not
+ship without a HITL gate. Three pieces make that checkable by a machine:
+
+- **Every tool is classified.** `effects.py` puts each tool in `READ_TOOLS` or
+  `EFFECT_TOOLS`. `HITL_TOOLS` is the subset of effect tools a manifest may grant only
+  behind a HITL approval: the three merges, `git_branch_delete_remote`,
+  `git_push_force_with_lease`, the three `*_release_delete`, `woodpecker_pipeline_cancel`,
+  `release`, `npm_publish`, `pypi_publish` and the two `*_repo_create` (14 tools). A
+  closed-world test fails on a registered tool that is unclassified, and on a HITL tool
+  that is not an effect tool. A new effect verb's author decides on `HITL_TOOLS` too.
+  The rest, `UNGATED_EFFECT_TOOLS`, is pinned by a test as well, so taking a verb out of
+  the class is a reviewed edit. Ungated is not the same as harmless: `git_tag` push, the
+  release create/update tools and `github_actions` workflow dispatch can trigger an
+  irreversible registry publish in a repo that publishes on a tag, a release or a
+  dispatch, `github_actions`/`gitlab_pipeline` can cancel a pipeline, and `git_push` can
+  fast-forward a default branch (the effect the merge gate exists for), with server-side
+  branch protection as the only control. githost puts no control on those today. `effects.py` gives the reason for each, and their gating is
+  an open decision (vikunja#1440).
+- **`githost-mcp --list-tools [--json]`** prints every registered tool with its `kind`
+  (`read` | `effect`) and `hitl` flag, then exits. It starts no server, needs no env var,
+  and writes neither the audit log nor the app log, so it runs against a freshly built
+  venv before the service restarts. Exit 0, or 2 on an internal error.
+
+  ```bash
+  $ githost-mcp --list-tools --json
+  {"server": "githost-mcp", "version": "0.20.0",
+   "tools": [{"name": "audit_log_query", "kind": "read", "hitl": false}, ...]}
+  ```
+- **The consumer is in forge's host-forge/scripts:** `grant-lint.py --tools
+  githost-mcp=-` reads that JSON. It refuses a manifest that grants a `hitl: true` tool not
+  listed in its `hitl.approval_required`, and names allowlist entries the server no longer
+  serves. `githost-grant-gate.sh <venv>` runs it before githost-mcp restarts on a new wheel.
 
 ## Audit Architecture
 
@@ -897,7 +936,7 @@ githost-mcp is not published to PyPI. Install from a checkout of a release tag, 
 the committed `uv.lock`, so the dependency set is the one CI tested and audited.
 
 ```bash
-VERSION=0.19.0
+VERSION=0.20.0
 VENV=/opt/venvs/githost-mcp
 
 # 1. The checkout is clean and is exactly the release tag on the remote. A local tag
