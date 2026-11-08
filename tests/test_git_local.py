@@ -1700,3 +1700,108 @@ def test_git_branch_delete_remote_rejection_does_not_leak_credentials(
     audit = (tmp_path / "audit.jsonl").read_text()
     assert "ghp_REJECTTOKEN12345" not in audit, "credential leaked to the audit trail"
     assert "error:PushRejected" in audit
+
+
+# ---------------------------------------------------------------------------
+# Push refspec injection (audit F-01, githost-scoped-2026-11-p3-grant-model).
+#
+# git_push and git_tag(push=True) are ungated, and handed their caller-supplied
+# name straight to Remote.push() as a refspec. `:x` deleted a remote branch, `+x`
+# force-updated one with no lease and no protected-branch check, and `a:b` pushed
+# to a ref the caller never named: the effects of the two HITL-gated verbs. Each
+# row runs against a real bare remote and asserts the remote is unchanged, so the
+# table fails on the pre-fix code (the push lands) and passes on the fix.
+# ---------------------------------------------------------------------------
+
+
+def _remote_heads(bare: git.Repo) -> dict[str, str]:
+    return {h.name: h.commit.hexsha for h in bare.heads}
+
+
+def _remote_tags(bare: git.Repo) -> dict[str, str]:
+    return {t.name: t.commit.hexsha for t in bare.tags}
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        "delete",  # ":<branch>"
+        "delete-full-ref",  # ":refs/heads/<branch>"
+        "force",  # "+<branch>"
+        "force-full-ref",  # "+refs/heads/<branch>"
+        "retarget",  # "<branch>:refs/heads/victim"
+        "force-retarget",  # "+<branch>:victim"
+        "leading-dash",  # "--delete"
+    ],
+)
+def test_git_push_refuses_refspec_forms(tools, bare_remote, form):
+    fns, path = tools
+    bare, branch = bare_remote
+    local = git.Repo(str(path))
+    # A victim branch on the remote, and a local history that diverges from it, so
+    # a force or retarget push would visibly move a remote ref.
+    local.create_head("victim")
+    local.remotes.origin.push("victim")
+    local.git.commit("--amend", "-m", "rewritten", "--allow-empty")
+    before = _remote_heads(bare)
+
+    # The deletes name `victim`, not the remote's HEAD branch: git refuses to delete
+    # a bare remote's current branch on its own, which would make those rows pass
+    # on the pre-fix code. The retarget names a ref that does not exist yet, so it
+    # is a clean create, not a non-fast-forward the remote rejects anyway.
+    value = {
+        "delete": ":victim",
+        "delete-full-ref": ":refs/heads/victim",
+        "force": f"+{branch}",
+        "force-full-ref": f"+refs/heads/{branch}",
+        "retarget": f"{branch}:refs/heads/injected",
+        "force-retarget": f"+{branch}:victim",
+        "leading-dash": "--delete",
+    }[form]
+
+    result = fns["git_push"](str(path), branch=value)
+
+    assert "error" in result, f"refspec form {form!r} was accepted: {result}"
+    assert _remote_heads(bare) == before, f"refspec form {form!r} moved a remote ref"
+
+
+def test_git_push_refuses_option_shaped_remote(tools, bare_remote):
+    fns, path = tools
+    _bare, branch = bare_remote
+    result = fns["git_push"](str(path), remote="--mirror", branch=branch)
+    assert "error" in result
+
+
+def test_git_push_plain_branch_with_plus_inside_still_works(tools, bare_remote):
+    """`+` and `#` are legal inside a name; only a leading `+` is a refspec flag."""
+    fns, path = tools
+    bare, _branch = bare_remote
+    local = git.Repo(str(path))
+    local.create_head("release/v1.2.0+build")
+    result = fns["git_push"](str(path), branch="release/v1.2.0+build")
+    assert "error" not in result, result
+    assert "release/v1.2.0+build" in _remote_heads(bare)
+
+
+@pytest.mark.parametrize("value", ["+v1.0.0", ":v1.0.0", "v1.0.0:refs/heads/main", "-v1"])
+def test_git_tag_push_refuses_refspec_forms(tools, bare_remote, value):
+    fns, path = tools
+    bare, _branch = bare_remote
+    local = git.Repo(str(path))
+    # The remote holds v1.0.0 at the current commit, and the local v1.0.0 is moved
+    # to a rewritten commit, so `+v1.0.0` (a legal local tag name) would force-move
+    # the remote tag. That row is the live one: git refuses to create a local tag
+    # containing ':', so the colon rows are defence in depth for the same check.
+    local.create_tag("v1.0.0")
+    local.remotes.origin.push("v1.0.0")
+    local.delete_tag(local.tags["v1.0.0"])
+    local.git.commit("--amend", "-m", "rewritten", "--allow-empty")
+    local.create_tag("v1.0.0")
+    before = _remote_tags(bare)
+    heads_before = _remote_heads(bare)
+
+    result = fns["git_tag"](str(path), value, push=True)
+
+    assert "error" in result, f"tag refspec {value!r} was accepted: {result}"
+    assert _remote_tags(bare) == before
+    assert _remote_heads(bare) == heads_before

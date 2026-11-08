@@ -66,6 +66,7 @@ from ..security import (
     validate_read_path,
     validate_remote_name,
     validate_remote_url,
+    validate_tag_name,
     validate_write_globs,
     validate_write_path,
 )
@@ -1041,6 +1042,11 @@ def register(mcp) -> None:
             repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
             branch_name = branch or repo.active_branch.name
+            # The branch is pushed as a refspec: `:x` deletes, `+x` force-updates and
+            # `a:b` retargets. Those are the HITL-gated verbs' effects, so this
+            # ungated verb takes a plain branch name only (audit F-01, p3).
+            validate_remote_name(remote)
+            validate_branch_name(branch_name)
             # Captured before the push so the reported sha is the one that was
             # actually sent, not whatever the ref moved to afterwards.
             try:
@@ -1168,6 +1174,9 @@ def register(mcp) -> None:
         ac = AuditCtx("git_tag", "local", repo_path, params)
         try:
             repo_path = validate_write_path(repo_path)
+            validate_tag_name(tag_name)
+            if push:
+                validate_remote_name(remote)
             repo = _open_repo(repo_path)
             tag_msg = message or tag_name
             tag = repo.create_tag(tag_name, message=tag_msg)

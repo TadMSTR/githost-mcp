@@ -10,7 +10,7 @@ from ..audit import AuditCtx
 from ..config import get_config
 from ..gitflags import evaluate_push
 from ..observability import emit_release_target
-from ..security import scrub, validate_write_path
+from ..security import scrub, validate_tag_name, validate_write_path
 
 log = structlog.get_logger(__name__)
 
@@ -54,6 +54,7 @@ def register(mcp) -> None:
 
         try:
             repo_path = validate_write_path(repo_path)
+            validate_tag_name(tag)
         except ValueError as e:
             ac.finish("error:ValueError", e)
             return {"error": scrub(str(e))}
