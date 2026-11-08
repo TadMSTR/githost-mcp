@@ -6,8 +6,8 @@ Nothing activates unless the endpoint is set, and an import error for the option
 
 The Loki push, the Prometheus endpoint and the NATS publisher were removed in 0.19.0.
 None had a consumer: the async emitter that fed Loki and NATS had no caller, and no
-scrape job read ports 9620-9628 (githost-scoped-2026-11 p2, #1426 (id 1509), #530
-(id 613)). OTel is the one live path; the audit JSONL is the durable record.
+scrape job read ports 9620-9628 (vikunja#1426, vikunja#530). OTel is the one live
+path; the audit JSONL is the durable record.
 """
 
 from __future__ import annotations

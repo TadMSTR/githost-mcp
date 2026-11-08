@@ -493,7 +493,7 @@ def test_missing_oldest_backup_is_not_logged_as_a_failure(rotating_audit_env, mo
     )
 
 
-# --- stderr carries WARNING and above only (#1426 (id 1509) Done-when 5) -----
+# --- stderr carries WARNING and above only (vikunja#1426 Done-when 5) -----
 
 
 def test_info_reaches_the_log_file_but_not_stderr(tmp_path, monkeypatch, capfd):

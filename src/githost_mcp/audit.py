@@ -156,7 +156,7 @@ def init_logging() -> None:
     stderr_handler: logging.Handler = logging.StreamHandler(sys.stderr)
     # WARNING and above only, whatever LOG_LEVEL says. PM2 writes stderr to
     # githost-mcp-<agent>-error.log, and with the root level it received every INFO line:
-    # 764 of 764 lines on 2026-11-07 (#1426 (id 1509)). The file handler keeps LOG_LEVEL.
+    # 764 of 764 lines on 2026-11-07 (vikunja#1426). The file handler keeps LOG_LEVEL.
     stderr_handler.setLevel(STDERR_LEVEL)
     handlers: list[logging.Handler] = [stderr_handler]
     if config.log_file:

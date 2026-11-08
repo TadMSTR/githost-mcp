@@ -10,7 +10,7 @@ SHAs, refs and counts. A tool whose methods or actions are partly reads names th
 argument and the values that write in EFFECT_SELECTORS; a call with any other value is
 a read and records no effect.
 
-`effect` is a plain dict and stays one: p4 (#1300 (id 1383)) extends it with the commit
+`effect` is a plain dict and stays one: p4 (vikunja#1300) extends it with the commit
 parents for git_commit and merges, rather than adding a field beside it.
 """
 

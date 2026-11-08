@@ -105,7 +105,7 @@ _DEFAULT_POLICY_PATH = "/etc/forge/workspace-policy.yml"
 _DEFAULT_WORKTREE_ROOT = "~/repos/personal/_worktrees"
 
 # The Loki push, Prometheus endpoint and NATS publisher were removed in 0.19.0: none of
-# them had a consumer (githost-scoped-2026-11 p2, #1426 (id 1509), #530 (id 613)). The
+# them had a consumer (githost-scoped-2026-11 p2, vikunja#1426, vikunja#530). The
 # OTel exporter is the one live telemetry path. PM2 keeps a process's launch env across
 # restarts, so METRICS_PORT stays set on the running apps; it is now inert.
 REMOVED_BACKEND_ENV = (

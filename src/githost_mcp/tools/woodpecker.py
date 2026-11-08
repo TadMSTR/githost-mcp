@@ -693,7 +693,7 @@ def register(mcp) -> None:
             return {
                 # The number, not data["id"]: status used to return the global id here,
                 # and agents fed it back into get_logs/cancel and got 404s or a different
-                # pipeline (#1425 (id 1508)).
+                # pipeline (vikunja#1425).
                 "pipeline_id": data.get("number"),
                 "internal_id": data.get("id"),
                 "status": data.get("status"),

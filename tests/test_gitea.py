@@ -318,7 +318,7 @@ async def test_gitea_actions_get_job_log(tools):
             return_value=httpx.Response(200, text="step 1\nstep 2\n")
         )
         result = await tools["gitea_actions"]("testowner/repo", "get_job_log", job_id=1)
-    # A bounded view now, not the raw text under "log" (#1425 (id 1508)).
+    # A bounded view now, not the raw text under "log" (vikunja#1425).
     assert result["lines"] == ["step 1", "step 2"]
     assert result["total_lines"] == 2
 

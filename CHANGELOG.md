@@ -4,24 +4,24 @@
 
 Attribution and telemetry (githost-scoped-2026-11 part 2). An audit entry now records what a
 write call changed and which dispatcher run, task and trace it belonged to, and the
-`githost.<tool>` span covers the real work. Covers #1426 (id 1509) except its Loki item
-(programme part 6), and closes #530 (id 613) by removing the NATS publisher.
+`githost.<tool>` span covers the real work. Covers vikunja#1426 except its Loki item
+(programme part 6), and closes vikunja#530 by removing the NATS publisher.
 
 ### Audit entry: before and after
 
 A `git_push` with the branch left to default, as 0.18.0 wrote it (developer, 2026-11-08):
 
 ```json
-{"tool": "git_push", "provider": "local", "repo": "/home/ted/repos/gitea/host-forge-build-reports",
- "params": {"repo_path": "/home/ted/repos/gitea/host-forge-build-reports", "remote": "origin", "branch": null},
+{"tool": "git_push", "provider": "local", "repo": "/srv/repos/example",
+ "params": {"repo_path": "/srv/repos/example", "remote": "origin", "branch": null},
  "result": "ok", "duration_ms": 766}
 ```
 
 The same call in 0.19.0, through scoped-mcp ≥ 1.20.0 with `forward_identity: true`:
 
 ```json
-{"tool": "git_push", "provider": "local", "repo": "/home/ted/repos/gitea/host-forge-build-reports",
- "params": {"repo_path": "/home/ted/repos/gitea/host-forge-build-reports", "remote": "origin", "branch": null},
+{"tool": "git_push", "provider": "local", "repo": "/srv/repos/example",
+ "params": {"repo_path": "/srv/repos/example", "remote": "origin", "branch": null},
  "result": "ok", "duration_ms": 766,
  "run_id": "<uuid>", "task_id": "<uuid>", "session_id": "<scoped-mcp session>", "trace_id": "<32 hex>",
  "effect": {"remote": "origin", "ref": "main", "new_sha": "<40 hex>", "old_sha": "<40 hex>",
@@ -85,7 +85,7 @@ probe is in the build report.
   (`githost.tool.calls`, `.denied`, `.duration`, `githost.release.targets`) already reach
   SigNoz and are unchanged. `METRICS_PORT`, `LOKI_URL`, `LOKI_LABELS`, `NATS_URL` and
   `NATS_SUBJECT_PREFIX` are ignored; a set one logs `config_ignored_removed_backend` once, by
-  name. Closes #530 (id 613) ("provision a NATS user or drop the emitter": dropped).
+  name. Closes vikunja#530 ("provision a NATS user or drop the emitter": dropped).
 - **The `loki`, `prometheus` and `nats` extras.** `observability` keeps its name and is now
   `githost-mcp[otel]`. `prometheus-client` and `nats-py` leave the lock; the denial-counter
   test now asserts against a real OTel counter through an in-memory reader.
@@ -99,7 +99,7 @@ CI diagnostics (githost-scoped-2026-11 part 1). An agent can now find out, with 
 tools alone, why a CI run failed or stalled on Woodpecker, Gitea Actions or GitHub Actions.
 Before this, `woodpecker_get_logs` kept the **first** 500 lines of a step, so the failure at
 the end was never reached, and `woodpecker_status` returned the wrong pipeline handle.
-Closes #1425 (id 1508); the githost half of #1389 (id 1472).
+Closes vikunja#1425; the githost half of vikunja#1389.
 
 ### Added
 
@@ -438,7 +438,7 @@ path, losing the HMAC entry that is the whole reason for routing git through thi
 and `writer` have denylists that do not name it. Only `steward` is excluded, and only
 incidentally — its allowlist is exact-match and so fails closed. The per-agent grants that
 make the gate meaningful are deliberately **out of scope here** and tracked in
-**vikunja #526 (id 609)**. Until that lands, this is a destructive capability reachable by
+**vikunja#526**. Until that lands, this is a destructive capability reachable by
 default.
 
 It is a separate tool rather than a `remote=` flag on `git_branch`, and that is a design
@@ -813,7 +813,7 @@ The **High is not in this release** — it is a live deployment gap rather than 
 the `writer` agent's audit trail is unsigned, because `~/.secrets/githost-mcp-writer.env` lacks
 the `AUDIT_SIGNING_KEY` its five siblings all carry. `verify_entry_hmac` returns `True` when no
 key is configured, so `audit_log_query` reports `tamper_detected: false` for entries that were
-never signed — tamper detection failing open. Tracked as vikunja #301 (id 312); fix is a
+never signed — tamper detection failing open. Tracked as vikunja#301; fix is a
 one-line env addition plus a restart, owned by sysadmin.
 
 Confirmed and not overruled: the Phase 4 Woodpecker error widening (`gitea_client.py` was

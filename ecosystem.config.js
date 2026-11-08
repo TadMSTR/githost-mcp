@@ -116,7 +116,7 @@ function buildApp(agentId, ports) {
   // id 281). If the file is missing or unparseable the allowlist resolves empty
   // — fail closed, not fall back.
   //
-  // vikunja #271 (id 282); closes #47 (id 55) and accepted risk M-2.
+  // vikunja#271; closes vikunja#47 and accepted risk M-2.
   env.AGENT_MANIFEST_PATH = `/etc/forge/manifests/${agentId}-agent.yml`;
   // No METRICS_PORT: the Prometheus endpoint was removed in 0.19.0. No job scraped
   // 9620-9628, and the OTel metrics below already reach SigNoz (githost-scoped-2026-11

@@ -1,4 +1,4 @@
-"""Effect fields and correlation ids in the audit trail (#1426 (id 1509), Done-when 1-2).
+"""Effect fields and correlation ids in the audit trail (vikunja#1426, Done-when 1-2).
 
 Before 0.19.0 an audit entry recorded that a call succeeded, not what it changed:
 `git_commit` wrote `{repo_path, identity}` and `git_push` wrote `branch: null` when the
@@ -36,7 +36,8 @@ from githost_mcp.correlation import (
 
 RUN = "11111111-2222-4333-8444-555555555555"
 TASK = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-TOKEN = "ghp_0123456789abcdef0123456789abcdef0123"
+# Built at runtime so the source holds no detector-shaped literal.
+TOKEN = "ghp_" + "0123456789abcdef" * 2 + "0123"
 
 
 @pytest.fixture()

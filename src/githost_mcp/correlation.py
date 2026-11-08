@@ -13,7 +13,7 @@ ones that span a build.
 
 **They are attribution, not authorization.** Anyone holding this process's bearer token
 can send any value. In normal operation only scoped-mcp holds it, but a same-uid process
-that reads the token could forge a run id (#1193 (id 1276), agent isolation). Nothing in
+that reads the token could forge a run id (vikunja#1193, agent isolation). Nothing in
 githost-mcp may gate on them; they are recorded, and that is all.
 
 CallScopeMiddleware reads the headers once per call, before the tool runs, into a
@@ -38,6 +38,9 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
+# Wire contract shared with scoped-mcp (scoped_mcp/modules/mcp_proxy_config.py): the
+# header names and the session-id pattern below must match it. A rename on either side
+# silently records null here, with no correlation_invalid.
 RUN_ID_HEADER = "x-forge-run-id"
 TASK_ID_HEADER = "x-forge-task-id"
 SESSION_ID_HEADER = "x-forge-session-id"

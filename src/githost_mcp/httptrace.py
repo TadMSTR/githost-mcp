@@ -8,8 +8,10 @@ gitlab_call() instead (they use requests, not httpx).
 
 The template keeps a path segment only if it is one of the API words in
 `_PATH_WORDS`; every other segment (owner, repo, tag, number, ".diff" suffix) becomes
-`{}`. So the template is built from a fixed vocabulary by construction: no repo name,
-branch, tag, token, userinfo or query string can reach a span attribute through it.
+`{}`. So the template is built from a fixed vocabulary by construction. An owner, repo or
+tag that happens to equal one of those words (a repo named `config`, say) is kept, so the
+guarantee is that only `_PATH_WORDS` members can appear, not that no repo name ever does.
+No token, userinfo or query string can reach a span attribute through it.
 The query string is dropped before templating, and so is the host's userinfo.
 
 Env proxies still work: httpx mounts proxy transports from the environment beside the

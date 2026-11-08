@@ -87,7 +87,7 @@ async def test_woodpecker_list_pipelines_status_filter(tools):
     """The status filter is sent to the server, not applied to one fetched page.
 
     The old code fetched a single page and filtered it locally, so a failure older than
-    that page could not be found (#1425 (id 1508)). The mock returns only what a
+    that page could not be found (vikunja#1425). The mock returns only what a
     filtering server would, and the assertion is on the outgoing query.
     """
     mock_data = [{"id": 2, "number": 2, "status": "failure", "branch": "feature"}]
@@ -347,7 +347,7 @@ async def test_woodpecker_status_success(tools):
         )
         result = await tools["woodpecker_status"]("owner/repo", 9)
     # The per-repo number is the handle; the global id used to come back as "id" and
-    # agents fed it into get_logs/cancel (#1425 (id 1508)).
+    # agents fed it into get_logs/cancel (vikunja#1425).
     assert result["pipeline_id"] == 9
     assert result["internal_id"] == 2359
     assert "id" not in result
@@ -412,7 +412,7 @@ async def test_woodpecker_check_response_500(tools):
 
 @pytest.mark.asyncio
 async def test_woodpecker_error_includes_response_body(tools):
-    """vikunja #277 (id 288): the body is the only thing that says why. Dropping it
+    """vikunja#277: the body is the only thing that says why. Dropping it
     is what made #269's 400 undiagnosable for the tool's entire life."""
     with respx.mock:
         _lookup_mock()

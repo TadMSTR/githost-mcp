@@ -14,7 +14,7 @@ first time someone rewords an error string, and it rots silently — the counter
 incrementing, just into the wrong bucket. A type is renamed by the compiler or not at
 all.
 
-`reason_class` is a Prometheus label, so the vocabulary is closed *by construction*:
+`reason_class` goes into span attributes and audit fields, so the vocabulary is closed *by construction*:
 `classify_reason()` can only ever return a member of `REASON_CLASSES`. The unbounded
 detail lives in the audit record's `reason` field, which is not a label.
 """

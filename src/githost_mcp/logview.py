@@ -4,7 +4,7 @@ Before this, `woodpecker_get_logs` kept the *first* 500 lines of a step, so the 
 the end was cut off (deploy-standard p1's push pipeline 1235: the python step's 832 lines
 stopped partway through the passing tests), and `gitea_actions get_job_log` returned the
 whole raw log with no bound and no scrub. Neither let an agent find out why CI failed.
-(githost-scoped-2026-11 p1, #1425 (id 1508), #1389 (id 1472))
+(githost-scoped-2026-11 p1, vikunja#1425, vikunja#1389)
 
 The view never logs what it returns. Callers put only the view parameters and counts in
 the audit trail — a log line can carry a pipeline environment value.
