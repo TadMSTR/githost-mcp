@@ -55,6 +55,17 @@ Closes #1425 (id 1508); the githost half of #1389 (id 1472).
   `offset`, `log_limit`, `grep`, `ignore_case`, `context`.
 - The `github_actions get_run_logs` docstring no longer says job logs are only a zip.
 
+### Security
+
+- **Path-segment and anchor hardening in the argument validators.** The `owner/repo` check
+  used by the Woodpecker, Gitea and GitHub tools now refuses `.` and `..` as a segment (both
+  segments go into request paths), and every `^…$` validator is anchored with `\Z`, so a
+  trailing newline no longer passes. This covers repo, owner, tag, workflow, ref, remote-name,
+  scp-remote and GitLab project checks.
+- **CI log bodies are byte-capped before parsing** (32 MiB), and the read stops at the cap:
+  Woodpecker log and config responses (refused past the cap), and Gitea job logs (cut, and
+  flagged `download_cut`).
+
 ## [0.17.0] — 2026-10-26
 
 Dependencies are locked. No tool or behaviour changes.

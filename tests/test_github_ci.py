@@ -325,3 +325,25 @@ def test_signed_blob_query_never_reaches_the_httpx_log(tools, caplog):
     assert "productionresultssa5.blob.core.windows.net" in text  # the line is still there
     assert "SIGNEDsecretVALUE" not in text
     assert "api.github.com/repos/owner/repo/actions/jobs/77/logs" in text
+
+
+@pytest.mark.parametrize("repo", ["../..", "owner/..", "owner/repo\n"])
+def test_github_repo_dot_segments_and_newline_refused(tools, repo):
+    gh = MagicMock()
+    p1, p2 = _patch_gh(gh)
+    with p1, p2:
+        r = tools["github_commit_checks"](repo, "main")
+    assert "error" in r
+    gh.get_repo.assert_not_called()
+
+
+def test_github_fork_org_dot_segment_and_newline_refused(tools):
+    for org in ("..", ".", "org\n"):
+        assert "error" in tools["github_fork"]("owner", "repo", org=org)
+
+
+def test_log_host_allowlist_rejects_trailing_newline_host():
+    from githost_mcp._providers.github_client import _is_log_host
+
+    assert _is_log_host("productionresultssa5.blob.core.windows.net")
+    assert not _is_log_host("productionresultssa5.blob.core.windows.net\n")

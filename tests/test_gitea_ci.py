@@ -200,3 +200,46 @@ async def test_commit_status_unknown_ref_is_an_error(tools):
         )
         r = await tools["gitea_commit_status"]("testowner/repo", "nope")
     assert "404" in r["error"]
+
+
+# --- pre-audit fixes ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_job_log_download_is_capped_and_flagged(tools, monkeypatch):
+    from githost_mcp import logview
+
+    monkeypatch.setattr(logview, "DOWNLOAD_MAX", 30)
+    with respx.mock:
+        respx.get(f"{GA}/jobs/3/logs").mock(
+            return_value=httpx.Response(200, text="".join(f"line {i}\n" for i in range(100)))
+        )
+        r = await tools["gitea_actions"]("testowner/repo", "get_job_log", job_id=3, mode="head")
+    assert r["download_cut"] is True
+    assert sum(len(x) + 1 for x in r["lines"]) <= 31
+
+
+@pytest.mark.asyncio
+async def test_job_log_http_error_still_reported_through_the_capped_read(tools):
+    with respx.mock:
+        respx.get(f"{GA}/jobs/3/logs").mock(return_value=httpx.Response(404, text="no job"))
+        r = await tools["gitea_actions"]("testowner/repo", "get_job_log", job_id=3)
+    assert "404" in r["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo", ["../..", "owner/..", "owner/.", "./r", "owner/repo\n"])
+async def test_repo_dot_segments_and_newline_refused(tools, repo):
+    with respx.mock:
+        r1 = await tools["gitea_commit_status"](repo, "main")
+        r2 = await tools["gitea_actions"](repo, "list_runs")
+        r3 = await tools["gitea_pr_list"](repo)
+    for r in (r1, r2, r3):
+        assert "'owner/repo' format" in r.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_commit_status_ref_with_trailing_newline_refused(tools):
+    with respx.mock:
+        r = await tools["gitea_commit_status"]("testowner/repo", "main\n")
+    assert "ref must be" in r.get("error", "")

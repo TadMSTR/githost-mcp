@@ -235,11 +235,11 @@ _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 # from git's remote-helper syntax: `ext::sh -c '…'` is otherwise shaped exactly like
 # host:path, and would match here and be stored as a remote that runs a shell
 # command on the next fetch.
-_SCP_RE = re.compile(r"^(?P<userinfo>[^/@]+@)?[^/@:]+:(?![/:]).+$")
+_SCP_RE = re.compile(r"\A(?P<userinfo>[^/@]+@)?[^/@:]+:(?![/:]).+\Z")
 _WHITESPACE_RE = re.compile(r"\s")
 # A leading '-' makes git parse the value as an option rather than a name/URL.
 _LEADING_DASH_ERR = "must not start with '-'"
-_REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+_REMOTE_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 
 
 def validate_remote_name(name: str) -> None:
@@ -302,7 +302,7 @@ def validate_branch_name(name: str) -> None:
 # A commit ref for the CI status reads: a SHA, or a branch/tag name. It lands in a URL path
 # (Gitea, via httpx, which resolves dot segments) or in PyGithub's, so `..`, a leading `-`
 # and anything outside the characters forge's branch and tag names use are refused.
-_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]*$")
+_REF_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/+-]*\Z")
 _REF_MAX = 255
 
 

@@ -10,6 +10,7 @@ import httpx
 import structlog
 
 from ..config import get_config
+from ..logview import DOWNLOAD_MAX, read_capped
 
 log = structlog.get_logger(__name__)
 
@@ -55,12 +56,12 @@ def github_call(fn, *args, **kwargs):
 # (githost-scoped-2026-11 p1, Phase 3)
 GITHUB_API = "https://api.github.com"
 _LOG_HOST_RES = (
-    re.compile(r"^productionresultssa\d+\.blob\.core\.windows\.net$"),
-    re.compile(r"^[a-z0-9-]+\.actions\.githubusercontent\.com$"),
+    re.compile(r"\Aproductionresultssa\d+\.blob\.core\.windows\.net\Z"),
+    re.compile(r"\A[a-z0-9-]+\.actions\.githubusercontent\.com\Z"),
 )
-# The download is bounded before the line view ever sees it. A job log past this is cut,
-# and the caller is told.
-LOG_DOWNLOAD_MAX = 32 * 1024 * 1024
+# The download is bounded before the line view ever sees it (logview.DOWNLOAD_MAX). A job
+# log past this is cut, and the caller is told. Module-level so tests can lower it.
+LOG_DOWNLOAD_MAX = DOWNLOAD_MAX
 _REDIRECTS = (301, 302, 303, 307, 308)
 
 
@@ -101,21 +102,6 @@ def _is_log_host(host: str | None) -> bool:
 _URL_LOG_FILTER = _SignedLogUrlFilter()
 if _URL_LOG_FILTER not in logging.getLogger("httpx").filters:
     logging.getLogger("httpx").addFilter(_URL_LOG_FILTER)
-
-
-def _read_bounded(resp: httpx.Response) -> tuple[str, bool]:
-    chunks: list[bytes] = []
-    size = 0
-    cut = False
-    for chunk in resp.iter_bytes():
-        room = LOG_DOWNLOAD_MAX - size
-        if len(chunk) > room:
-            chunks.append(chunk[:room])
-            cut = True
-            break
-        chunks.append(chunk)
-        size += len(chunk)
-    return b"".join(chunks).decode("utf-8", "replace"), cut
 
 
 def fetch_job_log(repo: str, job_id: int) -> tuple[str, bool]:
@@ -161,4 +147,5 @@ def fetch_job_log(repo: str, job_id: int) -> tuple[str, bool]:
         with client.stream("GET", target) as blob:
             if blob.status_code != 200:
                 raise ValueError(f"Job log download failed: HTTP {blob.status_code}")
-            return _read_bounded(blob)
+            data, cut = read_capped(blob.iter_bytes(), LOG_DOWNLOAD_MAX)
+            return data.decode("utf-8", "replace"), cut

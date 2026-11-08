@@ -13,6 +13,7 @@ from .._providers.gitea_client import (
     gitea_get,
     gitea_get_optional,
     gitea_get_text,
+    gitea_get_text_capped,
     gitea_patch,
     gitea_post,
     gitea_post_void,
@@ -40,7 +41,11 @@ def _err(e: Exception) -> dict:
     return {"error": scrub(str(e))}
 
 
-_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+# `\Z`, not `$`: `$` also matches before a trailing newline, so `re.match` accepted
+# "owner/repo\n" (KB IV-70). The lookaheads refuse a `.` or `..` segment: the segments go
+# into URL paths, and httpx resolves dot segments, so "../.." retargeted the request
+# (KB IV-23; githost-scoped-2026-11 p1 pre-audit).
+_REPO_RE = re.compile(r"\A(?!\.\.?/)[a-zA-Z0-9_.-]+/(?!\.\.?\Z)[a-zA-Z0-9_.-]+\Z")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
 
 # String path segments (tag names, workflow file names) are interpolated into Gitea API
@@ -48,8 +53,8 @@ _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, und
 # python-gitlab (those URL-encode segments). Validate before use so an unvalidated value
 # can't traverse the path or inject a query string (IV-01). Tags may contain slashes;
 # workflow file names may not. `..` is rejected outright.
-_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
-_WORKFLOW_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_TAG_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+_WORKFLOW_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 def _bad_tag(tag: str) -> dict | None:
@@ -679,7 +684,7 @@ def register(mcp) -> None:
             if method == "get_job_log":
                 if job_id is None:
                     raise MissingArgument("job_id is required for get_job_log")
-                text = await gitea_get_text(f"{base}/jobs/{job_id}/logs")
+                text, cut = await gitea_get_text_capped(f"{base}/jobs/{job_id}/logs")
                 result = logview.view(
                     logview.split_text(text),
                     mode=mode,
@@ -689,6 +694,8 @@ def register(mcp) -> None:
                     ignore_case=ignore_case,
                     context=context,
                 )
+                if cut:
+                    result["download_cut"] = True
                 ac.finish("ok")
                 return {"repo": repo, "job_id": job_id} | result
 

@@ -15,7 +15,8 @@ log = structlog.get_logger(__name__)
 
 # GitLab projects can be nested ('group/subgroup/project', one or more slashes) or a bare
 # numeric project ID — a single-slash 'owner/repo' regex would reject both valid forms.
-_PROJECT_RE = re.compile(r"^([a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+$|^\d+$")
+# `\Z`, not `$` (KB IV-70): `$` lets a trailing newline through `re.match`.
+_PROJECT_RE = re.compile(r"\A([a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+\Z|\A\d+\Z")
 _PROJECT_FMT_ERR = (
     "project must be 'namespace/project' (nested groups allowed) or a numeric project ID"
 )

@@ -29,6 +29,40 @@ _LINE_CUT_MARK = " …[line cut]"
 
 MODES = ("tail", "head", "range")
 
+# A log body is capped before it is parsed or split (KB IV-14), and the read stops at the
+# cap rather than draining to EOF (KB IV-72), so neither memory nor time is unbounded.
+DOWNLOAD_MAX = 32 * 1024 * 1024
+
+
+def read_capped(chunks, cap: int | None = None) -> tuple[bytes, bool]:
+    """Join byte chunks up to `cap` bytes. Returns (data, cut); stops at the cap."""
+    cap = DOWNLOAD_MAX if cap is None else cap
+    out: list[bytes] = []
+    size = 0
+    for chunk in chunks:
+        room = cap - size
+        if len(chunk) > room:
+            out.append(chunk[:room])
+            return b"".join(out), True
+        out.append(chunk)
+        size += len(chunk)
+    return b"".join(out), False
+
+
+async def aread_capped(chunks, cap: int | None = None) -> tuple[bytes, bool]:
+    """read_capped() over an async iterator of byte chunks (httpx `aiter_bytes()`)."""
+    cap = DOWNLOAD_MAX if cap is None else cap
+    out: list[bytes] = []
+    size = 0
+    async for chunk in chunks:
+        room = cap - size
+        if len(chunk) > room:
+            out.append(chunk[:room])
+            return b"".join(out), True
+        out.append(chunk)
+        size += len(chunk)
+    return b"".join(out), False
+
 
 def _has_control(text: str) -> bool:
     return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text)

@@ -615,3 +615,63 @@ async def test_queue_info_non_admin_is_a_clear_error(tools):
         respx.get(f"{BASE}/queue/info").mock(return_value=httpx.Response(403))
         r = await tools["woodpecker_queue_info"]()
     assert "authorization denied" in r["error"]
+
+
+# --- pre-audit fixes: body cap (IV-14) and validator anchors (IV-23, IV-70) ---------------
+
+
+@pytest.mark.asyncio
+async def test_get_logs_refuses_a_body_past_the_cap(tools, monkeypatch):
+    from githost_mcp import logview
+
+    monkeypatch.setattr(logview, "DOWNLOAD_MAX", 200)
+    with respx.mock:
+        _lookup()
+        respx.get(f"{REPO_URL}/pipelines/1235").mock(
+            return_value=httpx.Response(200, json=_pipeline(FAILED_1235))
+        )
+        respx.get(f"{REPO_URL}/logs/1235/9966").mock(
+            return_value=httpx.Response(200, json=_log([f"line {i}" for i in range(100)]))
+        )
+        r = await tools["woodpecker_get_logs"]("owner/repo", 1235)
+    assert "larger than" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_config_refuses_a_body_past_the_cap(tools, monkeypatch):
+    from githost_mcp import logview
+
+    monkeypatch.setattr(logview, "DOWNLOAD_MAX", 50)
+    body = [{"hash": "x", "name": "w", "data": _b64("a: 1\n" * 100)}]
+    with respx.mock:
+        _lookup()
+        respx.get(f"{REPO_URL}/pipelines/1/config").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        r = await tools["woodpecker_pipeline_config"]("owner/repo", 1)
+    assert "larger than" in r["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo", ["../..", "./repo", "owner/..", "owner/.", "owner/repo\n"])
+async def test_every_tool_refuses_dot_segments_and_trailing_newline(tools, repo):
+    with respx.mock:  # no routes: any request would raise
+        for name, args in [
+            ("woodpecker_status", (repo, 1)),
+            ("woodpecker_get_logs", (repo, 1)),
+            ("woodpecker_list_pipelines", (repo,)),
+            ("woodpecker_restart", (repo, 1)),
+            ("woodpecker_pipeline_config", (repo, 1)),
+            ("woodpecker_queue_info", (repo,)),
+        ]:
+            r = await tools[name](*args)
+            # The format error, not a failed request: with no routes mocked, a request that
+            # got through would also come back as an error.
+            assert "'owner/repo' format" in r.get("error", ""), name
+
+
+@pytest.mark.asyncio
+async def test_list_rejects_rfc3339_with_trailing_newline(tools):
+    with respx.mock:
+        r = await tools["woodpecker_list_pipelines"]("owner/repo", before="2026-11-07T00:00:00Z\n")
+    assert "RFC3339" in r.get("error", "")

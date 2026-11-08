@@ -264,3 +264,38 @@ def test_validate_view_accepts_none_mode_and_max_values():
 def test_view_never_logs_content(monkeypatch):
     # The reader has no logger at all: content can only leave through its return value.
     assert not hasattr(logview, "log")
+
+
+# --- capped readers (KB IV-14, IV-72) ------------------------------------------------------
+
+
+def _chunks(n, size, seen):
+    for i in range(n):
+        seen.append(i)
+        yield b"x" * size
+
+
+def test_read_capped_stops_at_cap_without_draining():
+    seen = []
+    data, cut = logview.read_capped(_chunks(1000, 10, seen), cap=25)
+    assert (len(data), cut) == (25, True)
+    assert len(seen) == 3  # the iterator was not drained to its end
+
+
+def test_read_capped_under_cap_is_whole():
+    data, cut = logview.read_capped(iter([b"ab", b"cd"]), cap=10)
+    assert (data, cut) == (b"abcd", False)
+
+
+@pytest.mark.asyncio
+async def test_aread_capped_stops_at_cap_without_draining():
+    seen = []
+
+    async def gen():
+        for i in range(1000):
+            seen.append(i)
+            yield b"y" * 10
+
+    data, cut = await logview.aread_capped(gen(), cap=25)
+    assert (len(data), cut) == (25, True)
+    assert len(seen) == 3

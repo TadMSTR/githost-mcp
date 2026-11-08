@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import re
 import time
 from datetime import datetime
@@ -23,7 +24,11 @@ from ..config import get_config
 from ..errors import InvalidArgument
 from ..security import scrub
 
-_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+# `\Z`, not `$`: `$` also matches before a trailing newline, so `re.match` accepted
+# "owner/repo\n" (KB IV-70). The lookaheads refuse a `.` or `..` segment: the segments go
+# into URL paths, and httpx resolves dot segments, so "../.." retargeted the request
+# (KB IV-23; githost-scoped-2026-11 p1 pre-audit).
+_REPO_RE = re.compile(r"\A(?!\.\.?/)[a-zA-Z0-9_.-]+/(?!\.\.?\Z)[a-zA-Z0-9_.-]+\Z")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
 
 # Woodpecker 3.x enums (model.StatusValue and the webhook event list, doc-cache
@@ -56,7 +61,7 @@ _TERMINAL = frozenset({"success", "failure", "killed", "error", "skipped", "decl
 _FAILED = frozenset({"failure", "error", "killed"})
 # A step in one of these states has produced no output yet, or never will.
 _NO_LOG_STATES = frozenset({"pending", "created", "blocked", "skipped"})
-_RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+_RFC3339_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})\Z")
 _FILTER_MAX = 255
 # Commit messages and step errors are caller-facing text from the forge: bound them.
 _TEXT_MAX = 300
@@ -109,6 +114,27 @@ def _check_response(resp: httpx.Response) -> None:
             f"{resp.request.method} {resp.request.url} (status {resp.status_code})"
             + (f": {detail}" if detail else "")
         )
+
+
+async def _get_json_capped(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> Any:
+    """GET a JSON body of at most logview.DOWNLOAD_MAX bytes (KB IV-14, IV-72).
+
+    Log and config bodies carry a whole step's output; the read stops at the cap. A cut JSON
+    body can't be parsed, so a body past the cap is refused rather than half-read.
+    """
+    async with client.stream("GET", url, headers=headers) as resp:
+        data, cut = await logview.aread_capped(resp.aiter_bytes())
+    _check_response(
+        httpx.Response(
+            resp.status_code, headers=resp.headers, content=data[:4096], request=resp.request
+        )
+    )
+    if cut:
+        raise ValueError(
+            f"Woodpecker response is larger than {logview.DOWNLOAD_MAX // (1024 * 1024)} MiB; "
+            "not read"
+        )
+    return json.loads(data)
 
 
 async def _woodpecker_repo_id(
@@ -550,12 +576,12 @@ def register(mcp) -> None:
 
                 # /repos/{id}/pipelines/{n}/{step}/logs matches no Woodpecker route —
                 # the correct path is /repos/{id}/logs/{n}/{step} (vikunja #478).
-                log_resp = await client.get(
+                log_data = await _get_json_capped(
+                    client,
                     f"{base}/repos/{repo_id}/logs/{pipeline_id}/{int(step['_id'])}",
-                    headers=headers,
+                    headers,
                 )
-                _check_response(log_resp)
-                lines = _decode_log(log_resp.json())
+                lines = _decode_log(log_data)
 
             if mode is None:
                 mode = "tail" if step["state"] in _FAILED else "head"
@@ -800,12 +826,9 @@ def register(mcp) -> None:
             headers = _woodpecker_headers()
             async with httpx.AsyncClient(timeout=15.0) as client:
                 repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
-                resp = await client.get(
-                    f"{base}/repos/{repo_id}/pipelines/{pipeline_id}/config",
-                    headers=headers,
+                data = await _get_json_capped(
+                    client, f"{base}/repos/{repo_id}/pipelines/{pipeline_id}/config", headers
                 )
-                _check_response(resp)
-                data = resp.json()
             configs = [c for c in (data if isinstance(data, list) else []) if isinstance(c, dict)]
             if not configs:
                 ac.finish("error:no_config", "no config files for pipeline")

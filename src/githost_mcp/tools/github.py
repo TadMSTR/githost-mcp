@@ -29,12 +29,16 @@ log = structlog.get_logger(__name__)
 # so it is safe on an empty list, and unlike totalCount it costs no extra API call.
 
 # GitHub full names are always exactly 'owner/repo' (one slash, no numeric-ID form).
-_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+# `\Z`, not `$`: `$` also matches before a trailing newline, so `re.match` accepted
+# "owner/repo\n" (KB IV-70). The lookaheads refuse a `.` or `..` segment: the segments go
+# into URL paths, and httpx resolves dot segments, so "../.." retargeted the request
+# (KB IV-23; githost-scoped-2026-11 p1 pre-audit).
+_REPO_RE = re.compile(r"\A(?!\.\.?/)[a-zA-Z0-9_.-]+/(?!\.\.?\Z)[a-zA-Z0-9_.-]+\Z")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
 
 # A single owner/org segment — github_fork takes owner and repo separately, and the
 # org it forks into is a bare name with no slash.
-_OWNER_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
+_OWNER_RE = re.compile(r"\A(?!\.\.?\Z)[a-zA-Z0-9_.-]+\Z")
 _OWNER_FMT_ERR = "org must be a single name (alphanumeric, hyphens, underscores, dots)"
 
 
