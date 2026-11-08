@@ -126,7 +126,10 @@ async def _get_json_capped(client: httpx.AsyncClient, url: str, headers: dict[st
         data, cut = await logview.aread_capped(resp.aiter_bytes())
     _check_response(
         httpx.Response(
-            resp.status_code, headers=resp.headers, content=data[:4096], request=resp.request
+            resp.status_code,
+            headers=logview.decoded_headers(resp.headers),
+            content=data[:4096],
+            request=resp.request,
         )
     )
     if cut:
@@ -623,6 +626,7 @@ def register(mcp) -> None:
             {"repo": repo, "pipeline_id": pipeline_id},
         )
         try:
+            _validate_pipeline_id(pipeline_id)
             owner, name = repo.split("/", 1)
             base = _woodpecker_base()
             headers = _woodpecker_headers()

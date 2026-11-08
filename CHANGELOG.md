@@ -66,6 +66,27 @@ Closes #1425 (id 1508); the githost half of #1389 (id 1472).
 - **CI log bodies are byte-capped before parsing** (32 MiB), and the read stops at the cap:
   Woodpecker log and config responses (refused past the cap), and Gitea job logs (cut, and
   flagged `download_cut`).
+- **A cut log drops its partial last line.** The cap can fall inside a token, which the
+  scrubber can't recognise by halves; `tail` returned exactly that line. Everything after
+  the last newline of a cut body is now dropped (GitHub and Gitea job logs).
+- **The signed Actions log URL no longer reaches the DEBUG log.** httpcore's trace line
+  for the 302 carried the `Location` header; its query is now redacted, as the httpx INFO
+  line's already was.
+
+### Fixed (review of this release, before merge)
+
+- `grep` matched only the first 2,000 characters of a line (the display cut), so a later
+  hit read as `match_count: 0`. It now matches the whole scrubbed line.
+- With `context`, `grep` spent the line budget on the context before a hit; each hit is now
+  taken first. A `range` grep with no hit returns `returned_to` at the end of the scanned
+  range, so paging advances.
+- A body that ends exactly on the cap no longer waits for one more chunk.
+- Log and config reads from a server that compresses responses (`content-encoding: gzip`)
+  failed while rebuilding the response; the body-framing headers are now dropped.
+- `github_commit_checks`: an error while reading annotations keeps the status answer and
+  sets `annotations_error`; `statuses_truncated` flags a partial first page;
+  `annotations_truncated` is also true when check runs past 100 were never inspected.
+- `woodpecker_pipeline_cancel` validates `pipeline_id` like the other pipeline tools.
 
 ## [0.17.0] — 2026-10-26
 

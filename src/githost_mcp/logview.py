@@ -35,17 +35,21 @@ DOWNLOAD_MAX = 32 * 1024 * 1024
 
 
 def read_capped(chunks, cap: int | None = None) -> tuple[bytes, bool]:
-    """Join byte chunks up to `cap` bytes. Returns (data, cut); stops at the cap."""
+    """Join byte chunks up to `cap` bytes. Returns (data, cut); stops at the cap.
+
+    Reaching the cap exactly counts as cut: asking for one more chunk only to learn whether
+    the body ended there would block on a stalled stream (CodeRabbit CR-05, PR #34). A body
+    of exactly `cap` bytes is therefore reported cut, which costs at most its last line.
+    """
     cap = DOWNLOAD_MAX if cap is None else cap
     out: list[bytes] = []
     size = 0
     for chunk in chunks:
         room = cap - size
-        if len(chunk) > room:
-            out.append(chunk[:room])
+        out.append(chunk[:room])
+        size += min(len(chunk), room)
+        if size >= cap:
             return b"".join(out), True
-        out.append(chunk)
-        size += len(chunk)
     return b"".join(out), False
 
 
@@ -56,12 +60,36 @@ async def aread_capped(chunks, cap: int | None = None) -> tuple[bytes, bool]:
     size = 0
     async for chunk in chunks:
         room = cap - size
-        if len(chunk) > room:
-            out.append(chunk[:room])
+        out.append(chunk[:room])
+        size += min(len(chunk), room)
+        if size >= cap:
             return b"".join(out), True
-        out.append(chunk)
-        size += len(chunk)
     return b"".join(out), False
+
+
+def decode_capped(data: bytes, cut: bool) -> str:
+    """Decode a capped log body, dropping the partial last line of a cut one.
+
+    The cap can fall inside a line, and so inside a token or a `scheme://user:pass@` URL.
+    scrub() can't recognise half a credential, and `tail` returns exactly that line, so
+    everything after the last newline of a cut body is dropped before the view sees it
+    (audit F-03, githost-scoped-2026-11 p1).
+    """
+    if cut:
+        nl = data.rfind(b"\n")
+        data = data[: nl + 1] if nl >= 0 else b""
+    return data.decode("utf-8", "replace")
+
+
+# Rebuilding an httpx.Response from an already-decoded body with the upstream headers makes
+# httpx try to decode it again: `content-encoding: gzip` over plain bytes raises
+# DecodingError in the constructor (CodeRabbit CR-03, PR #34).
+_BODY_FRAMING_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+
+
+def decoded_headers(headers) -> dict[str, str]:
+    """Upstream headers minus body framing, for a Response rebuilt from decoded bytes."""
+    return {k: v for k, v in headers.items() if k.lower() not in _BODY_FRAMING_HEADERS}
 
 
 def _has_control(text: str) -> bool:
@@ -126,9 +154,8 @@ def split_text(text: str) -> list[str]:
     return lines
 
 
-def _prepare(line: str) -> str:
-    # Scrub before cutting: a cut can split a token and leave an unmatched prefix.
-    shown = scrub(collapse_cr(line))
+def _cut(shown: str) -> str:
+    # Callers scrub first: a cut can split a token and leave an unmatched prefix.
     if len(shown) > MAX_LINE_CHARS:
         shown = shown[:MAX_LINE_CHARS] + _LINE_CUT_MARK
     return shown
@@ -162,6 +189,39 @@ def _take(indices: list[int], lines: list[str], from_end: bool, max_lines: int) 
     if from_end:
         picked.reverse()
     return picked
+
+
+def _take_hits(
+    hits: list[int],
+    context: int,
+    lo: int,
+    hi: int,
+    lines: list[str],
+    from_end: bool,
+    max_lines: int,
+) -> list[int]:
+    """Pick each hit, then its context nearest-first, until a cap is reached.
+
+    Taking the merged windows in line order spent the budget on the context before a hit:
+    `limit=1, context=1` returned only the line above the match (CodeRabbit CR-09, PR #34).
+    """
+    picked: set[int] = set()
+    used = 0
+    for h in reversed(hits) if from_end else hits:
+        window = [h]
+        for d in range(1, context + 1):
+            window += [i for i in (h - d, h + d) if lo <= i < hi]
+        for i in window:
+            if i in picked:
+                continue
+            if len(picked) >= max_lines:
+                return sorted(picked)
+            cost = len(lines[i].encode("utf-8")) + 1
+            if picked and used + cost > MAX_BYTES:
+                return sorted(picked)
+            picked.add(i)
+            used += cost
+    return sorted(picked)
 
 
 def _segments(picked: list[int], lines: list[str]) -> list[dict[str, Any]]:
@@ -202,14 +262,16 @@ def view(
     cannot be used to test whether a redacted credential is present.
     """
     validate_view(mode, offset, limit, grep, context)
-    lines = [_prepare(line) for line in raw_lines]
+    scrubbed = [scrub(collapse_cr(line)) for line in raw_lines]
+    lines = [_cut(s) for s in scrubbed]
     total = len(lines)
     max_lines = min(limit, MAX_LINES)
 
     if mode == "range":
-        candidates = list(range(min(offset, total), min(offset + limit, total)))
+        lo, hi = min(offset, total), min(offset + limit, total)
     else:
-        candidates = list(range(total))
+        lo, hi = 0, total
+    candidates = list(range(lo, hi))
 
     result: dict[str, Any] = {"mode": mode, "total_lines": total}
 
@@ -217,20 +279,29 @@ def view(
         picked = _take(candidates, lines, mode == "tail", max_lines)
         result["lines"] = [lines[i] for i in picked]
     else:
+        # Match on the whole scrubbed line, not the display cut: a hit past character
+        # MAX_LINE_CHARS was reported as `match_count: 0` (audit F-04).
         needle = grep.lower() if ignore_case else grep
-        hits = [i for i in candidates if needle in (lines[i].lower() if ignore_case else lines[i])]
-        covered = _merge_windows(hits, context, total)
-        if mode == "range":
-            lo, hi = (candidates[0], candidates[-1] + 1) if candidates else (0, 0)
-            covered = [i for i in covered if lo <= i < hi]
-        picked = _take(covered, lines, mode == "tail", max_lines)
+        hits = [
+            i for i in candidates if needle in (scrubbed[i].lower() if ignore_case else scrubbed[i])
+        ]
+        covered = [i for i in _merge_windows(hits, context, total) if lo <= i < hi]
+        picked = _take_hits(hits, context, lo, hi, lines, mode == "tail", max_lines)
         hit_set = set(hits)
         result["match_count"] = len(hits)
         result["matches_returned"] = sum(1 for i in picked if i in hit_set)
         result["segments"] = _segments(picked, lines)
         candidates = covered
 
-    result["returned_from"] = picked[0] if picked else None
-    result["returned_to"] = picked[-1] + 1 if picked else None
+    if picked:
+        result["returned_from"] = picked[0]
+        result["returned_to"] = picked[-1] + 1
+    elif mode == "range":
+        # An empty page still advances: the next one starts after the scanned range
+        # (CodeRabbit CR-10, PR #34). Otherwise a range grep with no hit returned
+        # `returned_to: null` and the documented paging stopped.
+        result["returned_from"] = result["returned_to"] = hi
+    else:
+        result["returned_from"] = result["returned_to"] = None
     result["truncated"] = len(picked) < len(candidates)
     return result

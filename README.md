@@ -276,10 +276,13 @@ id comes back separately as `internal_id`, for reference only; no tool accepts i
 `github_actions get_job_log` share one bounded, scrubbed reader (`logview.py`, 0.18.0):
 
 - `mode`: `tail`, `head` or `range` (`offset`, `limit`). Line numbers are 0-based;
-  `returned_to` is exclusive, so the next page starts at `offset=returned_to`.
+  `returned_to` is exclusive, so the next page starts at `offset=returned_to`. A `range`
+  page that returns nothing (a grep with no hit) still sets `returned_to` to the end of
+  the scanned range, so paging advances.
 - `grep`: a **literal substring**, not a regex (at most 200 characters, no control
   characters), with `ignore_case` and `context` (0–20 lines). Hits come back as
-  `segments`, with overlapping windows merged. Matching runs on the scrubbed text.
+  `segments`, with overlapping windows merged. Matching runs on the whole scrubbed line,
+  before the 2,000-character display cut, and each hit is taken before its context.
 - At most 500 lines and about 64 KB per response; `total_lines` and `truncated` are
   present whenever lines come back (a step that has not started returns `lines: null`
   and a `note` instead). Carriage-return progress redraws collapse to the last one.

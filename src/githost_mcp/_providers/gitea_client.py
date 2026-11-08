@@ -8,7 +8,7 @@ import httpx
 import structlog
 
 from ..config import get_config
-from ..logview import aread_capped
+from ..logview import aread_capped, decode_capped, decoded_headers
 
 log = structlog.get_logger(__name__)
 
@@ -124,9 +124,11 @@ async def gitea_get_text_capped(path: str) -> tuple[str, bool]:
             ) as resp:
                 data, cut = await aread_capped(resp.aiter_bytes())
             _check_gitea_response(
-                httpx.Response(resp.status_code, headers=resp.headers, content=data[:4096])
+                httpx.Response(
+                    resp.status_code, headers=decoded_headers(resp.headers), content=data[:4096]
+                )
             )
-            return data.decode("utf-8", "replace"), cut
+            return decode_capped(data, cut), cut
     except ValueError:
         raise
     except Exception as e:

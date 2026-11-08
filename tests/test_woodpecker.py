@@ -497,3 +497,37 @@ async def test_woodpecker_missing_url(tools, monkeypatch):
     result = await tools["woodpecker_trigger"]("owner/repo")
     assert "error" in result
     assert "WOODPECKER_URL" in result["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pipeline_id", [0, -1])
+async def test_woodpecker_pipeline_cancel_rejects_bad_pipeline_id(tools, pipeline_id):
+    # CR-15: cancel now validates the number like every other pipeline tool.
+    with respx.mock:
+        lookup = _lookup_mock()
+        route = respx.delete(f"{REPO_URL}/pipelines/{pipeline_id}").mock(
+            return_value=httpx.Response(204)
+        )
+        result = await tools["woodpecker_pipeline_cancel"]("owner/repo", pipeline_id)
+    assert "pipeline_id must be" in result["error"]
+    assert not route.called and not lookup.called
+
+
+@pytest.mark.asyncio
+async def test_get_json_capped_from_a_compressing_server():
+    # CR-03: `content-encoding: gzip` copied onto the rebuilt Response raised DecodingError.
+    import gzip
+
+    from githost_mcp.tools.woodpecker import _get_json_capped
+
+    url = f"{REPO_URL}/logs/1/10"
+    with respx.mock:
+        respx.get(url).mock(
+            return_value=httpx.Response(
+                200,
+                content=gzip.compress(json.dumps([{"line": 0}]).encode()),
+                headers={"content-encoding": "gzip", "content-type": "application/json"},
+            )
+        )
+        async with httpx.AsyncClient() as client:
+            assert await _get_json_capped(client, url, {}) == [{"line": 0}]

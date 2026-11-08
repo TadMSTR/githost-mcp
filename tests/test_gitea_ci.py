@@ -86,9 +86,14 @@ async def test_job_log_range_and_grep(tools):
 
 @pytest.mark.asyncio
 async def test_job_log_bad_view_args_rejected_before_request(tools):
+    # CR-17: a mock with no routes turned any request into an error the tool caught, so
+    # the test passed even if validation ran after the request. Route it and assert it
+    # was never called, and that the error is the validation one.
     with respx.mock:
+        route = respx.get(f"{GA}/jobs/3/logs").mock(return_value=httpx.Response(200, text="x\n"))
         r = await tools["gitea_actions"]("testowner/repo", "get_job_log", job_id=3, context=99)
-    assert "error" in r
+    assert "context must be between" in r["error"]
+    assert not route.called
 
 
 @pytest.mark.asyncio
@@ -243,3 +248,32 @@ async def test_commit_status_ref_with_trailing_newline_refused(tools):
     with respx.mock:
         r = await tools["gitea_commit_status"]("testowner/repo", "main\n")
     assert "ref must be" in r.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_job_log_from_a_compressing_server(tools):
+    # CR-03: rebuilding a Response with `content-encoding: gzip` over decoded bytes raised
+    # DecodingError, so every read from a compressing Gitea or proxy failed.
+    import gzip
+
+    body = gzip.compress(b"one\ntwo\n")
+    with respx.mock:
+        respx.get(f"{GA}/jobs/3/logs").mock(
+            return_value=httpx.Response(200, content=body, headers={"content-encoding": "gzip"})
+        )
+        r = await tools["gitea_actions"]("testowner/repo", "get_job_log", job_id=3)
+    assert r["lines"] == ["one", "two"]
+
+
+@pytest.mark.asyncio
+async def test_job_log_cut_drops_partial_last_line(tools, monkeypatch):
+    # F-03 at the Gitea call site.
+    from githost_mcp import logview
+
+    monkeypatch.setattr(logview, "DOWNLOAD_MAX", 12)
+    with respx.mock:
+        respx.get(f"{GA}/jobs/3/logs").mock(
+            return_value=httpx.Response(200, text="first\nsecret-prefix-of-a-token\n")
+        )
+        r = await tools["gitea_actions"]("testowner/repo", "get_job_log", job_id=3)
+    assert r["lines"] == ["first"] and r["download_cut"] is True

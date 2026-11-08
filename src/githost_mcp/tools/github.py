@@ -1020,32 +1020,43 @@ def register(mcp) -> None:
                 "sha": commit.sha,
                 "state": combined.state,
                 "statuses": statuses,
+                # `statuses` is GitHub's first page only; `state` covers every context
+                # (CodeRabbit CR-13, PR #34).
+                "statuses_truncated": (combined.total_count or 0) > len(statuses),
                 "check_runs": check_runs,
                 "check_runs_truncated": runs_cut,
             }
             if annotations:
                 found: list[dict] = []
                 more = False
-                for cr in runs:
-                    if cr.conclusion not in _FAILED_CONCLUSIONS:
-                        continue
-                    for a in github_call(cr.get_annotations):
-                        if len(found) >= _MAX_ANNOTATIONS:
-                            more = True
+                # PyGithub fetches later annotation pages lazily, outside github_call, so a
+                # rate limit here must not discard the status answer already built
+                # (audit F-06).
+                try:
+                    for cr in runs:
+                        if cr.conclusion not in _FAILED_CONCLUSIONS:
+                            continue
+                        for a in github_call(cr.get_annotations):
+                            if len(found) >= _MAX_ANNOTATIONS:
+                                more = True
+                                break
+                            found.append(
+                                {
+                                    "check_run": cr.name,
+                                    "path": a.path,
+                                    "start_line": a.start_line,
+                                    "level": a.annotation_level,
+                                    "message": _bounded_text(a.message),
+                                }
+                            )
+                        if more:
                             break
-                        found.append(
-                            {
-                                "check_run": cr.name,
-                                "path": a.path,
-                                "start_line": a.start_line,
-                                "level": a.annotation_level,
-                                "message": _bounded_text(a.message),
-                            }
-                        )
-                    if more:
-                        break
+                except Exception as e:
+                    result["annotations_error"] = _err(e)["error"]
                 result["annotations"] = found
-                result["annotations_truncated"] = more
+                # Check runs past _MAX_CHECK_RUNS were never inspected, so their
+                # annotations are missing too (CodeRabbit CR-14, PR #34).
+                result["annotations_truncated"] = more or runs_cut
             ac.finish("ok")
             return result
         except Exception as e:

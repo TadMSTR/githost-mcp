@@ -60,7 +60,8 @@ def test_range_pages_with_returned_to():
 def test_range_past_end_is_empty_not_an_error():
     r = view(_lines(5), mode="range", offset=50, limit=10)
     assert r["lines"] == []
-    assert r["returned_from"] is None and r["returned_to"] is None
+    # An empty range page reports the end of what it scanned (CR-10), clamped to the log.
+    assert r["returned_from"] == r["returned_to"] == 5
     assert r["truncated"] is False
 
 
@@ -299,3 +300,87 @@ async def test_aread_capped_stops_at_cap_without_draining():
     data, cut = await logview.aread_capped(gen(), cap=25)
     assert (len(data), cut) == (25, True)
     assert len(seen) == 3
+
+
+# --- audit round 1 fixes (githost-scoped-2026-11 p1) ----------------------------------------
+
+
+def test_read_capped_stops_when_cap_reached_exactly():
+    # CR-05: a chunk landing exactly on the cap must not trigger a read of the next one,
+    # which on a stalled stream would block until the timeout.
+    seen = []
+    data, cut = logview.read_capped(_chunks(1000, 10, seen), cap=20)
+    assert (len(data), cut) == (20, True)
+    assert len(seen) == 2
+
+
+@pytest.mark.asyncio
+async def test_aread_capped_stops_when_cap_reached_exactly():
+    seen = []
+
+    async def gen():
+        for i in range(1000):
+            seen.append(i)
+            yield b"y" * 10
+
+    data, cut = await logview.aread_capped(gen(), cap=20)
+    assert (len(data), cut) == (20, True)
+    assert len(seen) == 2
+
+
+TOKEN = "wp_known_token_1234567890abcdef"
+
+
+@pytest.mark.parametrize("split", range(1, len(TOKEN)))
+def test_cut_body_drops_partial_last_line_so_a_split_token_never_shows(split):
+    # F-03: the byte cap can fall inside a token; its prefix must not reach `tail`.
+    body = ("ok line\n" + "token " + TOKEN + "\n").encode()
+    at = body.index(TOKEN.encode()) + split
+    data, cut = logview.read_capped(iter([body]), cap=at)
+    r = view(split_text(logview.decode_capped(data, cut)), mode="tail")
+    assert r["lines"] == ["ok line"]
+    assert not any(TOKEN[:split] in line for line in r["lines"])
+
+
+def test_decode_capped_keeps_whole_body_when_not_cut():
+    assert logview.decode_capped(b"a\nb", False) == "a\nb"
+    assert logview.decode_capped(b"no newline at all", True) == ""
+    assert logview.decode_capped(b"a\nb\n", True) == "a\nb\n"
+
+
+def test_grep_finds_a_match_past_the_line_cut():
+    # F-04: probe from audit.md — 2,500 x then FAILED here.
+    r = view(["x" * 2500 + "FAILED here", "other"], mode="tail", grep="FAILED")
+    assert r["match_count"] == 1 and r["matches_returned"] == 1
+    assert r["segments"][0]["lines"][0].endswith("…[line cut]")
+
+
+def test_grep_past_the_cut_still_cannot_probe_a_scrubbed_credential():
+    r = view(["x" * 2500 + TOKEN], mode="tail", grep=TOKEN[:12])
+    assert r["match_count"] == 0
+
+
+@pytest.mark.parametrize("mode", ["head", "tail"])
+def test_grep_budget_goes_to_the_hit_before_its_context(mode):
+    # CR-09: limit=1, context=1 returned only the line above the match.
+    r = view(["a", "b", "HIT", "c", "d"], mode=mode, grep="HIT", context=1, limit=1)
+    assert r["segments"] == [{"from": 2, "to": 3, "lines": ["HIT"]}]
+    assert r["matches_returned"] == 1 and r["truncated"] is True
+
+
+def test_grep_context_nearest_first_and_merged():
+    r = view([f"l{i}" for i in range(10)], mode="head", grep="l5", context=2, limit=3)
+    assert r["segments"] == [{"from": 4, "to": 7, "lines": ["l4", "l5", "l6"]}]
+
+
+def test_range_grep_with_no_hit_still_advances():
+    # CR-10: an empty page returned `returned_to: null`, so paging stopped.
+    r = view(_lines(1000), mode="range", offset=100, limit=200, grep="nope")
+    assert r["returned_to"] == 300 and r["truncated"] is False
+    r = view(_lines(50), mode="range", offset=40, limit=200, grep="nope")
+    assert r["returned_to"] == 50
+
+
+def test_decoded_headers_drops_body_framing():
+    h = {"Content-Encoding": "gzip", "content-length": "9", "Transfer-Encoding": "x", "A": "b"}
+    assert logview.decoded_headers(h) == {"A": "b"}

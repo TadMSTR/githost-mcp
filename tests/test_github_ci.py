@@ -239,10 +239,11 @@ def _annotation(i):
     return a
 
 
-def _commit_gh(runs, statuses=()):
+def _commit_gh(runs, statuses=(), total_count=None):
     combined = MagicMock()
     combined.state = "success"
     combined.statuses = list(statuses)
+    combined.total_count = len(combined.statuses) if total_count is None else total_count
     commit = MagicMock()
     commit.sha = "a" * 40
     commit.get_combined_status.return_value = combined
@@ -298,6 +299,75 @@ def test_commit_checks_caps_check_runs(tools):
     with p1, p2:
         r = tools["github_commit_checks"]("owner/repo", "main")
     assert len(r["check_runs"]) == 100 and r["check_runs_truncated"] is True
+
+
+def test_commit_checks_flags_a_partial_statuses_page(tools):
+    # CR-13: `statuses` is the first page; total_count says how many contexts exist.
+    st = MagicMock()
+    st.context, st.state, st.target_url, st.description = "ci/a", "success", None, None
+    st.updated_at = None
+    gh, _ = _commit_gh([], [st], total_count=150)
+    p1, p2 = _patch_gh(gh)
+    with p1, p2:
+        r = tools["github_commit_checks"]("owner/repo", "main")
+    assert r["statuses_truncated"] is True
+    gh, _ = _commit_gh([], [st])
+    p1, p2 = _patch_gh(gh)
+    with p1, p2:
+        r = tools["github_commit_checks"]("owner/repo", "main")
+    assert r["statuses_truncated"] is False
+
+
+def test_commit_checks_annotations_truncated_when_runs_capped(tools):
+    # CR-14: a failed run past the 100-run cap was never inspected.
+    runs = [_check_run(f"r{i}", "success") for i in range(100)]
+    runs.append(_check_run("late-fail", "failure", [_annotation(1)]))
+    gh, _ = _commit_gh(runs)
+    p1, p2 = _patch_gh(gh)
+    with p1, p2:
+        r = tools["github_commit_checks"]("owner/repo", "main", annotations=True)
+    assert r["annotations"] == [] and r["annotations_truncated"] is True
+
+
+def test_commit_checks_annotation_error_keeps_status_answer(tools):
+    # F-06: a failure while paging annotations keeps the runs and the state.
+    class _Pages:
+        def __iter__(self):
+            yield _annotation(1)
+            raise RuntimeError("403 rate limit token ghp_" + "x" * 36)
+
+    bad = _check_run("test", "failure")
+    bad.get_annotations.return_value = _Pages()
+    gh, _ = _commit_gh([bad])
+    p1, p2 = _patch_gh(gh)
+    with p1, p2:
+        r = tools["github_commit_checks"]("owner/repo", "main", annotations=True)
+    assert "error" not in r
+    assert r["state"] == "success" and r["check_runs"][0]["name"] == "test"
+    assert len(r["annotations"]) == 1
+    assert "rate limit" in r["annotations_error"]
+
+
+@pytest.mark.parametrize(
+    "name", ["httpcore.connection", "httpcore.http11", "httpcore.http2", "httpcore.proxy"]
+)
+def test_signed_blob_query_never_reaches_the_httpcore_debug_log(tools, name):
+    # CR-04: at DEBUG, httpcore logs the 302's response headers, Location included, as one
+    # pre-formatted string on its own module logger. Run a record through that logger's
+    # filters directly: whether DEBUG is enabled in the test run must not decide the result.
+    import logging
+
+    logger = logging.getLogger(name)
+    msg = (
+        "receive_response_headers.complete return_value=(b'HTTP/1.1', 302, b'Found', "
+        f"[(b'Location', b'{BLOB}'), (b'X-Other', b'https://example.com/a?keep=1')])"
+    )
+    rec = logger.makeRecord(name, logging.DEBUG, __file__, 1, msg, None, None)
+    assert logger.filter(rec)
+    text = rec.getMessage()
+    assert "productionresultssa5.blob.core.windows.net" in text
+    assert "SIGNEDsecretVALUE" not in text
+    assert "https://example.com/a?keep=1" in text  # other hosts untouched
 
 
 @pytest.mark.parametrize("ref", ["", "-x", "a..b", "../x", "x y", "x" * 300])

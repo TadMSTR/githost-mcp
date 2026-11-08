@@ -10,7 +10,7 @@ import httpx
 import structlog
 
 from ..config import get_config
-from ..logview import DOWNLOAD_MAX, read_capped
+from ..logview import DOWNLOAD_MAX, decode_capped, read_capped
 
 log = structlog.get_logger(__name__)
 
@@ -99,9 +99,49 @@ def _is_log_host(host: str | None) -> bool:
     return any(rx.match(host or "") for rx in _LOG_HOST_RES)
 
 
+_URL_WITH_QUERY_RE = re.compile(r"https://([A-Za-z0-9.-]+)(:\d+)?([^\s'\"?]*)\?[^\s'\"]*")
+
+
+def _redact_signed_urls(text: str) -> str:
+    def repl(m: re.Match) -> str:
+        if _is_log_host(m.group(1).lower()):
+            return f"https://{m.group(1)}{m.group(2) or ''}{m.group(3)}?redacted"
+        return m.group(0)
+
+    return _URL_WITH_QUERY_RE.sub(repl, text)
+
+
+class _SignedLogUrlTraceFilter(logging.Filter):
+    """Strip the signed query from Actions log-host URLs in httpcore's DEBUG trace lines.
+
+    httpcore logs `receive_response_headers.complete return_value=(..., [(b'Location',
+    b'https://...?sig=...')])` as one pre-formatted string, so the 302's signed blob URL
+    reached the app log at LOG_LEVEL=DEBUG (CodeRabbit CR-04, PR #34). The message is
+    rewritten only when it carries no args, so a formatted record keeps its shape.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not record.args and isinstance(record.msg, str):
+            record.msg = _redact_signed_urls(record.msg)
+        return True
+
+
 _URL_LOG_FILTER = _SignedLogUrlFilter()
 if _URL_LOG_FILTER not in logging.getLogger("httpx").filters:
     logging.getLogger("httpx").addFilter(_URL_LOG_FILTER)
+
+# Logger filters don't propagate: each httpcore module logs on its own named logger.
+_HTTPCORE_LOGGERS = (
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.proxy",
+    "httpcore.socks",
+)
+_TRACE_LOG_FILTER = _SignedLogUrlTraceFilter()
+for _name in _HTTPCORE_LOGGERS:
+    if _TRACE_LOG_FILTER not in logging.getLogger(_name).filters:
+        logging.getLogger(_name).addFilter(_TRACE_LOG_FILTER)
 
 
 def fetch_job_log(repo: str, job_id: int) -> tuple[str, bool]:
@@ -148,4 +188,4 @@ def fetch_job_log(repo: str, job_id: int) -> tuple[str, bool]:
             if blob.status_code != 200:
                 raise ValueError(f"Job log download failed: HTTP {blob.status_code}")
             data, cut = read_capped(blob.iter_bytes(), LOG_DOWNLOAD_MAX)
-            return data.decode("utf-8", "replace"), cut
+            return decode_capped(data, cut), cut
