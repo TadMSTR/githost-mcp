@@ -62,6 +62,7 @@ from ..security import (
     canonical_path,
     redact_url_credentials,
     scrub,
+    url_host,
     validate_branch_name,
     validate_read_path,
     validate_remote_name,
@@ -108,7 +109,6 @@ def _gitea_host(gitea_url: str) -> str:
 
 
 _ABBREV_SHA_RE = re.compile(r"[0-9a-f]{4,40}")
-_HOST_RE = re.compile(r"[A-Za-z0-9.-]{1,253}")
 
 
 def _head_sha(repo: git.Repo) -> str | None:
@@ -265,19 +265,6 @@ def clear_merge_state(repo: git.Repo) -> None:
     for name in _MERGE_STATE_FILES:
         with contextlib.suppress(FileNotFoundError):
             (Path(repo.git_dir) / name).unlink()
-
-
-def url_host(url: str) -> str | None:
-    """The host of a remote URL, never the URL: `https://u:p@host/x` and `git@host:x` → host.
-
-    Total: it runs after a side effect (git_remote add, git_clone), so it must never raise.
-    urlsplit refuses some URLs validate_remote_url accepts (an unbalanced `[`); those are None.
-    """
-    try:
-        host = urlsplit(url).hostname if "://" in url else url.split("@", 1)[-1].split(":", 1)[0]
-    except ValueError:
-        return None
-    return host if host and _HOST_RE.fullmatch(host) else None
 
 
 _PROVENANCE_SECTION = "githost-mcp"

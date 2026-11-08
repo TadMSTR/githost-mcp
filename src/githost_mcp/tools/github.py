@@ -1018,7 +1018,8 @@ def register(mcp) -> None:
                     "context": st.context,
                     "state": st.state,
                     "description": _bounded_text(st.description),
-                    "target_url": st.target_url,
+                    # Scrubbed and capped like description (#1431 F-07).
+                    "target_url": _bounded_text(st.target_url),
                     "updated_at": _iso(st.updated_at),
                 }
                 for st in (combined.statuses or [])

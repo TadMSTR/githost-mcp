@@ -375,3 +375,17 @@ async def test_job_log_cut_drops_partial_last_line(tools, monkeypatch):
         )
         r = await tools["gitea_actions"]("testowner/repo", "get_job_log", job_id=3)
     assert r["lines"] == ["first"] and r["download_cut"] is True
+
+
+@pytest.mark.asyncio
+async def test_commit_status_bounds_and_scrubs_target_url(tools):
+    """#1431 F-07: target_url is chosen by whoever posts the status."""
+    body = dict(STATUS)
+    body["statuses"] = [dict(STATUS["statuses"][0], target_url="https://u:pw88888@h/" + "x" * 2000)]
+    with respx.mock:
+        respx.get(url__startswith=f"{API}/commits/").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        r = await tools["gitea_commit_status"]("testowner/repo", "main")
+    url = r["statuses"][0]["target_url"]
+    assert "pw88888" not in url and len(url) <= 301

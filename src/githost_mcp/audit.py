@@ -437,7 +437,9 @@ def write_audit_entry(
         # finish() after `finished` is set and before the span ends, leaking the span.
         audit_dir = os.path.dirname(_audit_log_path)
         if audit_dir:
-            os.makedirs(audit_dir, exist_ok=True)
+            # 0700 when it is created here: the entries name repos, refs and the acting
+            # agent (#1434 R2-02). An existing directory keeps its mode.
+            os.makedirs(audit_dir, mode=0o700, exist_ok=True)
         # One lock for check-and-rotate plus write. Under the HTTP transport this
         # runs on a threadpool, so an unguarded rotate would race a concurrent
         # append and lose entries.

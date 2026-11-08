@@ -140,13 +140,23 @@ def _is_log_host(host: str | None) -> bool:
     return any(rx.match(host or "") for rx in _LOG_HOST_RES)
 
 
-_URL_WITH_QUERY_RE = re.compile(r"https://([A-Za-z0-9.-]+)(:\d+)?([^\s'\"?]*)\?[^\s'\"]*")
+# Case-insensitive scheme: the redirect allowlist follows an uppercase `HTTPS://` Location
+# too (#1431 R2-01). The groups cannot overlap (the host stops at `:`, `/` or `?`, and the
+# path must start with `/`) and every quantifier is possessive, so a long run with no `?`
+# is scanned once, not once per split point.
+_URL_WITH_QUERY_RE = re.compile(
+    r"(?i)(?P<scheme>https://)(?P<host>[A-Za-z0-9.-]++)(?P<port>:\d++)?"
+    r"(?P<path>/[^\s'\"?]*+)?\?[^\s'\"]*+"
+)
 
 
 def _redact_signed_urls(text: str) -> str:
     def repl(m: re.Match) -> str:
-        if _is_log_host(m.group(1).lower()):
-            return f"https://{m.group(1)}{m.group(2) or ''}{m.group(3)}?redacted"
+        if _is_log_host(m.group("host").lower()):
+            return (
+                f"{m.group('scheme')}{m.group('host')}{m.group('port') or ''}"
+                f"{m.group('path') or ''}?redacted"
+            )
         return m.group(0)
 
     return _URL_WITH_QUERY_RE.sub(repl, text)
@@ -171,13 +181,22 @@ _URL_LOG_FILTER = _SignedLogUrlFilter()
 if _URL_LOG_FILTER not in logging.getLogger("httpx").filters:
     logging.getLogger("httpx").addFilter(_URL_LOG_FILTER)
 
-# Logger filters don't propagate: each httpcore module logs on its own named logger.
-_HTTPCORE_LOGGERS = (
-    "httpcore.connection",
-    "httpcore.http11",
-    "httpcore.http2",
-    "httpcore.proxy",
-    "httpcore.socks",
+# Logger filters don't propagate: each httpcore module logs on its own named logger. The
+# names come from the logging registry (httpx has imported httpcore by now), plus the ones
+# known to exist, so a module httpcore adds is covered without editing a list (R2-01).
+_HTTPCORE_LOGGERS = sorted(
+    {
+        "httpcore.connection",
+        "httpcore.http11",
+        "httpcore.http2",
+        "httpcore.proxy",
+        "httpcore.socks",
+    }
+    | {
+        name
+        for name in logging.root.manager.loggerDict
+        if name == "httpcore" or name.startswith("httpcore.")
+    }
 )
 _TRACE_LOG_FILTER = _SignedLogUrlTraceFilter()
 for _name in _HTTPCORE_LOGGERS:

@@ -199,7 +199,8 @@ def register(mcp) -> None:
             except OSError as e:
                 # A backup we cannot read must not hide the results we did get.
                 if source == audit_path:
-                    return {"error": f"Cannot read audit log: {e}"}
+                    log.warning("audit_log_unreadable", path=source, error=str(e))
+                    return {"error": "Cannot read audit log (see the server log)"}
                 log.warning("audit_backup_unreadable", path=source, error=str(e))
 
         return {

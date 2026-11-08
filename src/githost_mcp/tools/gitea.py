@@ -855,7 +855,9 @@ def register(mcp) -> None:
                         # for the GitHub-compatible shape.
                         "state": st.get("status") or st.get("state"),
                         "description": _bounded_text(st.get("description")),
-                        "target_url": st.get("target_url"),
+                        # Scrubbed and capped like description: anyone who can post a
+                        # status chooses it (#1431 F-07).
+                        "target_url": _bounded_text(st.get("target_url")),
                         "updated_at": st.get("updated_at"),
                     }
                     for st in statuses

@@ -1,0 +1,90 @@
+{
+ "_about": "Real failure strings captured 2026-11-08 (githost-scoped-2026-11 p4, vikunja#913) from git/GitPython, PyGithub, httpx, twine 6 and npm 10 against a local stub server. <<GHP>>, <<BEARER>>, <<NPM>>, <<PYPI>>, <<GLPAT>> mark planted fake credentials; tests substitute shape-valid fakes. <<PORT>>, <<TMP>>, <<VENV>> are machine-specific values.",
+ "cases": [
+  {
+   "source": "gitpython",
+   "credential": false,
+   "text": "Cmd('git') failed due to: exit code(128)\n  cmdline: git ls-remote http://127.0.0.1:<<PORT>>/o/r.git\n  stderr: 'fatal: could not read Username for 'http://127.0.0.1:<<PORT>>': terminal prompts disabled'"
+  },
+  {
+   "source": "gitpython",
+   "credential": false,
+   "text": "Cmd('git') failed due to: exit code(128)\n  cmdline: git -c http.extraHeader=Authorization: ***** ls-remote http://127.0.0.1:<<PORT>>/o/r.git\n  stderr: 'fatal: could not read Username for 'http://127.0.0.1:<<PORT>>': terminal prompts disabled'"
+  },
+  {
+   "source": "gitpython",
+   "credential": false,
+   "text": "Cmd('git') failed due to: exit code(128)\n  cmdline: git -c http.extraHeader=Authorization: ***** ls-remote http://127.0.0.1:<<PORT>>/o/r.git\n  stderr: 'fatal: could not read Username for 'http://127.0.0.1:<<PORT>>': terminal prompts disabled'"
+  },
+  {
+   "source": "gitpython",
+   "credential": false,
+   "text": "Cmd('git') failed due to: exit code(128)\n  cmdline: git ls-remote https://127.0.0.1:9/o/r.git\n  stderr: 'fatal: unable to access 'https://127.0.0.1:9/o/r.git/': Failed to connect to 127.0.0.1 port 9 after 0 ms: Could not connect to server'"
+  },
+  {
+   "source": "gitpython",
+   "credential": false,
+   "text": "Cmd('git') failed due to: exit code(1)\n  cmdline: git push origin-missing main\n  stderr: 'error: src refspec main does not match any\nerror: failed to push some refs to 'origin-missing''"
+  },
+  {
+   "source": "gitpython",
+   "credential": false,
+   "text": "Cmd('git') failed due to: exit code(128)\n  cmdline: git rev-parse no-such-ref\n  stdout: 'no-such-ref'\n  stderr: 'fatal: ambiguous argument 'no-such-ref': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]''"
+  },
+  {
+   "source": "gitpython",
+   "credential": false,
+   "text": "NoSuchPathError: <<TMP>>/nope"
+  },
+  {
+   "source": "gitpython",
+   "credential": true,
+   "text": "Cmd('git') failed due to: exit code(128)\n  cmdline: git -c http.extraHeader=Authorization: ***** ls-remote http://127.0.0.1:<<PORT>>/o/r.git\n  stderr: '16:01:53.159505 http.c:913              == Info: Couldn't find host 127.0.0.1 in the .netrc file; using defaults\n16:01:53.159541 http.c:913              == Info:   Trying 127.0.0.1:<<PORT>>...\n16:01:53.159591 http.c:913              == Info: Connected to 127.0.0.1 (127.0.0.1) port <<PORT>>\n16:01:53.159593 http.c:913              == Info: using HTTP/1.x\n16:01:53.159612 http.c:860              => Send header, 0000000293 bytes (0x00000125)\n16:01:53.159614 http.c:872              => Send header: GET /o/r.git/info/refs?service=git-upload-pack HTTP/1.1\n16:01:53.159615 http.c:872              => Send header: Host: 127.0.0.1:<<PORT>>\n16:01:53.159615 http.c:872              => Send header: User-Agent: git/2.47.3\n16:01:53.159616 http.c:872              => Send header: Accept: */*\n16:01:53.159616 http.c:872              => Send header: Accept-Encoding: deflate, gzip, br, zstd\n16:01:53.159616 http.c:872              => Send header: Authorization: Bearer <<BEARER>>\n16:01:53.159617 http.c:872              => Send header: Accept-Language: C, *;q=0.9\n16:01:53.159617 http.c:872              => Send header: Pragma: no-cache\n16:01:53.159617 http.c:872              => Send header: Git-Protocol: version=2\n16:01:53.159618 http.c:872              => Send header:\n16:01:53.159624 http.c:913              == Info: Request completely sent off\n16:01:53.159721 http.c:913              == Info: HTTP 1.0, assume close after body\n16:01:53.159728 http.c:860              <= Recv header, 0000000027 bytes (0x0000001b)\n16:01:53.159729 http.c:872              <= Recv header: HTTP/1.0 401 Unauthorized\n16:01:53.159735 http.c:860              <= Recv header, 0000000037 bytes (0x00000025)\n16:01:53.159736 http.c:872              <= Recv header: Server: BaseHTTP/0.6 Python/3.12.13\n16:01:53.159737 http.c:860              <= Recv header, 0000000037 bytes (0x00000025)\n16:01:53.159738 http.c:872              <= Recv header: Date: Sun, 08 Nov 2026 21:01:53 GMT\n16:01:53.159740 http.c:860              <= Recv header, 0000000032 bytes (0x00000020)\n16:01:53.159741 http.c:872              <= Recv header: content-type: application/json\n16:01:53.159742 http.c:860              <= Recv header, 0000000020 bytes (0x00000014)\n16:01:53.159743 http.c:872              <= Recv header: content-length: 83\n16:01:53.159744 http.c:860              <= Recv header, 0000000002 bytes (0x00000002)\n16:01:53.159745 http.c:872              <= Recv header:\n16:01:53.159753 http.c:913              == Info: shutting down connection #0\nfatal: could not read Username for 'http://127.0.0.1:<<PORT>>': terminal prompts disabled'"
+  },
+  {
+   "source": "gitpython",
+   "credential": true,
+   "text": "Cmd('git') failed due to: exit code(1)\n  cmdline: git -c user.name=t -c user.email=t@t commit --allow-empty -m x\n  stderr: 'GITHUB_TOKEN=<<GHP>>\nauth: token <<GLPAT>>'"
+  },
+  {
+   "source": "pygithub",
+   "credential": false,
+   "text": "401 {\"message\": \"Bad credentials\", \"documentation_url\": \"https://docs.github.com/rest\"}"
+  },
+  {
+   "source": "pygithub",
+   "credential": false,
+   "text": "ConnectionError: HTTPConnectionPool(host='127.0.0.1', port=9): Max retries exceeded with url: /repos/o/r (Caused by NewConnectionError(\"HTTPConnection(host='127.0.0.1', port=9): Failed to establish a new connection: [Errno 111] Connection refused\"))"
+  },
+  {
+   "source": "httpx",
+   "credential": false,
+   "text": "Client error '401 Unauthorized' for url 'http://127.0.0.1:<<PORT>>/api/v1/repos/o/r'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401"
+  },
+  {
+   "source": "httpx",
+   "credential": false,
+   "text": "ConnectError: [Errno 111] Connection refused"
+  },
+  {
+   "source": "twine",
+   "credential": false,
+   "text": "Uploading distributions to http://127.0.0.1:<<PORT>>/legacy/\nUploading fixturepkg-0.0.1-py3-none-any.whl\n\u001b[?25l\n\u001b[2K\u001b[35m  0%\u001b[0m \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m0.0/2.3 kB\u001b[0m • \u001b[36m--:--\u001b[0m • \u001b[31m?\u001b[0m\n\u001b[2K\u001b[35m100%\u001b[0m \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m2.3/2.3 kB\u001b[0m • \u001b[33m00:00\u001b[0m • \u001b[31m?\u001b[0m\n\u001b[?25h\u001b[33mWARNING \u001b[0m Error during upload. Retry with the --verbose option for more details. \n\u001b[31mERROR   \u001b[0m HTTPError: 401 Unauthorized from http://127.0.0.1:<<PORT>>/legacy/        \n         Unauthorized                                                           \n"
+  },
+  {
+   "source": "twine",
+   "credential": false,
+   "text": "Traceback (most recent call last):\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/connection.py\", line 239, in _new_conn\n    sock = connection.create_connection(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/util/connection.py\", line 85, in create_connection\n    raise err\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/util/connection.py\", line 73, in create_connection\n    sock.connect(sa)\nConnectionRefusedError: [Errno 111] Connection refused\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/connectionpool.py\", line 793, in urlopen\n    response = self._make_request(\n               ^^^^^^^^^^^^^^^^^^^\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/connectionpool.py\", line 499, in _make_request\n    conn.request(\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/connection.py\", line 567, in request\n    self.endheaders()\n  File \"/home/ted/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py\", line 1353, in endheaders\n    self._send_output(message_body, encode_chunked=encode_chunked)\n  File \"/home/ted/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py\", line 1113, in _send_output\n    self.send(msg)\n  File \"/home/ted/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py\", line 1057, in send\n    self.connect()\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/connection.py\", line 398, in connect\n    self.sock = self._new_conn()\n                ^^^^^^^^^^^^^^^^\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/connection.py\", line 254, in _new_conn\n    raise NewConnectionError(\nurllib3.exceptions.NewConnectionError: HTTPConnection(host='127.0.0.1', port=9): Failed to establish a new connection: [Errno 111] Connection refused\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"<<VENV>>/lib/python3.12/site-packages/requests/adapters.py\", line 696, in send\n    resp = conn.urlopen(\n           ^^^^^^^^^^^^^\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/connectionpool.py\", line 886, in urlopen\n    return self.urlopen(\n           ^^^^^^^^^^^^^\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/connectionpool.py\", line 886, in urlopen\n    return self.urlopen(\n           ^^^^^^^^^^^^^\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/connectionpool.py\", line 886, in urlopen\n    return self.urlopen(\n           ^^^^^^^^^^^^^\n  [Previous line repeated 2 more times]\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/connectionpool.py\", line 847, in urlopen\n    retries = retries.increment(\n              ^^^^^^^^^^^^^^^^^^\n  File \"<<VENV>>/lib/python3.12/site-packages/urllib3/util/retry.py\", line 555, in increment\n    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nurllib3.exceptions.MaxRetryError: HTTPConnectionPool(host='127.0.0.1', port=9): Max retries exceeded with url: /legacy/ (Caused by NewConnectionError(\"HTTPConnection(host='127.0.0.1', port=9): Failed to establish a new connection: [Errno 111] Connection refused\"))\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"<<VENV>>/bin/twine\", line 10, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"<<VENV>>/lib/python3.12/site-packages/twine/__main__.py\", line 33, in main\n    error = cli.dispatch(sys.argv[1:])\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"<<VENV>>/lib/python3.12/site-packages/twine/cli.py\", line 135, in dispatch\n    return main(args.args)\n           ^^^^^^^^^^^^^^^\n  File \"<<VENV>>/lib/python3.12/site-packages/twine/commands/upload.py\", line 253, in main\n    return upload(upload_settings, parsed_args.dists)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
+  },
+  {
+   "source": "npm",
+   "credential": false,
+   "text": "npm notice\nnpm notice 📦  fixture-npm-pkg@0.0.1\nnpm notice Tarball Contents\nnpm notice 47B package.json\nnpm notice Tarball Details\nnpm notice name: fixture-npm-pkg\nnpm notice version: 0.0.1\nnpm notice filename: fixture-npm-pkg-0.0.1.tgz\nnpm notice package size: 145 B\nnpm notice unpacked size: 47 B\nnpm notice shasum: c5025bff2744b23527eb21345f4f4c5ee78286ee\nnpm notice integrity: sha512-wHSHZuhRWx/9q[...]pcnzpntaktfZg==\nnpm notice total files: 1\nnpm notice\nnpm notice Publishing to http://127.0.0.1:<<PORT>>/ with tag latest and default access\nnpm error code E401\nnpm error 401 Unauthorized - PUT http://127.0.0.1:<<PORT>>/fixture-npm-pkg\nnpm error A complete log of this run can be found in: <<TMP>>/npmcache/_logs/2026-11-08T21_01_53_787Z-debug-0.log\n"
+  },
+  {
+   "source": "npm",
+   "credential": false,
+   "text": "npm notice\nnpm notice 📦  fixture-npm-pkg@0.0.1\nnpm notice Tarball Contents\nnpm notice 47B package.json\nnpm notice Tarball Details\nnpm notice name: fixture-npm-pkg\nnpm notice version: 0.0.1\nnpm notice filename: fixture-npm-pkg-0.0.1.tgz\nnpm notice package size: 145 B\nnpm notice unpacked size: 47 B\nnpm notice shasum: c5025bff2744b23527eb21345f4f4c5ee78286ee\nnpm notice integrity: sha512-wHSHZuhRWx/9q[...]pcnzpntaktfZg==\nnpm notice total files: 1\nnpm notice\nnpm error code ENEEDAUTH\nnpm error need auth This command requires you to be logged in to http://127.0.0.1:9/\nnpm error need auth You need to authorize this machine using `npm adduser`\nnpm error A complete log of this run can be found in: <<TMP>>/npmcache/_logs/2026-11-08T21_01_53_927Z-debug-0.log\n"
+  }
+ ]
+}

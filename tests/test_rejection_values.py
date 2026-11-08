@@ -280,17 +280,38 @@ def test_reject_enum_with_a_huge_value_stays_fast():
 
 
 def test_scrub_output_matches_the_old_pattern():
-    """The linear pattern must redact exactly what the old one did."""
+    """The linear pattern redacts everything the old one did, and differs only where p4
+    meant it to (#1434 F-02): a head with more than one `@` now loses all of its userinfo,
+    and a credential in front of `/`, `?` or `#` before an `@` is now userinfo."""
     import random
     import re
 
-    from githost_mcp.security import redact_url_credentials
+    from githost_mcp.security import redact_url_credentials, split_authority
 
     old = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s]+@")
+    url = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://(?P<rest>\S*)")
+
+    def intended_difference(s):
+        for m in url.finditer(s):
+            userinfo, _host, _rest = split_authority(m.group("rest").split("'")[0])
+            if userinfo and ("@" in userinfo or any(c in userinfo for c in "/?#")):
+                return True
+        return False
+
     rng = random.Random(4)
     alphabet = "ab1+.-:/@ x"
+    differed = 0
     for _ in range(20_000):
         s = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 18)))
-        assert redact_url_credentials(s) == old.sub(lambda m: f"{m.group('scheme')}***@", s), s
+        expected = old.sub(lambda m: f"{m.group('scheme')}***@", s)
+        got = redact_url_credentials(s)
+        if got != expected:
+            differed += 1
+            assert intended_difference(s), (s, got, expected)
+            # Never less redaction: what the old pattern removed is gone here too.
+            for m in old.finditer(s):
+                secret = m.group(0)[len(m.group("scheme")) : -1]
+                assert f"{m.group('scheme')}{secret}@" not in got, (s, got)
+    assert differed, "precondition: the fuzz reaches the intended differences"
     for s in ("1https://tok@h", "x.1git://u:p@h/x", "see https://t@h and ssh://git@h:22/p"):
         assert redact_url_credentials(s) == old.sub(lambda m: f"{m.group('scheme')}***@", s)

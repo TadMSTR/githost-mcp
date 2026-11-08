@@ -90,7 +90,8 @@ def register(mcp) -> None:
             repo = git.Repo(repo_path, search_parent_directories=False, expand_vars=False)
         except Exception as e:
             ac.finish("error:git", e)
-            return {"error": f"Cannot open repo: {e}"}
+            log.warning("release_repo_open_failed", error=scrub(str(e)))
+            return {"error": "Cannot open repo: not a readable git repository"}
 
         if repo.is_dirty(untracked_files=False):
             ac.finish("error:dirty", "working tree is dirty")
@@ -148,7 +149,8 @@ def register(mcp) -> None:
                 emit_release_target("github", "error")
                 await _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
                 ac.finish("error:github", e)
-                return {"error": f"GitHub release failed: {e}", "rolled_back": True}
+                log.warning("release_target_failed", target="github", error=scrub(str(e)))
+                return {"error": "GitHub release failed (see the audit log)", "rolled_back": True}
 
         # Step 3: Gitea release
         if "gitea" in effective_targets and gitea_repo:
@@ -168,7 +170,8 @@ def register(mcp) -> None:
                 emit_release_target("gitea", "error")
                 await _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
                 ac.finish("error:gitea", e)
-                return {"error": f"Gitea release failed: {e}", "rolled_back": True}
+                log.warning("release_target_failed", target="gitea", error=scrub(str(e)))
+                return {"error": "Gitea release failed (see the audit log)", "rolled_back": True}
 
         # Step 4: GitLab release
         if "gitlab" in effective_targets and gitlab_project:
@@ -189,7 +192,8 @@ def register(mcp) -> None:
                 emit_release_target("gitlab", "error")
                 await _rollback(repo, tag, created, urls, github_repo, gitea_repo, gitlab_project)
                 ac.finish("error:gitlab", e)
-                return {"error": f"GitLab release failed: {e}", "rolled_back": True}
+                log.warning("release_target_failed", target="gitlab", error=scrub(str(e)))
+                return {"error": "GitLab release failed (see the audit log)", "rolled_back": True}
 
         # Step 5: PyPI (immutable — no rollback)
         if "pypi" in effective_targets:
@@ -223,7 +227,7 @@ def register(mcp) -> None:
                 else:
                     target_results["pypi"] = "error"
                     emit_release_target("pypi", "error")
-                    log.warning("pypi_publish_failed", stderr=scrub(result.stderr[:200]))
+                    log.warning("pypi_publish_failed", stderr=scrub(result.stderr)[:200])
             except Exception as e:
                 target_results["pypi"] = "error"
                 emit_release_target("pypi", "error")
@@ -253,7 +257,7 @@ def register(mcp) -> None:
                 else:
                     target_results["npm"] = "error"
                     emit_release_target("npm", "error")
-                    log.warning("npm_publish_failed", stderr=scrub(result.stderr[:200]))
+                    log.warning("npm_publish_failed", stderr=scrub(result.stderr)[:200])
             except Exception as e:
                 target_results["npm"] = "error"
                 emit_release_target("npm", "error")

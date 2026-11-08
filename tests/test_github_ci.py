@@ -346,6 +346,10 @@ def test_commit_checks_annotation_error_keeps_status_answer(tools):
     assert r["state"] == "success" and r["check_runs"][0]["name"] == "test"
     assert len(r["annotations"]) == 1
     assert "rate limit" in r["annotations_error"]
+    # The planted token is unconfigured; since 0.21.0 scrub() masks it by shape (#913).
+    # Before, this test planted it and never looked (#1431 R2-04).
+    assert "ghp_" + "x" * 36 not in r["annotations_error"]
+    assert "ghp_***" in r["annotations_error"]
 
 
 @pytest.mark.parametrize(
@@ -417,3 +421,58 @@ def test_log_host_allowlist_rejects_trailing_newline_host():
 
     assert _is_log_host("productionresultssa5.blob.core.windows.net")
     assert not _is_log_host("productionresultssa5.blob.core.windows.net\n")
+
+
+def test_signed_url_redaction_matches_an_uppercase_scheme():
+    """#1431 R2-01: the redirect allowlist follows `HTTPS://`, so the filter must match it."""
+    from githost_mcp._providers.github_client import _redact_signed_urls
+
+    raw = "Location: HTTPS://productionresultssa5.blob.core.windows.net/x/y?sig=SECRET&se=1"
+    out = _redact_signed_urls(raw)
+    assert "SECRET" not in out
+    assert out.endswith("HTTPS://productionresultssa5.blob.core.windows.net/x/y?redacted")
+
+
+def test_signed_url_redaction_keeps_other_hosts_and_bare_queries():
+    from githost_mcp._providers.github_client import _redact_signed_urls
+
+    for text in ("https://api.github.com/x?page=2", "https://h.example?x=1", "no url here"):
+        assert _redact_signed_urls(text) == text
+    out = _redact_signed_urls("https://productionresultssa1.blob.core.windows.net?sig=S")
+    assert out == "https://productionresultssa1.blob.core.windows.net?redacted"
+
+
+def test_signed_url_redaction_is_linear_without_a_query():
+    import time
+
+    from githost_mcp._providers.github_client import _redact_signed_urls
+
+    for blob in ("https://" + "a." * 32768, "https://a" + "/b" * 32768, "HTTPS://" + "a" * 65536):
+        t0 = time.perf_counter()
+        _redact_signed_urls(blob)
+        assert time.perf_counter() - t0 < 0.1
+
+
+def test_every_registered_httpcore_logger_carries_the_trace_filter():
+    import logging
+
+    from githost_mcp._providers import github_client
+
+    names = [n for n in logging.root.manager.loggerDict if n.startswith("httpcore.")]
+    assert names, "precondition: httpcore loggers exist"
+    for name in names:
+        assert github_client._TRACE_LOG_FILTER in logging.getLogger(name).filters, name
+
+
+def test_commit_checks_bounds_and_scrubs_target_url(tools):
+    """#1431 F-07."""
+    st = MagicMock()
+    st.context, st.state, st.description = "ci", "success", "ok"
+    st.target_url = "https://u:pw99999@h/" + "y" * 2000
+    st.updated_at = datetime(2026, 11, 7, tzinfo=UTC)
+    gh, _ = _commit_gh([], [st])
+    p1, p2 = _patch_gh(gh)
+    with p1, p2:
+        r = tools["github_commit_checks"]("owner/repo", "main")
+    url = r["statuses"][0]["target_url"]
+    assert "pw99999" not in url and len(url) <= 301
