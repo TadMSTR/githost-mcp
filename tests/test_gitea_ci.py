@@ -168,20 +168,118 @@ async def test_commit_status_branch_with_slash_is_one_encoded_segment(tools):
             return_value=httpx.Response(200, json=STATUS)
         )
         await tools["gitea_commit_status"]("testowner/repo", "feature/deploy-guardrails")
-    assert route.calls.last.request.url.raw_path.endswith(
-        b"/commits/feature%2Fdeploy-guardrails/status"
-    )
+    path = route.calls.last.request.url.raw_path.split(b"?", 1)[0]
+    assert path.endswith(b"/commits/feature%2Fdeploy-guardrails/status")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "ref",
-    ["", "-main", "../../admin", "a..b", "main?x=1", "main#x", "a b", "a\nb", "x" * 256, "a//b"],
+    ["", "-main", "../../admin", "a..b", "main?x=1", "a b", "a\nb", "x" * 256, "a//b", "a/./b"],
 )
 async def test_commit_status_rejects_bad_ref_before_request(tools, ref):
     with respx.mock:
         r = await tools["gitea_commit_status"]("testowner/repo", ref)
     assert "error" in r
+
+
+@pytest.mark.asyncio
+async def test_commit_status_hash_in_a_branch_name_is_encoded_not_a_fragment(tools):
+    """`#` became valid in 0.21.0 (vikunja#1429); it must reach Gitea as %23 in the path."""
+    with respx.mock:
+        route = respx.get(url__startswith=f"{API}/commits/").mock(
+            return_value=httpx.Response(200, json=STATUS)
+        )
+        r = await tools["gitea_commit_status"]("testowner/repo", "main#x")
+    assert "error" not in r
+    url = route.calls.last.request.url
+    assert url.raw_path.split(b"?", 1)[0].endswith(b"/commits/main%23x/status")
+    assert url.fragment == ""
+
+
+def _status_page(contexts, state):
+    return {
+        "sha": "a" * 40,
+        "state": state,
+        "total_count": len(contexts),
+        "statuses": [{"context": c, "status": st} for c, st in contexts],
+    }
+
+
+@pytest.mark.asyncio
+async def test_commit_status_reads_every_page_and_the_worst_state_wins(tools):
+    """Gitea's combined state covers one page (vikunja#1430): a failure on page 2 must not
+    read as success."""
+    page1 = _status_page([(f"ci/{i}", "success") for i in range(50)], "success")
+    page2 = _status_page([("ci/late", "failure")], "failure")
+    with respx.mock:
+        route = respx.get(url__startswith=f"{API}/commits/").mock(
+            side_effect=[
+                httpx.Response(200, json=page1, headers={"X-Total-Count": "51"}),
+                httpx.Response(200, json=page2, headers={"X-Total-Count": "51"}),
+            ]
+        )
+        r = await tools["gitea_commit_status"]("testowner/repo", "main")
+    assert r["state"] == "failure"
+    assert r["total_count"] == 51
+    assert len(r["statuses"]) == 51
+    assert r["statuses_truncated"] is False
+    assert [c.request.url.params["page"] for c in route.calls] == ["1", "2"]
+
+
+@pytest.mark.asyncio
+async def test_commit_status_one_page_keeps_giteas_state(tools):
+    with respx.mock:
+        route = respx.get(url__startswith=f"{API}/commits/").mock(
+            return_value=httpx.Response(
+                200,
+                json=_status_page([("ci", "pending")], "pending"),
+                headers={"X-Total-Count": "1"},
+            )
+        )
+        r = await tools["gitea_commit_status"]("testowner/repo", "main")
+    assert r["state"] == "pending" and r["statuses_truncated"] is False
+    assert len(route.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_commit_status_beyond_the_page_bound_is_flagged_truncated(tools):
+    from githost_mcp.tools import gitea
+
+    pages = [
+        httpx.Response(
+            200,
+            json=_status_page([(f"c{p}-{i}", "success") for i in range(50)], "success"),
+            headers={"X-Total-Count": "9999"},
+        )
+        for p in range(gitea.STATUS_MAX_PAGES)
+    ]
+    with respx.mock:
+        route = respx.get(url__startswith=f"{API}/commits/").mock(side_effect=pages)
+        r = await tools["gitea_commit_status"]("testowner/repo", "main")
+    assert len(route.calls) == gitea.STATUS_MAX_PAGES
+    assert r["statuses_truncated"] is True
+    assert r["total_count"] == 9999
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "worst"),
+    [
+        ("success", "failure", "failure"),
+        ("failure", "success", "failure"),
+        ("pending", "success", "pending"),
+        ("error", "failure", "error"),
+        ("warning", "pending", "pending"),
+        ("success", "weird", "weird"),
+        ("failure", "weird", "failure"),
+        (None, "success", "success"),
+        ("success", None, "success"),
+    ],
+)
+def test_worst_status_state(a, b, worst):
+    from githost_mcp.tools.gitea import worst_status_state
+
+    assert worst_status_state(a, b) == worst
 
 
 @pytest.mark.asyncio
@@ -277,3 +375,55 @@ async def test_job_log_cut_drops_partial_last_line(tools, monkeypatch):
         )
         r = await tools["gitea_actions"]("testowner/repo", "get_job_log", job_id=3)
     assert r["lines"] == ["first"] and r["download_cut"] is True
+
+
+@pytest.mark.asyncio
+async def test_commit_status_bounds_and_scrubs_target_url(tools):
+    """#1431 F-07: target_url is chosen by whoever posts the status."""
+    body = dict(STATUS)
+    body["statuses"] = [dict(STATUS["statuses"][0], target_url="https://u:pw88888@h/" + "x" * 2000)]
+    with respx.mock:
+        respx.get(url__startswith=f"{API}/commits/").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        r = await tools["gitea_commit_status"]("testowner/repo", "main")
+    url = r["statuses"][0]["target_url"]
+    assert "pw88888" not in url and len(url) <= 301
+
+
+@pytest.mark.asyncio
+async def test_commit_status_pages_on_after_a_server_clamped_page(tools):
+    """A server whose page limit is below STATUS_PAGE_SIZE returns a short page while more
+    remain: paging follows X-Total-Count, not the page length (CR-22)."""
+    page1 = _status_page([(f"ci/{i}", "success") for i in range(20)], "success")
+    page2 = _status_page([("ci/late", "failure")], "failure")
+    with respx.mock:
+        route = respx.get(url__startswith=f"{API}/commits/").mock(
+            side_effect=[
+                httpx.Response(200, json=page1, headers={"X-Total-Count": "21"}),
+                httpx.Response(200, json=page2, headers={"X-Total-Count": "21"}),
+            ]
+        )
+        r = await tools["gitea_commit_status"]("testowner/repo", "main")
+    assert r["state"] == "failure"
+    assert len(r["statuses"]) == 21
+    assert [c.request.url.params["page"] for c in route.calls] == ["1", "2"]
+
+
+@pytest.mark.asyncio
+async def test_commit_status_later_pages_ask_for_page_ones_sha(tools):
+    """CR-08: page 2 names the sha page 1 answered for, so a branch moving mid-read can't
+    mix two commits' statuses."""
+    page1 = _status_page([(f"ci/{i}", "success") for i in range(50)], "success")
+    page2 = _status_page([("ci/late", "failure")], "failure")
+    with respx.mock:
+        route = respx.get(url__startswith=f"{API}/commits/").mock(
+            side_effect=[
+                httpx.Response(200, json=page1, headers={"X-Total-Count": "51"}),
+                httpx.Response(200, json=page2, headers={"X-Total-Count": "51"}),
+            ]
+        )
+        await tools["gitea_commit_status"]("testowner/repo", "main")
+    paths = [c.request.url.path for c in route.calls]
+    assert paths[0].endswith("/commits/main/status")
+    assert paths[1].endswith(f"/commits/{'a' * 40}/status")

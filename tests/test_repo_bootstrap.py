@@ -9,6 +9,7 @@ import dataclasses
 import inspect
 import json
 import os
+import pathlib
 import time
 from unittest.mock import MagicMock, patch
 
@@ -365,17 +366,66 @@ def test_git_clone_refuses_existing_destination_and_leaves_it(local_tools, env):
 
 
 def test_git_clone_failure_removes_only_what_it_created(local_tools, env):
-    dest = env["home"] / "repos/personal/partial"
+    """A clone that fails halfway leaves nothing: not dest, not its temp directory
+    (vikunja#1228: git clones into a mkdtemp sibling, renamed into place on success)."""
+    parent = env["home"] / "repos/personal"
+    dest = parent / "partial"
+    (parent / "neighbour").mkdir()
+    seen = {}
 
     def half_clone(url, d, args, **kw):
-        (dest / "half-written").write_text("x")
+        seen["dir"] = d
+        (pathlib.Path(d) / "half-written").write_text("x")
         raise git.GitCommandError(["git", "clone"], 128, "fatal: connection lost")
 
     with patch("githost_mcp.tools.git_local.run_clone", side_effect=half_clone):
         result = local_tools["git_clone"]("github", "TadMSTR", "partial")
     assert "connection lost" in result["error"]
+    assert seen["dir"] != str(dest) and os.path.dirname(seen["dir"]) == str(parent)
     assert not dest.exists()
-    assert (env["home"] / "repos/personal").is_dir()
+    assert sorted(p.name for p in parent.iterdir()) == ["neighbour"]
+
+
+def test_git_clone_refuses_a_symlink_planted_at_dest_mid_clone(local_tools, env, tmp_path):
+    """vikunja#1228: a symlink that appears at dest while git runs is never written through
+    and never replaced."""
+    parent = env["home"] / "repos/personal"
+    dest = parent / "raced"
+    target = tmp_path / "attacker-target"
+    target.mkdir()
+
+    def clone_then_race(url, d, args, **kw):
+        repo = git.Repo.init(d)
+        (pathlib.Path(d) / "f").write_text("x")
+        repo.index.add(["f"])
+        repo.index.commit("one")
+        dest.symlink_to(target)  # the race: dest appears after the existence check
+
+    with patch("githost_mcp.tools.git_local.run_clone", side_effect=clone_then_race):
+        result = local_tools["git_clone"]("github", "TadMSTR", "raced")
+    assert "already exists" in result["error"]
+    assert dest.is_symlink() and os.readlink(dest) == str(target)
+    assert list(target.iterdir()) == []
+    assert sorted(p.name for p in parent.iterdir()) == ["raced"]
+
+
+def test_git_clone_refuses_an_empty_dir_planted_at_dest_mid_clone(local_tools, env):
+    """Plain rename() would silently replace an empty directory."""
+    parent = env["home"] / "repos/personal"
+    dest = parent / "raced2"
+
+    def clone_then_race(url, d, args, **kw):
+        repo = git.Repo.init(d)
+        (pathlib.Path(d) / "f").write_text("x")
+        repo.index.add(["f"])
+        repo.index.commit("one")
+        dest.mkdir()
+
+    with patch("githost_mcp.tools.git_local.run_clone", side_effect=clone_then_race):
+        result = local_tools["git_clone"]("github", "TadMSTR", "raced2")
+    assert "already exists" in result["error"]
+    assert dest.is_dir() and list(dest.iterdir()) == []
+    assert sorted(p.name for p in parent.iterdir()) == ["raced2"]
 
 
 def test_git_clone_refuses_outside_write_roots(local_tools, env, monkeypatch):
@@ -1181,3 +1231,31 @@ def test_git_clone_keeps_file_symlinks_for_a_deny_scoped_agent(local_tools, env,
     ):
         result = local_tools["git_clone"]("github", "TadMSTR", "agentmd")
     assert result.get("path") == str(env["home"] / "repos/personal/agentmd"), result
+
+
+def test_rename_noreplace_refuses_an_existing_destination(tmp_path):
+    from githost_mcp.errors import AlreadyExists
+    from githost_mcp.tools.git_local import rename_noreplace
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "dst").mkdir()
+    with pytest.raises(AlreadyExists):
+        rename_noreplace(str(tmp_path / "src"), str(tmp_path / "dst"))
+    rename_noreplace(str(tmp_path / "src"), str(tmp_path / "new"))
+    assert (tmp_path / "new").is_dir() and not (tmp_path / "src").exists()
+
+
+def test_rename_noreplace_fallback_without_renameat2(tmp_path, monkeypatch):
+    from githost_mcp.errors import AlreadyExists
+    from githost_mcp.tools import git_local
+
+    def no_libc(*a, **k):
+        raise OSError("no libc")
+
+    monkeypatch.setattr(git_local.ctypes, "CDLL", no_libc)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "dst").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(AlreadyExists):
+        git_local.rename_noreplace(str(tmp_path / "src"), str(tmp_path / "dst"))
+    git_local.rename_noreplace(str(tmp_path / "src"), str(tmp_path / "new"))
+    assert (tmp_path / "new").is_dir()

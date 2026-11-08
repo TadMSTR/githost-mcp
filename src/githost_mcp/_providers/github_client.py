@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from itertools import islice
 from typing import Any
 
 import httpx
@@ -66,6 +67,28 @@ def github_call(fn, *args, **kwargs):
         raise ValueError(msg) from None
 
 
+def github_list(fn, *args, limit: int | None = None, **kwargs) -> list:
+    """Call a PyGithub list method and read its items inside the call's span.
+
+    PyGithub returns a lazy PaginatedList: `github_call(pr.get_reviews)` makes no request,
+    and every page is fetched later, while the caller iterates, outside the span and
+    outside github_call's credential masking (CodeRabbit CR-02, githost-scoped-2026-11 p4;
+    probed: 3 of 3 page requests ran outside). This reads up to `limit` items (all when
+    None) before the span closes.
+
+    The cap is islice, never `[:limit]`: slicing a PaginatedList returns a _Slice that
+    indexes into the first page, so a zero-result query raised IndexError (vikunja #178,
+    id 189). Iteration only yields and grows, so it is safe on an empty list.
+    """
+
+    def _read():
+        items = fn(*args, **kwargs)
+        return list(items if limit is None else islice(items, limit))
+
+    _read.__name__ = api_call_name(fn)
+    return github_call(_read)
+
+
 # GitHub Actions job logs: `GET /repos/{o}/{r}/actions/jobs/{id}/logs` answers 302 with a
 # short-lived signed URL on a blob host (productionresultssa<N>.blob.core.windows.net,
 # observed 2026-11-07; older runs used *.actions.githubusercontent.com). The redirect is
@@ -117,13 +140,25 @@ def _is_log_host(host: str | None) -> bool:
     return any(rx.match(host or "") for rx in _LOG_HOST_RES)
 
 
-_URL_WITH_QUERY_RE = re.compile(r"https://([A-Za-z0-9.-]+)(:\d+)?([^\s'\"?]*)\?[^\s'\"]*")
+# Case-insensitive scheme: the redirect allowlist follows an uppercase `HTTPS://` Location
+# too (#1431 R2-01). The groups cannot overlap (the host stops at `:`, `/` or `?`, and the
+# path must start with `/`) and every quantifier is possessive, so one long URL with no
+# `?` is scanned once, not once per split point. A run of many `https://` starts is still
+# scanned once per start (64 KB of `https://a/` takes ~0.6 s); this runs only on httpx and
+# httpcore log messages, which are one request line each.
+_URL_WITH_QUERY_RE = re.compile(
+    r"(?i)(?P<scheme>https://)(?P<host>[A-Za-z0-9.-]++)(?P<port>:\d++)?"
+    r"(?P<path>/[^\s'\"?]*+)?\?[^\s'\"]*+"
+)
 
 
 def _redact_signed_urls(text: str) -> str:
     def repl(m: re.Match) -> str:
-        if _is_log_host(m.group(1).lower()):
-            return f"https://{m.group(1)}{m.group(2) or ''}{m.group(3)}?redacted"
+        if _is_log_host(m.group("host").lower()):
+            return (
+                f"{m.group('scheme')}{m.group('host')}{m.group('port') or ''}"
+                f"{m.group('path') or ''}?redacted"
+            )
         return m.group(0)
 
     return _URL_WITH_QUERY_RE.sub(repl, text)
@@ -148,13 +183,22 @@ _URL_LOG_FILTER = _SignedLogUrlFilter()
 if _URL_LOG_FILTER not in logging.getLogger("httpx").filters:
     logging.getLogger("httpx").addFilter(_URL_LOG_FILTER)
 
-# Logger filters don't propagate: each httpcore module logs on its own named logger.
-_HTTPCORE_LOGGERS = (
-    "httpcore.connection",
-    "httpcore.http11",
-    "httpcore.http2",
-    "httpcore.proxy",
-    "httpcore.socks",
+# Logger filters don't propagate: each httpcore module logs on its own named logger. The
+# names come from the logging registry (httpx has imported httpcore by now), plus the ones
+# known to exist, so a module httpcore adds is covered without editing a list (R2-01).
+_HTTPCORE_LOGGERS = sorted(
+    {
+        "httpcore.connection",
+        "httpcore.http11",
+        "httpcore.http2",
+        "httpcore.proxy",
+        "httpcore.socks",
+    }
+    | {
+        name
+        for name in logging.root.manager.loggerDict
+        if name == "httpcore" or name.startswith("httpcore.")
+    }
 )
 _TRACE_LOG_FILTER = _SignedLogUrlTraceFilter()
 for _name in _HTTPCORE_LOGGERS:

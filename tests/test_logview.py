@@ -115,8 +115,8 @@ def test_crlf_line_ending_is_not_collapsed_to_empty():
 
 
 def test_split_text_does_not_split_on_cr():
-    assert split_text("a\rb\nc\n") == ["a\rb", "c"]
-    assert split_text("") == []
+    assert list(split_text("a\rb\nc\n")) == ["a\rb", "c"]
+    assert list(split_text("")) == []
     r = view(split_text("a\rb\nc\n"), mode="head")
     assert r["lines"] == ["b", "c"]
 
@@ -384,3 +384,77 @@ def test_range_grep_with_no_hit_still_advances():
 def test_decoded_headers_drops_body_framing():
     h = {"Content-Encoding": "gzip", "content-length": "9", "Transfer-Encoding": "x", "A": "b"}
     assert logview.decoded_headers(h) == {"A": "b"}
+
+
+# --- #1431 CR-08 / R2-03: a newline flood ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("", []),
+        ("\n", [""]),
+        ("a", ["a"]),
+        ("a\n", ["a"]),
+        ("a\nb", ["a", "b"]),
+        ("a\n\nb\n", ["a", "", "b"]),
+        ("\n\n", ["", ""]),
+    ],
+)
+def test_text_lines_matches_a_full_split(text, expected):
+    lines = split_text(text)
+    assert len(lines) == len(expected)
+    for k in range(0, len(expected) + 2):
+        start, tail = lines.end(k, True)
+        assert tail == expected[-k:] if k else tail == []
+        assert start == len(expected) - len(tail)
+        start, head = lines.end(k, False)
+        assert head == expected[:k] and start == 0
+    assert list(lines) == expected
+
+
+@pytest.mark.parametrize("mode", ["head", "tail"])
+def test_head_and_tail_reads_agree_with_the_full_split(mode):
+    text = "".join(f"line {i}\n" for i in range(1200))
+    fast = view(split_text(text), mode=mode, limit=7)
+    slow = view(list(split_text(text)), mode=mode, limit=7)
+    assert fast == slow
+
+
+def test_a_newline_flood_tail_stays_small():
+    """32 MiB of newlines, `tail limit=5`: 2.1 GB peak and 15 s before 0.21.0 (measured);
+    the view must not build a per-line structure for it."""
+    import time
+    import tracemalloc
+
+    text = "\n" * (32 * 1024 * 1024)
+    tracemalloc.start()
+    t0 = time.perf_counter()
+    r = view(split_text(text), mode="tail", limit=5)
+    elapsed = time.perf_counter() - t0
+    _cur, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert r["total_lines"] == 32 * 1024 * 1024
+    assert r["lines"] == [""] * 5 and r["returned_to"] == r["total_lines"]
+    assert peak < 80 * 1024 * 1024, peak  # the one 32 MiB slice rsplit makes, plus slack
+    assert elapsed < 2.0
+
+
+def test_grep_never_matches_inside_a_redacted_credential():
+    """The raw-text prefilter must not let a needle hit text scrub() removed."""
+    token = "ghp_" + "Grp7" * 9
+    lines = split_text(f"ok\nGITHUB_TOKEN={token}\nend\n")
+    r = view(lines, mode="tail", grep="Grp7Grp7")
+    assert r["match_count"] == 0
+    r = view(lines, mode="tail", grep="***")
+    assert r["match_count"] == 1
+
+
+def test_text_lines_end_after_a_full_split():
+    # CR-02: a head/tail read after an indexing read sliced the cleared text and got [""].
+    from githost_mcp.logview import TextLines
+
+    lines = TextLines("a\nb\nc\n")
+    assert lines[1] == "b"  # forces the full split
+    assert lines.end(2, from_end=True) == (1, ["b", "c"])
+    assert lines.end(2, from_end=False) == (0, ["a", "b"])

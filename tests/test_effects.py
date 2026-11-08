@@ -385,7 +385,75 @@ async def test_gitea_pr_merge_reads_back_the_merge_sha(audit_env):
         "pr_number": 5,
         "merge_sha": "d" * 40,
         "method": "squash",
+        "branch_delete_requested": False,
     }
+
+
+@respx.mock
+async def test_gitea_pr_merge_sends_title_and_branch_deletion_in_swagger_field_names(audit_env):
+    """`merge_title_field` and `delete_branch_after_merge` are MergePullRequestOption's
+    names (Gitea 1.27.3 swagger). The title used to go out as `merge_message_title`."""
+    from githost_mcp.tools import gitea
+
+    base = "https://gitea.example.com/api/v1/repos/o/r/pulls/5"
+    route = respx.post(f"{base}/merge").mock(return_value=httpx.Response(200))
+    respx.get(base).mock(return_value=httpx.Response(200, json={"merge_commit_sha": "d" * 40}))
+    await _register(gitea)["gitea_pr_merge"](
+        "o/r", 5, merge_style="squash", message="Title", delete_branch_after_merge=True
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body == {"Do": "squash", "merge_title_field": "Title", "delete_branch_after_merge": True}
+    entry = _entries(audit_env)[-1]
+    assert entry["effect"]["branch_delete_requested"] is True
+    assert entry["params"]["delete_branch_after_merge"] is True
+
+
+@respx.mock
+async def test_gitea_pr_merge_keeps_the_branch_by_default(audit_env):
+    from githost_mcp.tools import gitea
+
+    base = "https://gitea.example.com/api/v1/repos/o/r/pulls/5"
+    route = respx.post(f"{base}/merge").mock(return_value=httpx.Response(200))
+    respx.get(base).mock(return_value=httpx.Response(200, json={}))
+    await _register(gitea)["gitea_pr_merge"]("o/r", 5)
+    assert json.loads(route.calls.last.request.content) == {"Do": "merge"}
+
+
+def test_github_pr_merge_sends_a_custom_body_and_records_only_that_it_did(audit_env):
+    from unittest.mock import MagicMock, patch
+
+    from githost_mcp.tools import github
+
+    status = MagicMock(merged=True, sha="e" * 40, message="merged")
+    pr = MagicMock()
+    pr.merge.return_value = status
+    gh = MagicMock()
+    gh.get_repo.return_value.get_pull.return_value = pr
+    with patch("githost_mcp.tools.github.get_github", return_value=gh):
+        result = _register(github)["github_pr_merge"](
+            "o/r", 7, merge_method="squash", commit_message="SECRET BODY TEXT"
+        )
+    assert result["merged"] is True
+    assert pr.merge.call_args.kwargs["commit_message"] == "SECRET BODY TEXT"
+    entry = _entries(audit_env)[-1]
+    assert entry["effect"]["custom_body"] is True
+    assert entry["params"]["custom_body"] is True
+    assert "SECRET BODY TEXT" not in json.dumps(entry)
+
+
+def test_github_pr_merge_without_a_body_leaves_githubs_default(audit_env):
+    from unittest.mock import MagicMock, patch
+
+    from githost_mcp.tools import github
+
+    pr = MagicMock()
+    pr.merge.return_value = MagicMock(merged=True, sha="e" * 40, message="merged")
+    gh = MagicMock()
+    gh.get_repo.return_value.get_pull.return_value = pr
+    with patch("githost_mcp.tools.github.get_github", return_value=gh):
+        _register(github)["github_pr_merge"]("o/r", 7, merge_method="squash")
+    assert "commit_message" not in pr.merge.call_args.kwargs
+    assert _entries(audit_env)[-1]["effect"]["custom_body"] is False
 
 
 @respx.mock
@@ -745,3 +813,95 @@ def test_correlation_header_read_failure_is_logged_once(monkeypatch):
     assert correlation._read_headers() == {}
     assert correlation._read_headers() == {}
     assert calls == [("correlation_header_read_failed", {"error_class": "RuntimeError"})]
+
+
+def test_git_add_on_an_unborn_branch_counts_the_files_a_directory_staged(audit_env):
+    """CodeRabbit CR-10 (p4): `src/` on an unborn branch counted as one path."""
+    from githost_mcp.tools import git_local
+
+    repo = git.Repo.init(audit_env / "r")
+    (audit_env / "r" / "src").mkdir()
+    for i in range(3):
+        (audit_env / "r" / "src" / f"f{i}.py").write_text("x")
+    result = _register(git_local)["git_add"](str(audit_env / "r"), ["src"])
+    assert sorted(result["staged"]) == ["src/f0.py", "src/f1.py", "src/f2.py"]
+    assert _entries(audit_env)[-1]["effect"] == {"paths_staged": 3}
+    assert len(repo.index.entries) == 3
+
+
+def test_git_push_reports_the_sha_git_sent_when_the_branch_moves_mid_push(audit_env, monkeypatch):
+    """CodeRabbit CR-11 (p4): a commit landing between the sha capture and git resolving
+    refs/heads/<branch> was pushed while the earlier sha was reported."""
+    from githost_mcp.tools import git_local
+
+    bare = git.Repo.init(audit_env / "bare.git", bare=True)
+    repo = git.Repo.init(audit_env / "r", initial_branch="main")
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "T")
+        cw.set_value("user", "email", "t@t")
+    (audit_env / "r" / "f").write_text("1")
+    repo.index.add(["f"])
+    repo.index.commit("one")
+    repo.create_remote("origin", str(audit_env / "bare.git"))
+    real_push = git.Remote.push
+
+    def racing_push(self, *a, **k):
+        (audit_env / "r" / "f").write_text("2")
+        repo.index.add(["f"])
+        repo.index.commit("two, from a concurrent writer")
+        return real_push(self, *a, **k)
+
+    monkeypatch.setattr(git.Remote, "push", racing_push)
+    result = _register(git_local)["git_push"](str(audit_env / "r"), "origin", "main")
+    sent = bare.commit("main").hexsha
+    assert result["pushed_sha"] == sent
+    assert _entries(audit_env)[-1]["effect"]["new_sha"] == sent
+
+
+def test_push_effect_without_a_matching_ref_is_marked_incomplete(pushed, audit_env):
+    """#1434 R2-01: the fallback used to be silent, so a tag's PushInfo could stand in for
+    the branch's with nothing in the entry saying so."""
+    from githost_mcp.audit import AuditCtx
+    from githost_mcp.tools.git_local import push_effect_fields
+
+    class Info:
+        flags = git.remote.PushInfo.NEW_TAG
+        remote_ref_string = "refs/tags/v1"
+        _old_commit_sha = None
+
+    fields = push_effect_fields(pushed[0], [Info()], "a" * 40, ref="main")
+    assert fields["ref_matched"] is None
+    ac = AuditCtx("git_push", "local", "/r", {"repo_path": "/r"})
+    ac.effect(**fields)
+    ac.finish("ok")
+    assert _entries(audit_env)[-1]["effect_incomplete"] == ["ref_matched"]
+
+
+def test_push_effect_with_a_matching_ref_has_no_marker(pushed):
+    from githost_mcp.tools.git_local import push_effect_fields
+
+    class Info:
+        flags = git.remote.PushInfo.FAST_FORWARD
+        remote_ref_string = "refs/heads/main"
+        _old_commit_sha = None
+
+    assert "ref_matched" not in push_effect_fields(pushed[0], [Info()], "a" * 40, ref="main")
+
+
+def test_github_pr_merge_sends_an_explicitly_empty_body(audit_env):
+    # An empty body is a deliberate choice (it replaces GitHub's concatenated default), so
+    # it is sent and recorded as custom, never dropped by a truthiness check (CR-21).
+    from unittest.mock import MagicMock, patch
+
+    from githost_mcp.tools import github
+
+    pr = MagicMock()
+    pr.merge.return_value = MagicMock(merged=True, sha="e" * 40, message="merged")
+    gh = MagicMock()
+    gh.get_repo.return_value.get_pull.return_value = pr
+    with patch("githost_mcp.tools.github.get_github", return_value=gh):
+        _register(github)["github_pr_merge"]("o/r", 7, merge_method="squash", commit_message="")
+    assert pr.merge.call_args.kwargs["commit_message"] == ""
+    entry = _entries(audit_env)[-1]
+    assert entry["effect"]["custom_body"] is True
+    assert entry["params"]["custom_body"] is True

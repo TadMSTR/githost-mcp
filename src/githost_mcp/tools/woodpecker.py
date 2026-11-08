@@ -23,7 +23,7 @@ from ..audit import AuditCtx, audit_rejection
 from ..config import get_config
 from ..errors import InvalidArgument
 from ..httptrace import async_client
-from ..security import scrub
+from ..security import scrub, validate_ref
 
 # `\Z`, not `$`: `$` also matches before a trailing newline, so `re.match` accepted
 # "owner/repo\n" (KB IV-70). The lookaheads refuse a `.` or `..` segment: the segments go
@@ -63,7 +63,6 @@ _FAILED = frozenset({"failure", "error", "killed"})
 # A step in one of these states has produced no output yet, or never will.
 _NO_LOG_STATES = frozenset({"pending", "created", "blocked", "skipped"})
 _RFC3339_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})\Z")
-_FILTER_MAX = 255
 # Commit messages and step errors are caller-facing text from the forge: bound them.
 _TEXT_MAX = 300
 
@@ -97,7 +96,7 @@ def _check_response(resp: httpx.Response) -> None:
         # made #269 expensive: woodpecker_trigger returned "API error 400" for its
         # entire life with no hint that the request form was wrong. Bounded and
         # scrubbed — the body can echo back a credential-bearing URL (SC-14).
-        detail = scrub(resp.text[:300]).strip()
+        detail = scrub(resp.text)[:300].strip()
         raise ValueError(
             f"Woodpecker API error {resp.status_code}" + (f": {detail}" if detail else "")
         )
@@ -109,7 +108,7 @@ def _check_response(resp: httpx.Response) -> None:
         # SPA fallback serves the frontend index. That HTML then fails json() with an
         # opaque JSONDecodeError that reads like a data problem, not a routing one
         # (vikunja #478). Name the actual cause here instead.
-        detail = scrub(resp.text[:300]).strip()
+        detail = scrub(resp.text)[:300].strip()
         raise ValueError(
             f"Woodpecker returned non-JSON content-type '{content_type or 'unknown'}' for "
             f"{resp.request.method} {resp.request.url} (status {resp.status_code})"
@@ -164,17 +163,6 @@ def _bounded(text: Any) -> str | None:
         return None
     shown = scrub(str(text))
     return shown if len(shown) <= _TEXT_MAX else shown[:_TEXT_MAX] + "…"
-
-
-def _has_control(text: str) -> bool:
-    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text)
-
-
-def _validate_filter_text(name: str, value: str) -> None:
-    if not value or len(value) > _FILTER_MAX or _has_control(value):
-        raise InvalidArgument(
-            f"{name} must be 1-{_FILTER_MAX} characters with no control characters"
-        )
 
 
 def _validate_rfc3339(name: str, value: str) -> None:
@@ -434,11 +422,19 @@ def register(mcp) -> None:
                         f"event values {bad} not recognised; use {', '.join(_EVENTS)}"
                     )
                 params["event"] = ",".join(parts)
+            # The same rule as every other ref argument (#1431 F-08): a value it refuses
+            # cannot name a real branch or ref, so the filter used to return an empty list.
             if branch is not None:
-                _validate_filter_text("branch", branch)
+                # SECURITY[accepted]: validate_ref is ASCII-only, so a unicode branch name is
+                # refused with an explicit error rather than matched; forge branch names are
+                # ASCII. Audit: 2026-11-08/githost-scoped-2026-11-p4-githost-correctness (CR-11).
+                validate_ref(branch)
                 params["branch"] = branch
             if ref is not None:
-                _validate_filter_text("ref", ref)
+                # SECURITY[deferred]: whether Woodpecker's list filter matches `ref` exactly or
+                # as a substring is unverified. Ticket vikunja#1449. Target: open.
+                # Audit: 2026-11-08/githost-scoped-2026-11-p4-githost-correctness (CR-12).
+                validate_ref(ref)
                 params["ref"] = ref
             if before is not None:
                 _validate_rfc3339("before", before)
@@ -733,9 +729,11 @@ def register(mcp) -> None:
         """Restart a Woodpecker pipeline, keeping its original event.
 
         Unlike woodpecker_trigger, which creates a `manual` run, a restart re-runs the
-        pipeline as the push / pull_request / tag it was, so an event-specific failure
-        reproduces. No event or deploy-target override is exposed: an override could turn
-        a push into a deployment run.
+        pipeline's original event at that pipeline's commit: push, pull_request, and also
+        tag, release, deployment and cron. Restarting an old pipeline runs that old
+        commit, and restarting a tag, release or deployment pipeline re-runs whatever
+        those steps do (a publish, a deploy). No event or deploy-target override is
+        exposed: an override could turn a push into a deployment run.
 
         Creates a new pipeline. Returns its number as `pipeline_id`.
 

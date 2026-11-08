@@ -1,5 +1,90 @@
 # Changelog
 
+## [0.21.0] — 2026-11-08
+
+Correctness sweep (githost-scoped-2026-11 part 4). Every tool does what it says and records
+what it did. The tool surface is unchanged: 79 tools, 14 `hitl: true`. Two tools gain
+optional parameters.
+
+### Added
+
+- `github_pr_merge(commit_message=None)`: the merge commit body. The audit entry records
+  `custom_body: true|false`, never the text (vikunja#1445).
+- `gitea_pr_merge(delete_branch_after_merge=False)`: delete the head branch once merged;
+  the effect records `branch_delete_requested` (vikunja#628).
+- `git_commit`'s effect records `merge_parents` (every parent, first first) for a merge
+  commit (vikunja#1300).
+
+### Fixed
+
+- `git_commit` concluding a conflicted merge now records every parent and clears
+  `MERGE_HEAD`/`MERGE_MSG`/`MERGE_MODE`/`MERGE_RR`/`AUTO_MERGE`, in a plain clone and in a
+  linked worktree. Before, it wrote a one-parent commit and left the merge state behind
+  (vikunja#1300).
+- `git_commit` with `GIT_SIGNING_KEY` set failed on every commit with an agent identity:
+  the identity was passed after the subcommand, where git reads `-c` as
+  `--reedit-message`. It now goes in the author/committer environment.
+- `gitea_pr_merge` sent its title as `merge_message_title`, which Gitea does not have, so
+  `message` was ignored. It is now `merge_title_field`.
+- `gitea_commit_status` reads every page of contexts (up to 10 × 50) and takes the worst
+  state. Gitea computes the combined `state`, and `total_count`, over one page, so a
+  failure past the first page read as success (vikunja#1430).
+- `validate_ref` accepts a leading `_` and `#`, which are valid branch names, and now
+  refuses a dot-led path component and `.lock` (vikunja#1429).
+- PyGithub list calls read their pages inside the call's span; they were fetched later,
+  outside it.
+- `git_add` reports the staged set from the index. On an unborn branch it echoed its
+  arguments, so a directory counted as one path.
+- `git_push` reports the sha git actually pushed (the remote-tracking ref), not one read
+  before the push.
+- `git_push_force_with_lease` refuses to report success for an up-to-date push whose
+  `expected_sha` was stale: git skips the lease check when nothing moves.
+- `push_effect_fields` marks its fallback (`ref_matched: null`, in `effect_incomplete`)
+  when no PushInfo names the branch (vikunja#1434).
+- `npm_publish` records the host of the registry npm picks for the package (scope
+  registry, argument, or `.npmrc`), and null when `publishConfig` or a competing scope
+  registry leaves it in doubt, not an assumed `registry.npmjs.org` (vikunja#1435). `npm_identity` reads a regular file only, bounded,
+  and a JSON object; `dist_identity` is null when `dist/` holds more than one package or
+  version, or a file whose name it can't read (vikunja#1434).
+- README: the effect table now matches what each tool emits.
+
+### Security
+
+- `scrub()` redacts credential shapes too: an `Authorization` value after a `Bearer`,
+  `token`, `Basic`, `Digest` or `Negotiate` scheme word (or a bare value of 20+
+  characters), in header, dict, JSON and `HTTP_AUTHORIZATION=` forms; and vendor-prefixed
+  tokens (`ghp_` and the other GitHub prefixes, `glpat-`, `xoxb-`/`xoxp-`, `npm_`, `pypi-`). Tested against a corpus of real failure text in both directions
+  (vikunja#913).
+- Publish children (`python -m build`, `twine`, `npm`) get an allowlisted environment, not
+  githost's own (vikunja#610).
+- `pypi_publish` `dist_dir` must stay inside the repo; `npm_publish` `registry` must be
+  credential-free `https://` and `tag` a plain name. `release` and `audit_log_query` no
+  longer return exception text (vikunja#1340).
+- One URL authority parser for the remote-URL validator, the redactor, `url_host` and the
+  npm target (vikunja#1434).
+- Allowed roots are matched as written, and a root that is a symlink is refused
+  (vikunja#996).
+- `git_clone` clones into a temporary sibling and renames it into place, refusing an
+  existing destination (vikunja#1228).
+- Commit-status `target_url` is scrubbed and bounded (vikunja#1431). Subprocess output is
+  scrubbed before it is cut.
+- The audit directory is created `0700` (vikunja#1434).
+
+### Changed
+
+- On a GitHub repo under a forge-owned account that is not a fork, `git_commit` uses the
+  agent identity only when GitHub says the repo is private. A public repo gets the public
+  identity, as does an undetermined answer. The audit log still records the acting agent
+  (vikunja#609).
+- The HTTP server starts with no FastMCP banner, no update check and no uvicorn INFO lines
+  on stderr (vikunja#1437).
+- `woodpecker_list_pipelines` `branch`/`ref` filters use `validate_ref`. The
+  `woodpecker_restart` docstring and README say it re-runs tag, release, deployment and
+  cron pipelines and old commits too (vikunja#1431).
+- `ecosystem.config.js` starts the six live agents only; harlock and steward are gone,
+  and their ports 8625 and 8627 stay reserved (vikunja#367).
+- `build` joins the dev extra (the child-environment tests run a real `python -m build`).
+
 ## [0.20.0] — 2026-11-08
 
 Grant model. githost-mcp now says which of its tools are

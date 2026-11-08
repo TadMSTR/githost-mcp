@@ -12,6 +12,7 @@ the audit trail — a log line can carry a pipeline environment value.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from .errors import InvalidArgument
@@ -140,18 +141,77 @@ def collapse_cr(line: str) -> str:
     return line
 
 
-def split_text(text: str) -> list[str]:
-    """Split raw log text into lines on `\\n` only.
+class TextLines(Sequence):
+    """The lines of a log text, split on `\\n` only and only as far as a read needs.
+
+    A head or tail read takes its lines from one end with a bounded split, so a 32 MiB
+    flood of newlines is never turned into a 33.5M-item list for a `tail limit=5`
+    (#1431 CR-08/R2-03: 2.1 GB peak before). `len()` counts newlines without splitting.
+    Anything else (indexing, a range or grep read) splits the whole text once.
+    """
+
+    def __init__(self, text: str):
+        self._text = text[:-1] if text.endswith("\n") else text
+        self._empty = not text
+        self._list: list[str] | None = None
+
+    def __len__(self) -> int:
+        if self._list is not None:
+            return len(self._list)
+        return 0 if self._empty else self._text.count("\n") + 1
+
+    def end(self, count: int, from_end: bool) -> tuple[int, list[str]]:
+        """(index of the first line returned, up to `count` lines from one end)."""
+        if self._empty or count <= 0:
+            return (len(self) if from_end else 0), []
+        if self._list is not None:  # already split (and _text cleared): slice the list
+            picked = self._list[-count:] if from_end else self._list[:count]
+            return (len(self._list) - len(picked) if from_end else 0), picked
+        if from_end:
+            parts = self._text.rsplit("\n", count)
+            picked = parts[-count:] if len(parts) > count else parts
+            return len(self) - len(picked), picked
+        return 0, self._text.split("\n", count)[:count]
+
+    def _lines(self) -> list[str]:
+        if self._list is None:
+            self._list = [] if self._empty else self._text.split("\n")
+            self._text = ""
+        return self._list
+
+    def __getitem__(self, i):
+        return self._lines()[i]
+
+    def __iter__(self):
+        return iter(self._lines())
+
+
+def split_text(text: str) -> TextLines:
+    """Split raw log text into lines on `\\n` only, lazily (see TextLines).
 
     `str.splitlines()` also splits on `\\r`, which would turn every progress redraw into a
     separate line before collapse_cr() could fold it.
     """
-    if not text:
-        return []
-    lines = text.split("\n")
-    if lines[-1] == "":
-        lines.pop()
-    return lines
+    return TextLines(text)
+
+
+class _Shown:
+    """Scrubbed, display-cut lines, computed per index on first use and kept.
+
+    view() used to build two full-length lists (scrubbed and cut) before selecting
+    anything; only the lines a read returns are ever needed whole.
+    """
+
+    def __init__(self, raw: Sequence[str]):
+        self._raw = raw
+        self._cache: dict[int, str] = {}
+
+    def __getitem__(self, i: int) -> str:
+        line = self._cache.get(i)
+        if line is None:
+            line = _cut(scrub(collapse_cr(self._raw[i])))
+            self._cache[i] = line
+        return line
 
 
 def _cut(shown: str) -> str:
@@ -173,7 +233,7 @@ def _merge_windows(hits: list[int], context: int, total: int) -> list[int]:
     return out
 
 
-def _take(indices: list[int], lines: list[str], from_end: bool, max_lines: int) -> list[int]:
+def _take(indices: Sequence[int], lines: Any, from_end: bool, max_lines: int) -> list[int]:
     """Pick indices from one end, stopping at the line cap or the byte cap."""
     picked: list[int] = []
     used = 0
@@ -196,7 +256,7 @@ def _take_hits(
     context: int,
     lo: int,
     hi: int,
-    lines: list[str],
+    lines: Any,
     from_end: bool,
     max_lines: int,
 ) -> list[int]:
@@ -224,7 +284,7 @@ def _take_hits(
     return sorted(picked)
 
 
-def _segments(picked: list[int], lines: list[str]) -> list[dict[str, Any]]:
+def _segments(picked: list[int], lines: Any) -> list[dict[str, Any]]:
     segs: list[dict[str, Any]] = []
     for i in picked:
         if segs and segs[-1]["to"] == i:
@@ -236,7 +296,7 @@ def _segments(picked: list[int], lines: list[str]) -> list[dict[str, Any]]:
 
 
 def view(
-    raw_lines: list[str],
+    raw_lines: Sequence[str],
     *,
     mode: str = "tail",
     offset: int = 0,
@@ -262,36 +322,56 @@ def view(
     cannot be used to test whether a redacted credential is present.
     """
     validate_view(mode, offset, limit, grep, context)
-    scrubbed = [scrub(collapse_cr(line)) for line in raw_lines]
-    lines = [_cut(s) for s in scrubbed]
-    total = len(lines)
     max_lines = min(limit, MAX_LINES)
 
-    if mode == "range":
-        lo, hi = min(offset, total), min(offset + limit, total)
+    if grep is None and mode in ("head", "tail") and isinstance(raw_lines, TextLines):
+        # One bounded split from the needed end; nothing else is materialised.
+        total = len(raw_lines)
+        start, end_lines = raw_lines.end(max_lines, mode == "tail")
+        lines: Any = _Shown(end_lines)
+        local = _take(range(len(end_lines)), lines, mode == "tail", max_lines)
+        result: dict[str, Any] = {"mode": mode, "total_lines": total}
+        result["lines"] = [lines[i] for i in local]
+        picked = [start + i for i in local]
+        candidates: Any = range(total)
     else:
-        lo, hi = 0, total
-    candidates = list(range(lo, hi))
+        total = len(raw_lines)
+        lines = _Shown(raw_lines)
+        if mode == "range":
+            lo, hi = min(offset, total), min(offset + limit, total)
+        else:
+            lo, hi = 0, total
+        candidates = range(lo, hi)
+        result = {"mode": mode, "total_lines": total}
 
-    result: dict[str, Any] = {"mode": mode, "total_lines": total}
-
-    if grep is None:
-        picked = _take(candidates, lines, mode == "tail", max_lines)
-        result["lines"] = [lines[i] for i in picked]
-    else:
-        # Match on the whole scrubbed line, not the display cut: a hit past character
-        # MAX_LINE_CHARS was reported as `match_count: 0` (audit F-04).
-        needle = grep.lower() if ignore_case else grep
-        hits = [
-            i for i in candidates if needle in (scrubbed[i].lower() if ignore_case else scrubbed[i])
-        ]
-        covered = [i for i in _merge_windows(hits, context, total) if lo <= i < hi]
-        picked = _take_hits(hits, context, lo, hi, lines, mode == "tail", max_lines)
-        hit_set = set(hits)
-        result["match_count"] = len(hits)
-        result["matches_returned"] = sum(1 for i in picked if i in hit_set)
-        result["segments"] = _segments(picked, lines)
-        candidates = covered
+        if grep is None:
+            picked = _take(candidates, lines, mode == "tail", max_lines)
+            result["lines"] = [lines[i] for i in picked]
+        else:
+            # Match on the whole scrubbed line, not the display cut: a hit past character
+            # MAX_LINE_CHARS was reported as `match_count: 0` (audit F-04). Each line is
+            # scrubbed for the test and dropped; only the hit indices are kept.
+            needle = grep.lower() if ignore_case else grep
+            # scrub() only replaces text with something containing `*`, and collapse_cr()
+            # keeps a substring, so an ASCII needle with no `*` that is absent from the raw
+            # line cannot be in the scrubbed one: skip the scrub. (ASCII only: Python's
+            # lower() is contextual for a final sigma.)
+            prefilter = "*" not in needle and needle.isascii()
+            hits = []
+            for i in candidates:
+                raw = raw_lines[i]
+                if prefilter and needle not in (raw.lower() if ignore_case else raw):
+                    continue
+                text = scrub(collapse_cr(raw))
+                if needle in (text.lower() if ignore_case else text):
+                    hits.append(i)
+            covered = [i for i in _merge_windows(hits, context, total) if lo <= i < hi]
+            picked = _take_hits(hits, context, lo, hi, lines, mode == "tail", max_lines)
+            hit_set = set(hits)
+            result["match_count"] = len(hits)
+            result["matches_returned"] = sum(1 for i in picked if i in hit_set)
+            result["segments"] = _segments(picked, lines)
+            candidates = covered
 
     if picked:
         result["returned_from"] = picked[0]

@@ -7,7 +7,7 @@ import re
 from fnmatch import fnmatch
 from pathlib import Path
 
-from .config import get_config
+from .config import get_config, root_as_written
 from .errors import (
     BranchNameInvalid,
     InvalidArgument,
@@ -30,8 +30,11 @@ __all__ = [
     "canonical_path",
     "clean_env",
     "mask_credentials",
+    "redact_credential_shapes",
     "redact_url_credentials",
     "scrub",
+    "split_authority",
+    "url_host",
     "validate_branch_name",
     "validate_read_path",
     "validate_ref",
@@ -42,40 +45,142 @@ __all__ = [
     "validate_write_path",
 ]
 
-# Any URL userinfo component (`scheme://user:token@host`). mask_credentials() only
-# replaces githost-mcp's *own configured* token values, so a credential a human
-# embedded in a git remote by hand — a one-off PAT, say — survives that pass
-# entirely. Remote URLs reach callers through GitPython's PushInfo.summary and
-# exception text, so the userinfo is redacted by shape rather than by value.
-# (SC-14, third recurrence; see githost-mcp-reliability-batch-2026-07 audit.)
+# URL authority parsing: one rule for validate_remote_url, redact_url_credentials,
+# url_host and the npm registry target (#1434 F-02).
+#
+# Userinfo is found two ways:
+# - An `@` before the first `/`: everything up to the LAST such `@` is userinfo, even when
+#   a `?` or `#` sits in front of it (`https://bot:4821#x@host`). Reading `?`/`#` as the end
+#   of the authority there would turn the credential into host plus fragment, so this rule
+#   never finds less than 0.20.0's `[^/@\s]+@` did.
+# - A credential in front of a `/` before an `@`, as in `https://<token>/x@host/o/r.git`:
+#   read as userinfo when the part before the first `/`, `?` or `#` is not host-shaped and
+#   the part after the last `@` is a dotted name, an IP literal, `localhost` or `name:port`.
+#   A single-label name after the `@` counts only when the head could not be a host itself
+#   (`user:pw`), so `https://verdaccio/@scope/pkg` keeps its host and path.
+# Userinfo that holds `/`, `?` or `#` is ambiguous: the validator refuses it, the redactor
+# removes it, and url_host answers None rather than guess which part is the host.
+#
+# Residual, stated: a dotted credential (a JWT), or a `name:<1-5 digits>` pair, in front of
+# `/…@host` reads as a host.
 #
 # scp-style remotes (`git@github.com:owner/repo.git`) have no scheme and are left
-# readable — that is the form every forge remote actually uses.
+# readable: that is the form every forge remote actually uses.
+_HOSTLIKE_RE = re.compile(
+    r"(?:localhost|\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+"
+    r"|[A-Za-z0-9-]{1,63}:\d{1,5})(?::\d{1,5})?"
+)
+_HOST_AFTER_AT_RE = re.compile(
+    r"(?:localhost|\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+"
+    r"|[A-Za-z0-9-]{1,63}(?=:))(?::\d{1,5})?"
+)
+_LABEL_HOST_RE = re.compile(r"[A-Za-z0-9-]{1,63}(?::\d{1,5})?")
+_LABEL_RE = re.compile(r"[A-Za-z0-9-]{1,63}")
+_PATH_START_RE = re.compile(r"[/?#]")
+
+
+def split_authority(after_scheme: str) -> tuple[str | None, str, str]:
+    """Split the text after `scheme://` into (userinfo or None, host[:port], rest)."""
+    slash = after_scheme.find("/")
+    at = after_scheme.rfind("@", 0, slash if slash >= 0 else len(after_scheme))
+    if at >= 0:
+        tail = after_scheme[at + 1 :]
+        m = _PATH_START_RE.search(tail)
+        end = m.start() if m else len(tail)
+        return after_scheme[:at], tail[:end], tail[end:]
+    m = _PATH_START_RE.search(after_scheme)
+    first = m.start() if m else len(after_scheme)
+    head = after_scheme[:first]
+    at = after_scheme.rfind("@")
+    if head and at > first and not _HOSTLIKE_RE.fullmatch(head):
+        tail = after_scheme[at + 1 :]
+        m = _PATH_START_RE.search(tail)
+        end = m.start() if m else len(tail)
+        host = tail[:end]
+        # A head that is itself a bare label (`verdaccio`) needs more than a bare label after
+        # the `@` to count as a credential; a head no host could be (`user:pw`) does not.
+        if _HOST_AFTER_AT_RE.fullmatch(host) or (
+            not _LABEL_RE.fullmatch(head) and _LABEL_HOST_RE.fullmatch(host)
+        ):
+            return after_scheme[:at], host, tail[end:]
+    return None, head, after_scheme[first:]
+
+
+def _ambiguous(userinfo: str | None) -> bool:
+    return userinfo is not None and any(c in userinfo for c in "/?#")
+
+
+# The start of a scheme-qualified URL in free text. Linear (audit F-02,
+# agent-build-workflow-2026-09 p4): the lookbehind lets an attempt start only at the
+# beginning of a run of scheme characters, and every quantifier is possessive, so a long
+# run is scanned once. `pre` keeps leading digits/`+.-` so `1https://tok@h` is still found.
+# Each URL runs to whitespace or the next URL's start, whichever comes first, so a URL
+# nested in another's query or joined to it by a comma is redacted on its own. A quote does
+# not end it: `'` is valid in a password, and ending there let the `@` fall outside the URL.
+_URL_START_RE = re.compile(
+    r"(?<![a-zA-Z0-9+.\-])(?P<pre>[0-9+.\-]*+)(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*+://)"
+)
+_URL_END_RE = re.compile(r"\s")
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
+
+
+def url_host(url: str) -> str | None:
+    """The host of a URL, never the URL: `https://u:p@host/x` and `git@host:x` → host.
+
+    Total: it runs after a side effect (git_remote add, git_clone, npm publish), so it never
+    raises. A host that is not host-shaped is None.
+    """
+    try:
+        if _SCHEME_RE.match(url):
+            userinfo, hostport, _rest = split_authority(url.split("://", 1)[1])
+            if _ambiguous(userinfo):
+                return None
+            host = hostport
+            if host.startswith("["):
+                host = host[1 : host.find("]")] if "]" in host else ""
+            else:
+                host = host.rsplit(":", 1)[0] if ":" in host else host
+        else:
+            host = url.split("@", 1)[-1].split(":", 1)[0]
+    except Exception:
+        return None
+    return host if host and _HOST_RE.fullmatch(host) else None
+
+
+_HOST_RE = re.compile(r"[A-Za-z0-9.:-]{1,253}")
+
+# The environment a publish child (python -m build, twine, npm) gets: these names and
+# nothing else (vikunja#610). `python -m build` runs the repository's own build backend and
+# `npm publish` its lifecycle scripts, so before 0.21.0 repo code received githost's whole
+# environment: GITHUB_TOKEN, GITEA_TOKEN, WOODPECKER_TOKEN, AUDIT_SIGNING_KEY and
+# GITHOST_MCP_AUTH_TOKEN. Each call site adds the one credential its child needs
+# (TWINE_PASSWORD, NPM_TOKEN) explicitly. TMPDIR is kept because build and npm write
+# their scratch trees under it. No shadow mode: tests run a real `python -m build` and a
+# real `npm pack` under it.
 #
-# Linear, not quadratic (audit F-02, agent-build-workflow-2026-09 p4). The plain form
-# `[a-zA-Z][a-zA-Z0-9+.\-]*://` retries from every position in a long run of scheme
-# characters, scanning to the run's end each time: 128k chars took 8.6 s, and scrub()
-# runs on caller strings. Possessive quantifiers alone do not fix that (the scan, not the
-# backtracking, is the cost). The lookbehind lets an attempt start only at the beginning
-# of a run, and `pre` keeps leading digits/`+.-` so `1https://tok@h` is still redacted
-# exactly as before. Output-equivalent to the old pattern on a 300k-string fuzz.
-_URL_USERINFO_RE = re.compile(
-    r"(?<![a-zA-Z0-9+.\-])(?P<pre>[0-9+.\-]*+)"
-    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*+://)[^/@\s]++@"
+# PM2's IPC variables (NODE_CHANNEL_FD and friends) are not on the list, so they stay out
+# by construction: a Node child that inherits them gets a stray fd and SIGABRTs at
+# teardown (HLOPS-1, GHOST-11).
+CHILD_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "LANG",
+    "TZ",
+    "TMPDIR",
+    # The POSIX locale categories, by name: a prefix match would admit any LC_-named
+    # variable a launcher happened to set.
+    "LC_ALL",
+    "LC_COLLATE",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LC_MONETARY",
+    "LC_NUMERIC",
+    "LC_TIME",
 )
-
-# PM2 sets these variables in the process environment for its own IPC channel.
-# If they leak into spawned children, any Node.js child (npm, twine's helper
-# scripts run under `python -m build`, or any node CLI) inherits a stray file
-# descriptor and SIGABRTs during process teardown — 100% reproducible via the
-# shelling-out tool, 0% via a direct shell. Strip them before exec so shelled-out
-# commands run in a clean environment. (HLOPS-1, GHOST-11)
-_PM2_IPC_ENV_VARS = (
-    "NODE_CHANNEL_FD",
-    "NODE_CHANNEL_SERIALIZATION_MODE",
-    "NODE_UNIQUE_ID",
-)
-
 # Phase 3 (workspace-policy plan, vikunja#349) added validate_write_globs() and wired it
 # into git_add/git_commit to enforce Config.write_globs/write_globs_deny. Before this
 # landed, an agent whose policy grant carried a non-empty write_globs would otherwise have
@@ -88,8 +193,8 @@ _GLOB_ENFORCEMENT_IMPLEMENTED = True
 
 
 def clean_env() -> dict:
-    """Return a copy of the current environment with PM2 IPC vars stripped."""
-    return {k: v for k, v in os.environ.items() if k not in _PM2_IPC_ENV_VARS}
+    """The environment for a publish child: CHILD_ENV_ALLOWLIST's names only."""
+    return {k: os.environ[k] for k in CHILD_ENV_ALLOWLIST if k in os.environ}
 
 
 def canonical_path(repo_path: str) -> Path:
@@ -118,16 +223,26 @@ def _validate_path(
         )
     resolved = canonical_path(repo_path)
 
+    # Each root is matched as written, and only the requested path is resolved
+    # (vikunja#996): resolving the root here let a root swapped for a symlink carry the
+    # grant to the link's target. A root that is a symlink now (swapped after load, when
+    # config refused any that already were) is refused.
+    refused: list[str] = []
     for root in roots:
+        written = root_as_written(root)
+        if os.path.islink(written):
+            refused.append(written)
+            continue
         try:
-            resolved.relative_to(Path(root).expanduser().resolve())
+            resolved.relative_to(written)
             return str(resolved)
         except ValueError:
             continue
 
+    note = f"; refused because each is a symlink: {refused}" if refused else ""
     raise PathNotAllowed(
         f"Path '{repo_path}' is not under any allowed root ({list_name}, source: {source}). "
-        f"Allowed: {roots}"
+        f"Allowed: {roots}{note}"
     )
 
 
@@ -228,7 +343,6 @@ _ALLOWED_REMOTE_SCHEMES = ("http://", "https://", "ssh://", "git://")
 # a bare userinfo is how a PAT is normally embedded (`https://<token>@github.com/…`),
 # so there it is refused outright; over ssh/git `git@` is just the SSH user.
 _LOGIN_USERINFO_SCHEMES = ("ssh://", "git://")
-_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 # scp-style: [user@]host:path. `git@github.com:owner/repo.git` is the form every
 # forge remote uses, so it has to keep working — but only without a password.
 #
@@ -323,12 +437,13 @@ def validate_tag_name(name: str) -> None:
 
 
 # A commit ref for the CI status reads: a SHA, or a branch/tag name. It lands in a URL path
-# (Gitea, via httpx, which resolves dot segments) or in PyGithub's, so `..`, a leading `-`
-# and anything outside the characters forge's branch and tag names use are refused.
-# SECURITY[deferred]: stricter than git (refuses a leading `_` and `#`); fails closed.
-# Widening tracked in vikunja#1429.
-# Audit: 2026-11-08/githost-scoped-2026-11-p1-ci-diagnostics (CR-11).
-_REF_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/+-]*\Z")
+# (Gitea, through quote(ref, safe=""); PyGithub's get_commit quotes it the same way), so it
+# is one encoded segment either way. The rules follow `git check-ref-format` where it
+# matters here (vikunja#1429): a leading `_` and a `#` are valid branch names, so they are
+# accepted; `..`, a leading `-`, a component starting with `.` (which covers `.` and `..`
+# segments), an empty segment, a trailing `/`, whitespace, control characters and git's
+# own forbidden characters are refused.
+_REF_RE = re.compile(r"\A[A-Za-z0-9_#][A-Za-z0-9._/+#-]*\Z")
 _REF_MAX = 255
 
 
@@ -338,10 +453,17 @@ def validate_ref(ref: str) -> None:
         raise InvalidArgument(f"ref must be 1-{_REF_MAX} characters")
     if ref.startswith("-"):
         raise InvalidArgument(f"ref {_LEADING_DASH_ERR}")
-    if ".." in ref or not _REF_RE.match(ref) or ref.endswith("/") or "//" in ref:
+    if (
+        ".." in ref
+        or not _REF_RE.match(ref)
+        or ref.endswith("/")
+        or "//" in ref
+        or "/." in ref
+        or ref.endswith(".lock")
+    ):
         raise InvalidArgument(
-            "ref must be a SHA or a branch/tag name (letters, digits, '.', '_', '/', '+', "
-            "'-'; no '..', no leading '-', no empty path segment)"
+            "ref must be a SHA or a branch/tag name (letters, digits, '.', '_', '#', '/', "
+            "'+', '-'; no '..', no leading '-', no empty or dot-led path segment)"
         )
 
 
@@ -374,11 +496,9 @@ def validate_remote_url(url: str) -> None:
                 f"Unsupported remote URL scheme '{scheme}://'. "
                 f"Allowed: {', '.join(_ALLOWED_REMOTE_SCHEMES)}, or scp-style user@host:path."
             )
-        rest = url.split("://", 1)[1]
-        authority = rest.split("/", 1)[0]
-        if "@" in authority:
-            userinfo = authority.rsplit("@", 1)[0]
-            if not url.startswith(_LOGIN_USERINFO_SCHEMES):
+        userinfo, _hostport, _rest = split_authority(url.split("://", 1)[1])
+        if userinfo is not None:
+            if not url.startswith(_LOGIN_USERINFO_SCHEMES) or _ambiguous(userinfo):
                 raise RemoteUrlRejected(
                     "Remote URL embeds credentials in its userinfo component. Refused rather "
                     "than redacted: it would persist in .git/config. Use an scp-style SSH "
@@ -433,30 +553,72 @@ def redact_url_credentials(text: str) -> str:
     Complements mask_credentials(), which can only redact tokens it already knows
     about from config. Use both on anything derived from git remote output.
     """
-    return _URL_USERINFO_RE.sub(lambda m: f"{m.group('pre')}{m.group('scheme')}***@", text)
+    starts = list(_URL_START_RE.finditer(text))
+    out: list[str] = []
+    pos = 0
+    for i, m in enumerate(starts):
+        body = m.end()
+        limit = starts[i + 1].start() if i + 1 < len(starts) else len(text)
+        stop = _URL_END_RE.search(text, body, limit)
+        end = stop.start() if stop else limit
+        userinfo, hostport, rest = split_authority(text[body:end])
+        if userinfo:  # None, or an empty `scheme://@host`: nothing to hide
+            out.append(f"{text[pos:body]}***@{hostport}{rest}")
+            pos = end
+    out.append(text[pos:])
+    return "".join(out)
 
 
-# SECURITY[deferred]: a credential this process does not hold in its own config, appearing
-# OUTSIDE a URL, survives both passes — `Authorization: Bearer <unknown-tok>` comes through
-# intact. mask_credentials() only replaces values it knows; redact_url_credentials() only
-# matches `scheme://userinfo@`. Measured 2026-09-19 against forge's real secrets: 7
-# adversarial cases in the shapes git/GitPython actually emit, 0 leaks — the gap is narrow
-# but real. The exposure shape is pre-existing (this function's output already reaches
-# callers at ~40 sites in tools/); what changed is that audit.py now also writes it to a
-# durable HMAC-signed log.
+# Credentials this process does not hold in its own config, redacted by shape (vikunja#913).
+# mask_credentials() only replaces values it knows and redact_url_credentials() only matches
+# `scheme://userinfo@`, so `Authorization: Bearer <unknown>` came through both, and so did
+# a hook's stderr printing `GITHUB_TOKEN=ghp_…` (both captured for real in
+# tests/fixtures/scrub_corpus.json). scrub() is on every tool return path, so the shapes
+# are narrow, and the corpus test asserts both directions: every planted credential is
+# redacted and every ordinary message comes back byte-identical.
 #
-# Deferred by Ted 2026-09-19 rather than patched here: scrub() is on every tool return
-# path, so an over-broad shape-based redactor silently mangles legitimate error text —
-# a failure mode harder to notice than the leak it fixes. Needs its own build with a
-# fixture corpus asserting both directions.
-#
-# Target: vikunja#913. Audit: 2026-09-19/agent-build-workflow-2026-09-p1-githost-telemetry.
+# The value after an Authorization keyword. The keyword may be quoted (a dict or JSON repr:
+# `'Authorization': 'Bearer …'`) or prefixed (`HTTP_AUTHORIZATION=`, `X-Authorization:`).
+# After it comes either a scheme word (Bearer, token, Basic, Digest, Negotiate) and a value
+# of any length, or a bare value of at least 20 characters, so `Authorization: Bearer`
+# alone and `authorization: required` are left as they are (audit F-02). Linear: a fixed
+# keyword whose start a lookbehind pins, possessive quantifiers between it and the value
+# (two plain `\s*` around an optional quote split one run of spaces every way: quadratic),
+# then one character class with no overlap with what precedes it.
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)((?<![A-Za-z0-9])authorization['\"]?+\s*+[:=]\s*+['\"]?+\s*+"
+    r"(?:(?:bearer|token|basic|digest|negotiate)\s++(?=[^\s'\"<>,;])|(?=[^\s'\"<>,;]{20})))"
+    r"[^\s'\"<>,;]+"
+)
+# Vendor-prefixed tokens, keeping the prefix (it says which credential leaked). Each length
+# floor sits below the vendor's real token length and above ordinary identifiers that share
+# a prefix (`npm_config_cache`, `pypi-publish`).
+_VENDOR_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(?:"
+    r"(?P<gh>gh[pousr]_)[A-Za-z0-9]{30,}"
+    r"|(?P<ghpat>github_pat_)[A-Za-z0-9_]{40,}"
+    r"|(?P<glpat>glpat-)[A-Za-z0-9_-]{20,}"
+    r"|(?P<slack>xox[bp]-)[A-Za-z0-9-]{10,}"
+    r"|(?P<npm>npm_)[A-Za-z0-9]{30,}"
+    r"|(?P<pypi>pypi-)[A-Za-z0-9_-]{40,}"
+    r")"
+)
+
+
+def redact_credential_shapes(text: str) -> str:
+    """Redact an Authorization header value and vendor-prefixed tokens by shape."""
+    text = _AUTH_HEADER_RE.sub(lambda m: f"{m.group(1)}***", text)
+    return _VENDOR_TOKEN_RE.sub(lambda m: f"{m.group(m.lastgroup)}***", text)
+
+
 def scrub(text: str) -> str:
-    """Full credential scrub for caller-facing strings: known tokens + URL userinfo.
+    """Full credential scrub for caller-facing strings.
 
-    Note the limit documented in the SECURITY[deferred] comment above: an unknown
-    credential outside a URL is not redacted. Callers writing this output to a durable
-    sink should be aware of that, and must scrub before any truncation — cutting first
-    can split a token and leave an unmatched prefix.
+    Known tokens (mask_credentials), URL userinfo, then credential shapes (an
+    Authorization header value, vendor-prefixed tokens). A credential with none of those
+    shapes, held nowhere in this process's config, still passes. Callers writing this
+    output to a durable sink must scrub before any truncation: cutting first can split a
+    token and leave an unmatched prefix.
     """
-    return redact_url_credentials(mask_credentials(text))
+    return redact_credential_shapes(redact_url_credentials(mask_credentials(text)))

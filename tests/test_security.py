@@ -5,7 +5,6 @@ import os
 import pytest
 
 from githost_mcp.security import (
-    _PM2_IPC_ENV_VARS,
     RemoteUrlRejected,
     WriteGlobDenied,
     clean_env,
@@ -383,16 +382,35 @@ def _set_writer_policy(tmp_path, monkeypatch, write_globs=None, write_globs_deny
 # --- clean_env (GHOST-11) -----------------------------------------------------
 
 
+_PM2_IPC_ENV_VARS = ("NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE", "NODE_UNIQUE_ID")
+
+
 def test_clean_env_strips_pm2_vars(monkeypatch):
+    """HLOPS-1/GHOST-11 regression: the PM2 IPC vars stay out (by construction since the
+    allowlist, vikunja#610)."""
     for var in _PM2_IPC_ENV_VARS:
         monkeypatch.setenv(var, "leaked")
-    monkeypatch.setenv("KEEP_ME", "yes")
 
     env = clean_env()
 
     for var in _PM2_IPC_ENV_VARS:
         assert var not in env
-    assert env["KEEP_ME"] == "yes"
+
+
+def test_clean_env_is_an_allowlist(monkeypatch):
+    from githost_mcp.security import CHILD_ENV_ALLOWLIST
+
+    monkeypatch.setenv("KEEP_ME", "yes")
+    monkeypatch.setenv("GITHUB_TOKEN", "planted")
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    monkeypatch.setenv("LC_FAKE_PREFIX", "x")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    env = clean_env()
+
+    assert set(env) <= set(CHILD_ENV_ALLOWLIST)
+    assert "KEEP_ME" not in env and "GITHUB_TOKEN" not in env and "LC_FAKE_PREFIX" not in env
+    assert env["PATH"] == "/usr/bin:/bin" and env["LC_ALL"] == "C.UTF-8"
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +595,61 @@ def test_validate_branch_name_rejects_unsafe_shapes(name):
         validate_branch_name(name)
 
 
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "_x",
+        "fix/#1",
+        "#383",
+        "main",
+        "feature/deploy-guardrails",
+        "v1.2.0+build",
+        "a" * 40,
+        "release/v1.2.0",
+        "user_name/topic",
+    ],
+)
+def test_validate_ref_accepts_valid_git_branch_names(ref):
+    """vikunja#1429: a leading `_` and `#` are valid git branch names."""
+    from githost_mcp.security import validate_ref
+
+    validate_ref(ref)
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "",
+        "-x",
+        "a..b",
+        "../x",
+        "x y",
+        "x" * 300,
+        "main\n",
+        "a//b",
+        "trailing/",
+        "a/./b",
+        ".hidden",
+        "a/.b",
+        "x.lock",
+        "ctrl\x01",
+        "tab\tx",
+        "q?x",
+        "a~1",
+        "a^",
+        "a:b",
+        "a\\b",
+        "@{0}",
+    ],
+)
+def test_validate_ref_rejects_unsafe_shapes(ref):
+    from githost_mcp.errors import InvalidArgument
+    from githost_mcp.security import validate_ref
+
+    with pytest.raises(InvalidArgument):
+        validate_ref(ref)
+
+
 def test_validators_refuse_a_trailing_newline():
     """`$` matches before a final newline under re.match (KB IV-70); every validator uses \\Z."""
     from githost_mcp.errors import InvalidArgument, RemoteNameInvalid
@@ -619,3 +692,178 @@ def test_push_names_refuse_full_refs_and_head(name):
         validate_branch_name(name)
     with pytest.raises(ValueError):
         validate_tag_name(name)
+
+
+# ---------------------------------------------------------------------------
+# One authority parser (#1434 F-02): a credential in front of `/`, `?` or `#` before `@`
+# ---------------------------------------------------------------------------
+
+_HEX40 = "ab12" * 10
+_F02_PROBES = [
+    (f"https://{_HEX40}/x@gitea.example/o/r.git", "gitea.example"),
+    (f"https://{_HEX40}?x@gitea.example/o/r.git", "gitea.example"),
+    (f"https://{_HEX40}#x@gitea.example/o/r.git", "gitea.example"),
+    ("https://user:pw/x@host/o/r.git", "host"),
+    ("https://a@b@gitea.example/o/r", "gitea.example"),
+]
+
+
+@pytest.mark.parametrize(("url", "host"), _F02_PROBES)
+def test_f02_validator_refuses_userinfo_before_a_path_character(url, host):
+    with pytest.raises(RemoteUrlRejected):
+        validate_remote_url(url)
+
+
+@pytest.mark.parametrize(("url", "host"), _F02_PROBES)
+def test_f02_redactor_removes_userinfo_before_a_path_character(url, host):
+    from githost_mcp.security import redact_url_credentials, scrub
+
+    for fn in (redact_url_credentials, scrub):
+        out = fn(f"fatal: unable to access '{url}': 403")
+        assert _HEX40 not in out and "user:pw" not in out and "a@b" not in out
+        assert f"https://***@{host}" in out
+
+
+@pytest.mark.parametrize(("url", "host"), _F02_PROBES)
+def test_f02_url_host_does_not_guess_past_an_ambiguous_authority(url, host):
+    # git and npm read the authority up to the first `/`, so the name after the `@` is not
+    # where they connect. Naming it recorded a host the client never reached (audit F-04);
+    # an ambiguous authority has no host to record.
+    from githost_mcp.security import url_host
+
+    userinfo = url.split("://", 1)[1].rsplit("@", 1)[0]
+    if any(c in userinfo for c in "/?#"):
+        assert url_host(url) is None
+    else:  # every `@` sits before the first `/`: the host is not in doubt
+        assert url_host(url) == host
+    assert url_host(f"https://{host}/o/r.git") == host
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "PUT https://registry.npmjs.org/@scope%2fpkg 401",
+        "PUT http://127.0.0.1:4873/@scope%2fpkg",
+        "GET http://localhost:4873/@scope/pkg",
+        "GET http://verdaccio:4873/@scope/pkg",
+        "https://github.com/o/r@v1.2.0",
+        "file:///home/u/a@b",
+        "see https://example.com/path?q=a@b.c",
+        "x://@host",
+    ],
+)
+def test_ordinary_urls_with_an_at_in_the_path_are_untouched(text):
+    from githost_mcp.security import redact_url_credentials
+
+    assert redact_url_credentials(text) == text
+
+
+@pytest.mark.parametrize(
+    ("url", "host"),
+    [
+        ("https://gitea.example.org/org/repo.git", "gitea.example.org"),
+        ("ssh://git@github.com:22/o/r.git", "github.com"),
+        ("git@github.com:o/r.git", "github.com"),
+        ("https://registry.npmjs.org/", "registry.npmjs.org"),
+        ("https://[::1]:8443/x", "::1"),
+        ("https://", None),
+    ],
+)
+def test_url_host_ordinary(url, host):
+    from githost_mcp.security import url_host
+
+    assert url_host(url) == host
+
+
+def test_ssh_login_user_still_accepted_but_not_with_a_path_character():
+    validate_remote_url("ssh://git@github.com/o/r.git")
+    with pytest.raises(RemoteUrlRejected):
+        validate_remote_url("ssh://git/x@github.com/o/r.git")
+
+
+def test_redaction_is_linear_on_a_long_url_with_many_ats():
+    import time
+
+    from githost_mcp.security import redact_url_credentials
+
+    for value in (
+        "https://" + "a/" * 32000 + "@h",
+        "https://" + "@" * 64000,
+        "https://" + "x" * 64000,
+    ):
+        t0 = time.perf_counter()
+        redact_url_credentials(value)
+        assert time.perf_counter() - t0 < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "redirect https://h.example/login?next=https://user:SECRETTOK@evil.example/x",
+        "remotes=https://a:SECRETTOK@h1.example,https://b:SECRETTOK@h2.example",
+        "https://h.example/?u=https://SECRETTOK@h2.example;ftp://SECRETTOK@h3.example",
+    ],
+)
+def test_redaction_reaches_a_url_nested_in_or_joined_to_another(text):
+    # The 0.21.0 rewrite first matched each URL to the end of its token, so a second URL in
+    # the first one's query, or after a comma, was never looked at (0.20.0 redacted both).
+    from githost_mcp.security import redact_url_credentials
+
+    out = redact_url_credentials(text)
+    assert "SECRETTOK" not in out
+    assert out.count("***@") == text.count("SECRETTOK")
+
+
+def test_redaction_is_linear_on_many_nested_schemes():
+    import time
+
+    from githost_mcp.security import redact_url_credentials
+
+    for value in ("a://" * 16000, "https://h/?u=" * 5000 + "https://t@h", "x://t@h," * 8000):
+        t0 = time.perf_counter()
+        redact_url_credentials(value)
+        assert time.perf_counter() - t0 < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "fatal: https://user:pa'ss@h.example/x failed",  # a quote in the password
+        'https://user:pa"ss@h.example/x',
+        "https://bot:4821#SECRET@h.example/",  # host-shaped head, then # before the @
+        "https://a.b?SECRET@h.example/",  # dotted head, then ? before the @
+        "https://u:SECRET<x@h.example/",
+    ],
+)
+def test_redaction_never_less_than_the_old_pattern_for_url_terminators(text):
+    # Audit F-01: each of these was redacted by 0.20.0's `[^/@\s]+@` and came back whole.
+    from githost_mcp.security import redact_url_credentials
+
+    out = redact_url_credentials(text)
+    assert "SECRET" not in out and "pa'ss" not in out and 'pa"ss' not in out
+    assert "***@h.example/" in out
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://bot:4821#x@h.example/",
+        "https://tok/x@github.com/o/r",
+        "https://2130706433/x@e.org/",
+    ],
+)
+def test_url_host_is_none_when_the_userinfo_is_ambiguous(url):
+    # Audit F-01/F-04: guessing a host here recorded one npm never connected to.
+    from githost_mcp.security import url_host
+
+    assert url_host(url) is None
+
+
+def test_single_label_host_with_an_at_in_the_path_keeps_its_host():
+    # CR-15: `https://verdaccio/@scope/pkg` is a registry URL, not a credential.
+    from githost_mcp.security import redact_url_credentials, url_host, validate_remote_url
+
+    url = "https://verdaccio/@scope/pkg"
+    assert redact_url_credentials(url) == url
+    assert url_host(url) == "verdaccio"
+    validate_remote_url("https://gitea/@org/repo.git")

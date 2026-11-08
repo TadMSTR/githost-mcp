@@ -305,6 +305,25 @@ def test_lease_push_with_a_stale_sha_is_refused(tools, env):
     assert _entries()[-1]["result"] == "error:PushRejected"
 
 
+def test_lease_push_up_to_date_with_a_stale_sha_is_not_reported_as_a_replacement(tools, env):
+    """git answers "[up to date]", exit 0, for a push that moves nothing, without checking
+    the lease (CodeRabbit CR-12, p4; probed on git 2.47.3). githost used to return success
+    with `replaced_sha` set to the stale sha."""
+    at = env["clone"].commit("origin/feat").hexsha
+    assert env["clone"].head.commit.hexsha == at
+    out = tools["git_push_force_with_lease"](env["path"], "feat", "f" * 40)
+    assert "error" in out and "pushed" not in out and "replaced_sha" not in out
+    assert "lease was never checked" in out["error"]
+    assert env["origin"].commit("feat").hexsha == at
+    assert _entries()[-1]["result"] == "error:LeaseMismatch"
+
+
+def test_lease_push_up_to_date_with_the_right_sha_succeeds(tools, env):
+    at = env["clone"].commit("origin/feat").hexsha
+    out = tools["git_push_force_with_lease"](env["path"], "feat", at)
+    assert out["pushed_sha"] == at and out["replaced_sha"] == at
+
+
 @pytest.mark.parametrize("branch", ["main", "master"])
 def test_lease_push_to_a_protected_name_never_reaches_the_network(tools, env, branch):
     # No local origin/HEAD: any default-branch lookup would have to ask the remote, so

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "githost-mcp"
-version = "0.20.0"
+version = "0.21.0"
 description = "Unified local + multi-provider git MCP server with per-agent audit trail"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -87,6 +87,8 @@ dev = [
     "pytest-cov>=5.0",
     "respx>=0.21",
     "twine>=5.0",
+    # tests/test_child_env.py runs a real `python -m build` under clean_env() (vikunja#610).
+    "build>=1.2",
     "ruff>=0.6",
     "pip-audit>=2.7",
 ]

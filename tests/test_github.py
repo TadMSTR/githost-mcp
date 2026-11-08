@@ -158,13 +158,13 @@ def test_github_get_release_no_published_at(tools):
 
 def test_github_list_releases(tools):
     mock_repo = MagicMock()
-    mock_repo.get_releases.return_value.get_page.return_value = [_mock_release("v1.0.0")]
+    mock_repo.get_releases.return_value = [_mock_release("v1.0.0"), _mock_release("v0.9.0")]
     mock_gh = MagicMock()
     mock_gh.get_repo.return_value = mock_repo
 
     p1, p2 = _patch_gh(mock_gh)
     with p1, p2:
-        result = tools["github_list_releases"]("owner/repo", limit=5)
+        result = tools["github_list_releases"]("owner/repo", limit=1)
     assert len(result["releases"]) == 1
     assert result["releases"][0]["tag"] == "v1.0.0"
 

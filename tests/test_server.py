@@ -65,7 +65,9 @@ def test_main_http_calls_run_with_host_and_port(monkeypatch, tmp_path):
     reset_config()
     with patch.object(srv.mcp, "run") as run:
         srv.main()
-    run.assert_called_once_with(transport="http", host="127.0.0.1", port=8620)
+    run.assert_called_once_with(
+        transport="http", host="127.0.0.1", port=8620, show_banner=False, log_level="warning"
+    )
 
 
 def test_main_http_without_auth_token_fails_closed(monkeypatch, tmp_path):
@@ -107,7 +109,9 @@ def test_main_http_min_length_auth_token_allowed(monkeypatch, tmp_path):
     reset_config()
     with patch.object(srv.mcp, "run") as run:
         srv.main()
-    run.assert_called_once_with(transport="http", host="127.0.0.1", port=8620)
+    run.assert_called_once_with(
+        transport="http", host="127.0.0.1", port=8620, show_banner=False, log_level="warning"
+    )
 
 
 def test_main_http_nonloopback_host_fails_closed(monkeypatch, tmp_path):
@@ -132,7 +136,9 @@ def test_main_http_nonloopback_host_allowed_with_explicit_override(monkeypatch, 
     reset_config()
     with patch.object(srv.mcp, "run") as run:
         srv.main()
-    run.assert_called_once_with(transport="http", host="0.0.0.0", port=8620)
+    run.assert_called_once_with(
+        transport="http", host="0.0.0.0", port=8620, show_banner=False, log_level="warning"
+    )
 
 
 def test_auth_is_none_when_token_unset(monkeypatch, tmp_path):

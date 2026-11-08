@@ -531,3 +531,18 @@ async def test_get_json_capped_from_a_compressing_server():
         )
         async with httpx.AsyncClient() as client:
             assert await _get_json_capped(client, url, {}) == [{"line": 0}]
+
+
+def test_woodpecker_error_body_is_scrubbed_before_the_cut():
+    # A vendor token straddling the 300-character cut: cutting first leaves a fragment
+    # shorter than the shape's length floor, which then passes the scrub (audit F-06).
+    import httpx
+
+    from githost_mcp.tools.woodpecker import _check_response
+
+    token = "ghp_" + "A" * 36
+    body = "x" * 280 + " " + token
+    resp = httpx.Response(400, text=body, request=httpx.Request("GET", "http://wp/api/x"))
+    with pytest.raises(ValueError) as exc:
+        _check_response(resp)
+    assert "AAAAAAAAAA" not in str(exc.value)

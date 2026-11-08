@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import errno
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -62,6 +65,7 @@ from ..security import (
     canonical_path,
     redact_url_credentials,
     scrub,
+    url_host,
     validate_branch_name,
     validate_read_path,
     validate_remote_name,
@@ -108,7 +112,6 @@ def _gitea_host(gitea_url: str) -> str:
 
 
 _ABBREV_SHA_RE = re.compile(r"[0-9a-f]{4,40}")
-_HOST_RE = re.compile(r"[A-Za-z0-9.-]{1,253}")
 
 
 def _head_sha(repo: git.Repo) -> str | None:
@@ -148,14 +151,20 @@ def push_effect_fields(
 
     With `ref`, only the PushInfo for `refs/heads/<ref>` counts: a tag pushed alongside
     (push.followTags) would otherwise mark the branch `created` and drop its old sha. If
-    no PushInfo names the ref, every one is used, as before.
+    no PushInfo names the ref, every one is used, as before, but the fields may then
+    describe another ref: `ref_matched: None` is added, so AuditCtx names it in
+    `effect_incomplete`, and a warning is logged (#1434 R2-01).
     """
     infos = list(push_info)
+    unmatched = False
     if ref is not None:
         wanted = f"refs/heads/{ref}"
         matching = [i for i in infos if getattr(i, "remote_ref_string", None) == wanted]
         if matching:
             infos = matching
+        else:
+            unmatched = True
+            log.warning("push_effect_ref_unmatched", ref=ref, infos=len(infos))
     created = forced = up_to_date = False
     old: str | None = None
     for info in infos:
@@ -176,18 +185,93 @@ def push_effect_fields(
         fields["old_sha"] = new_sha
     else:
         fields["old_sha"] = old
+    if unmatched:
+        fields["ref_matched"] = None
     return fields
+
+
+_RENAME_NOREPLACE = 1
+_AT_FDCWD = -100
+
+
+def rename_noreplace(src: str, dst: str) -> None:
+    """rename(2) that refuses an existing `dst`, even an empty directory or a symlink.
+
+    Plain os.rename replaces an empty directory silently, so a `dest` created between the
+    existence check and the rename would be overwritten. renameat2(RENAME_NOREPLACE) is
+    atomic. Where the kernel or filesystem does not offer it, the fallback checks and
+    renames, which leaves a window, and logs that it did.
+    """
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = libc.renameat2
+    except (OSError, AttributeError):
+        renameat2 = None
+    if renameat2 is not None:
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rc = renameat2(_AT_FDCWD, os.fsencode(src), _AT_FDCWD, os.fsencode(dst), _RENAME_NOREPLACE)
+        if rc == 0:
+            return
+        err = ctypes.get_errno()
+        if err == errno.EEXIST:
+            raise AlreadyExists(f"{dst} already exists")
+        if err not in (errno.ENOSYS, errno.EINVAL):
+            raise OSError(err, os.strerror(err), dst)
+    log.warning("rename_noreplace_unavailable", dst=dst)
+    if os.path.lexists(dst):
+        raise AlreadyExists(f"{dst} already exists")
+    os.rename(src, dst)
+
+
+# SECURITY[deferred]: a fetch refspec that excludes the branch can leave a stale tracking
+# ref, which is then reported. Ticket vikunja#1450. Target: open.
+# Audit: 2026-11-08/githost-scoped-2026-11-p4-githost-correctness (CR-17).
+def sent_sha(repo: git.Repo, remote: str, branch: str, captured: str) -> str:
+    """The sha a successful push actually sent: the remote-tracking ref git just updated.
+
+    `captured` is read before the push, but git resolves `refs/heads/<branch>` itself when
+    it runs, so a concurrent commit in that window was pushed while the captured sha was
+    reported (CodeRabbit CR-11, p4; probed). git updates `<remote>/<branch>` to the value it
+    pushed, so that is the answer; `captured` is the fallback when there is no tracking ref
+    (a remote with no fetch refspec).
+    """
+    try:
+        sha = repo.remotes[remote].refs[branch].commit.hexsha
+    except Exception:
+        return captured
+    if sha != captured:
+        log.warning("push_sent_a_moved_ref", remote=remote, branch=branch)
+    return sha
+
+
+def lease_unchecked(push_info, branch: str) -> bool:
+    """True when the push of `refs/heads/<branch>` was up to date, so git skipped the lease."""
+    wanted = f"refs/heads/{branch}"
+    return any(
+        getattr(i, "remote_ref_string", None) == wanted
+        and bool(i.flags & git.remote.PushInfo.UP_TO_DATE)
+        for i in push_info
+    )
 
 
 def commit_effect_fields(commit) -> dict:
     """`sha`, `parent_sha` (absent on a root commit, with `root: true`) and a file count.
 
+    A merge commit also records every parent, first parent first, as `merge_parents`.
     The count only: commit messages and file names never go in an effect record.
     """
     fields: dict = {"sha": commit.hexsha}
     parents = list(commit.parents)
     if parents:
         fields["parent_sha"] = parents[0].hexsha
+        if len(parents) > 1:
+            fields["merge_parents"] = [p.hexsha for p in parents]
     else:
         fields["root"] = True
     try:
@@ -197,17 +281,35 @@ def commit_effect_fields(commit) -> dict:
     return fields
 
 
-def url_host(url: str) -> str | None:
-    """The host of a remote URL, never the URL: `https://u:p@host/x` and `git@host:x` → host.
+# The files `git commit` removes when it concludes a merge (builtin/commit.c,
+# remove_merge_branch_state). AUTO_MERGE is git 2.42+; unlinking a missing one is a no-op.
+_MERGE_STATE_FILES = ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "MERGE_RR", "AUTO_MERGE")
+_OBJECT_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
-    Total: it runs after a side effect (git_remote add, git_clone), so it must never raise.
-    urlsplit refuses some URLs validate_remote_url accepts (an unbalanced `[`); those are None.
+
+def merge_head_shas(repo: git.Repo) -> list[str]:
+    """The shas in MERGE_HEAD, or [] when no merge is in progress.
+
+    `repo.git_dir` is the per-worktree git directory, which is where a linked worktree
+    keeps its MERGE_HEAD (not the common dir).
     """
     try:
-        host = urlsplit(url).hostname if "://" in url else url.split("@", 1)[-1].split(":", 1)[0]
-    except ValueError:
-        return None
-    return host if host and _HOST_RE.fullmatch(host) else None
+        text = (Path(repo.git_dir) / "MERGE_HEAD").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError):
+        raise InvalidArgument("A merge is in progress but MERGE_HEAD is unreadable") from None
+    shas = [line.strip() for line in text.splitlines() if line.strip()]
+    if not shas or not all(_OBJECT_SHA_RE.fullmatch(s) for s in shas):
+        raise InvalidArgument("A merge is in progress but MERGE_HEAD is malformed")
+    return shas
+
+
+def clear_merge_state(repo: git.Repo) -> None:
+    """Remove the merge state, as `git commit` does once the merge commit exists."""
+    for name in _MERGE_STATE_FILES:
+        with contextlib.suppress(FileNotFoundError):
+            (Path(repo.git_dir) / name).unlink()
 
 
 _PROVENANCE_SECTION = "githost-mcp"
@@ -250,6 +352,7 @@ def _lookup_fork_provenance(
         verdict = PROVENANCE_OWN
         for full_name in full_names:
             gh_repo = github_call(gh.get_repo, full_name)
+            _remember_visibility(full_name, getattr(gh_repo, "private", None))
             parent = getattr(gh_repo, "parent", None)
             if (
                 classify_fork_provenance(
@@ -263,10 +366,47 @@ def _lookup_fork_provenance(
                 verdict = PROVENANCE_THIRD_PARTY
                 break
     except Exception as e:
-        log.warning("fork_provenance_lookup_failed", repos=full_names, error=str(e))
+        log.warning("fork_provenance_lookup_failed", repos=full_names, error=scrub(str(e)))
         return None
     _write_cached_provenance(repo, verdict)
     return verdict
+
+
+# full_name (lowercased) -> True when the repo is private. Per process: visibility can
+# change, and a restart re-reads it. Only a definite answer is kept.
+_VISIBILITY_CACHE: dict[str, bool] = {}
+
+
+def _remember_visibility(full_name: str, private) -> None:
+    if isinstance(private, bool):
+        _VISIBILITY_CACHE[full_name.lower()] = private
+
+
+def _lookup_visibility(full_names: list[str]) -> tuple[list[str], list[str]]:
+    """(public repos, repos whose visibility could not be determined) among these.
+
+    GitHub's `private` flag, cached per process per repo (vikunja#609). A failed or
+    non-boolean answer is undetermined and not cached.
+    """
+    public: list[str] = []
+    unknown: list[str] = []
+    gh = None
+    for full_name in full_names:
+        private = _VISIBILITY_CACHE.get(full_name.lower())
+        if private is None:
+            try:
+                gh = gh or get_github()
+                value = getattr(github_call(gh.get_repo, full_name), "private", None)
+            except Exception as e:
+                log.warning("visibility_lookup_failed", repo=full_name, error=scrub(str(e)))
+                value = None
+            _remember_visibility(full_name, value)
+            private = value if isinstance(value, bool) else None
+        if private is None:
+            unknown.append(full_name)
+        elif not private:
+            public.append(full_name)
+    return public, unknown
 
 
 def _resolve_identity_mode(repo: git.Repo, requested: str, config) -> tuple[str, str]:
@@ -303,7 +443,18 @@ def _resolve_identity_mode(repo: git.Repo, requested: str, config) -> tuple[str,
             "fork provenance could not be determined for "
             f"{', '.join(candidates)} — defaulting to the public identity"
         )
-    return ownership.mode, f"{ownership.reason}, and not a fork of a repo we do not own"
+    # Ours, and not a fork: still public history if the repo is public (vikunja#609). The
+    # agent identity goes only into private repos. Undetermined resolves public, for the
+    # same reason as undetermined provenance above.
+    public, unknown = _lookup_visibility(candidates)
+    if public:
+        return IDENTITY_PUBLIC, f"public repository: {', '.join(public)}"
+    if unknown:
+        return IDENTITY_PUBLIC, (
+            f"visibility could not be determined for {', '.join(unknown)} — defaulting to "
+            "the public identity"
+        )
+    return ownership.mode, (f"{ownership.reason}, not a fork of a repo we do not own, and private")
 
 
 def _public_identity(repo: git.Repo, config) -> tuple[str, str]:
@@ -907,6 +1058,9 @@ def register(mcp) -> None:
     def git_add(repo_path: str, paths: list[str]) -> dict:
         """Stage files or paths.
 
+        Returns `staged`: every path staged after the call (what the next commit will
+        include), not only the paths named here; a directory argument lists its files.
+
         Args:
             repo_path: Absolute path to the local git repository.
             paths: List of file or directory paths to stage (relative to repo root).
@@ -920,10 +1074,12 @@ def register(mcp) -> None:
             # into .git/ internals. The git binary skips .git/ by design. (GHOST-1)
             with ac.child("git.add"):
                 repo.git.add("--", *paths)
-            staged = (
-                [item.a_path for item in repo.index.diff("HEAD")] if repo.head.is_valid() else paths
-            )
-            # A count, never the names: file names stay out of the effect record.
+            # The whole staged set after the call, read from the index: on an unborn branch
+            # this used to echo the caller's arguments, so `src/` counted as one path
+            # however many files it staged (CodeRabbit CR-10, p4).
+            staged = _staged_paths(repo)
+            # A count, never the names: file names stay out of the effect record. It counts
+            # everything staged, including paths staged before this call.
             ac.effect(paths_staged=len(staged))
             ac.finish("ok")
             return {"staged": staged}
@@ -989,16 +1145,36 @@ def register(mcp) -> None:
             signing_key = config.git_signing_key
             with ac.child("git.commit"):
                 if signing_key:
-                    # gitpython uses -S with GPG key ID (not the key value)
-                    cmd = []
-                    if actor:
-                        cmd += ["-c", f"user.name={actor.name}", "-c", f"user.email={actor.email}"]
-                    cmd += ["-S", f"--gpg-sign={signing_key}", "-m", full_message]
-                    repo.git.commit(*cmd)
+                    # gitpython uses -S with GPG key ID (not the key value). The git binary
+                    # reads MERGE_HEAD and clears the merge state itself. The identity goes
+                    # in the environment: after the subcommand, `-c` is `git commit
+                    # --reedit-message`, so `commit -c user.name=…` always failed.
+                    ident_env = (
+                        {
+                            "GIT_AUTHOR_NAME": actor.name,
+                            "GIT_AUTHOR_EMAIL": actor.email,
+                            "GIT_COMMITTER_NAME": actor.name,
+                            "GIT_COMMITTER_EMAIL": actor.email,
+                        }
+                        if actor
+                        else {}
+                    )
+                    with repo.git.custom_environment(**ident_env):
+                        repo.git.commit("-S", f"--gpg-sign={signing_key}", "-m", full_message)
                     commit = repo.head.commit
                 else:
                     kwargs = {"author": actor, "committer": actor} if actor else {}
+                    # index.commit ignores MERGE_HEAD: without this a resolved merge became a
+                    # one-parent commit and the merge state stayed behind (vikunja#1300).
+                    merge_heads = merge_head_shas(repo)
+                    if merge_heads:
+                        kwargs["parent_commits"] = [
+                            repo.head.commit,
+                            *(repo.commit(sha) for sha in merge_heads),
+                        ]
                     commit = repo.index.commit(full_message, **kwargs)
+                    if merge_heads:
+                        clear_merge_state(repo)
 
             ac.effect(**commit_effect_fields(commit))
             ac.finish("ok")
@@ -1053,8 +1229,8 @@ def register(mcp) -> None:
                 raise InvalidArgument(
                     f"'{branch_name}' is not a local branch: git_push pushes local branches only"
                 ) from None
-            # Captured before the push so the reported sha is the one that was
-            # actually sent, not whatever the ref moved to afterwards.
+            # Captured before the push as a fallback; sent_sha() replaces it with what
+            # git actually pushed once the push has succeeded.
             pushed_sha = head.commit.hexsha
             refspec = f"refs/heads/{branch_name}:refs/heads/{branch_name}"
             with ac.child("git.push", **{"githost.remote": remote}):
@@ -1081,6 +1257,8 @@ def register(mcp) -> None:
                     "summary": reason,
                 }
 
+            pushed_sha = sent_sha(repo, remote, branch_name, pushed_sha)
+
             # Set upstream when it is missing: without it, the caller's natural
             # verification (`git rev-list @{u}..HEAD`) errors instead of confirming.
             upstream_set = False
@@ -1090,7 +1268,7 @@ def register(mcp) -> None:
                     head.set_tracking_branch(repo.remotes[remote].refs[branch_name])
                 upstream_set = head.tracking_branch() is not None
             except Exception as e:  # never fail a good push over upstream bookkeeping
-                log.warning("push_upstream_not_set", branch=branch_name, error=str(e))
+                log.warning("push_upstream_not_set", branch=branch_name, error=scrub(str(e)))
 
             ac.effect(
                 remote=remote,
@@ -1440,6 +1618,18 @@ def register(mcp) -> None:
             # the push result for one.)
             with contextlib.suppress(IndexError, KeyError, AttributeError):
                 pushed_sha = repo.remotes[remote].refs[branch].commit.hexsha
+            # git answers "[up to date]" and exit 0 for a push that moves nothing without
+            # checking the lease at all: a stale `expected_sha` passed (CodeRabbit CR-12,
+            # p4; probed on git 2.47.3). Nothing moved, so there is nothing to replace, and
+            # claiming `replaced_sha: <expected>` would be false.
+            if lease_unchecked(push_info, branch) and pushed_sha != sha:
+                reason = (
+                    f"{remote}/{branch} is already at {pushed_sha}, not at expected_sha {sha}; "
+                    "nothing was pushed and the lease was never checked. Fetch, and pass the "
+                    "sha the remote branch is really at."
+                )
+                ac.finish("error:LeaseMismatch", reason)
+                return {"error": reason, "remote": remote, "branch": branch, "flags": outcome.flags}
             # The lease guarantees the remote was at `sha` when the push landed.
             ac.effect(
                 remote=remote,
@@ -1550,26 +1740,20 @@ def register(mcp) -> None:
             url = clone_url(provider, owner, repo, gitea_host)
             validate_remote_url(url)
 
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            # mkdir, not a later git-side create: it fails if anything appeared since the
-            # lexists() check, and it is what makes the cleanup below safe — this call
-            # removes only a directory it created itself.
-            # SECURITY[deferred]: between this mkdir and git starting, a same-uid process
-            # could swap the empty directory for a symlink, and git would clone through it.
-            # Nothing to gain while every agent shares one uid; revisit with per-agent uids
-            # (clone into a mkdtemp sibling, then rename). Ticket vikunja#1228.
-            # Target: agent-isolation-2026-10 p4.
-            # Audit: 2026-10-25/agent-build-workflow-2026-09-p4b-githost-bootstrap F-07.
-            try:
-                os.mkdir(dest)
-            except FileExistsError:
-                raise AlreadyExists(f"{dest} already exists") from None
+            parent = os.path.dirname(dest)
+            os.makedirs(parent, exist_ok=True)
+            # Cloned into a fresh mkdtemp sibling, then renamed into place with
+            # RENAME_NOREPLACE (vikunja#1228). mkdtemp creates the directory atomically
+            # with a name nothing else knows, so there is no empty `dest` for a same-uid
+            # process to swap for a symlink while git runs; and the rename refuses a `dest`
+            # that appeared in the meantime. A failed clone removes only the temp directory.
+            tmp = tempfile.mkdtemp(prefix=f".{os.path.basename(dest)}.clone-", dir=parent)
             # Everything up to reading the result back counts as the clone: if any of it
-            # fails, the tree is removed, so a retry is not refused as "already exists".
+            # fails, the temp tree is removed, so a retry is not refused as "already exists".
             try:
                 with ac.child("git.clone"):
-                    run_clone(url, dest, clone_args(depth, branch))
-                cloned = _open_repo(dest)
+                    run_clone(url, tmp, clone_args(depth, branch))
+                cloned = _open_repo(tmp)
                 # A clone writes every path of the tree, so a deny-scoped grant
                 # (developer's manifests/**) is checked against all of them (audit F-03).
                 listing = cloned.git.ls_files("-s", "-z")
@@ -1582,15 +1766,19 @@ def register(mcp) -> None:
                         sorted({check[p] for p in denied.denied_paths}),
                         config.allowlist_source,
                     ) from None
-                if above := symlinks_above_denied(listing, config.write_globs_deny, dest):
+                if above := symlinks_above_denied(listing, config.write_globs_deny, tmp):
                     raise WriteGlobDenied(dest, above, config.allowlist_source)
                 empty = not cloned.head.is_valid()
                 # `branch` may name a tag, which git checks out detached.
                 on_branch = not empty and not cloned.head.is_detached
                 branch_name = cloned.active_branch.name if on_branch else None
                 head_sha = None if empty else cloned.head.commit.hexsha
+                cloned.close()
+                # mkdtemp makes it 0700; a checkout is an ordinary directory.
+                os.chmod(tmp, 0o755)
+                rename_noreplace(tmp, dest)
             except BaseException:
-                shutil.rmtree(dest, ignore_errors=True)
+                shutil.rmtree(tmp, ignore_errors=True)
                 raise
 
             # The remote host only, never the URL.

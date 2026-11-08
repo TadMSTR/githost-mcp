@@ -239,8 +239,28 @@ repo's merge-UI default, `default_delete_branch_after_merge`.
 There is deliberately no delete verb and no visibility-change verb; both stay operator
 steps. **Gate both create tools with HITL.**
 
+`github_pr_merge(repo, pr_number, merge_method="merge", commit_title=None,
+commit_message=None)`: `commit_message` (0.21.0) sets the merge commit body. For a squash
+merge GitHub otherwise fills it with every branch commit message concatenated. The audit
+entry records `custom_body: true|false`, never the text.
+
 ### Gitea (17)
 `gitea_repo_get`, `gitea_repo_create`, `gitea_create_release`, `gitea_get_release`, `gitea_list_releases`, `gitea_release_update`, `gitea_release_delete`, `gitea_pr_list`, `gitea_pr_create`, `gitea_pr_get`, `gitea_pr_comment`, `gitea_pr_merge`, `gitea_pr_review` *(get_diff/get_files/submit_review/dismiss_review)*, `gitea_actions` *(list_runs/get_run/list_jobs/get_job_log/dispatch_workflow/rerun_run/rerun_failed_jobs)*, `gitea_commit_status`, `gitea_issue_read` *(get/list/comments)*, `gitea_issue_write` *(create/update/add_comment/close/reopen)*
+
+`gitea_pr_merge(repo, pr_number, merge_style="merge", message=None,
+delete_branch_after_merge=False)`: `delete_branch_after_merge` (0.21.0) deletes the PR's
+head branch once merged, and the effect records `branch_delete_requested` (what was asked;
+Gitea answers 200 even when it declines or fails the deletion). It is Gitea-only:
+GitHub has no merge parameter for it, and the repository's "Automatically delete head
+branches" setting does it there. Before 0.21.0 `message` went out under a field name
+Gitea does not have (`merge_message_title`), so it was ignored; it is now sent as
+`merge_title_field`.
+
+`gitea_commit_status(repo, ref)` reads every page of contexts (0.21.0). Gitea computes
+the combined `state` over one page and puts the page's length in `total_count`, so a
+failure past the first page read as success. githost reads up to 10 pages of 50, takes
+the worst state, returns the real `total_count`, and sets `statuses_truncated` when
+contexts remain unread.
 
 ### GitLab (13)
 `gitlab_create_release`, `gitlab_get_release`, `gitlab_list_releases`, `gitlab_release_update`, `gitlab_release_delete`, `gitlab_mr_list`, `gitlab_mr_create`, `gitlab_mr_get`, `gitlab_mr_merge`, `gitlab_mr_review` *(get_diffs/get_changed_files/approve/unapprove/get_approval_state)*, `gitlab_pipeline` *(list/get/create/retry/cancel/get_job_log)*, `gitlab_issue_read` *(get/list/comments)*, `gitlab_issue_write` *(create/update/add_comment/close/reopen)*
@@ -250,6 +270,24 @@ steps. **Gate both create tools with HITL.**
 
 ### Registry (2)
 `pypi_publish`, `npm_publish`
+
+Both run their tools (`python -m build`, `twine`, `npm`) with an allowlisted environment
+(see Credential isolation). As of 0.21.0:
+
+- `pypi_publish` `dist_dir` must be a relative path inside `repo_path`. `..`, an absolute
+  path, or a symlink that resolves outside the repo is refused.
+- `npm_publish` `registry` must be an `https://` URL with a host and no credentials, and
+  `tag` must be 1-64 of `[A-Za-z0-9._-]`.
+- The effect's `target` is the host of the registry npm picks for this package: a scoped
+  package's `@scope:registry` when one is set, else the `registry` argument, else
+  `npm config get registry` (`.npmrc` included). It is null, and named in
+  `effect_incomplete`, when `package.json` `publishConfig` sets a registry, when a scope
+  registry competes with an explicit `registry` argument, when the URL's host is
+  ambiguous, or when the lookup fails.
+- The effect's `package`/`version` are null (and incomplete) when `dist/` holds more than
+  one package or version, when it holds a file whose name cannot be read as a
+  distribution, and when `package.json` is not a regular file, is over 1 MiB, or is not a
+  JSON object.
 
 ### Woodpecker CI (8)
 `woodpecker_trigger`, `woodpecker_restart`, `woodpecker_list_pipelines`, `woodpecker_status`, `woodpecker_get_logs`, `woodpecker_pipeline_config`, `woodpecker_queue_info`, `woodpecker_pipeline_cancel`
@@ -263,10 +301,12 @@ id comes back separately as `internal_id`, for reference only; no tool accepts i
   `exit_code`, `error`, `started`, `finished`, `uuid`) and a `stalled_hint`: the first
   unfinished step and how long it has been in that state.
 - `woodpecker_list_pipelines` sends `perPage`, and passes `status`, `branch`, `event`,
-  `ref`, `before` and `after` to the server as filters, so a failure older than the latest
+  `ref`, `before` and `after` to the server as filters (`branch` and `ref` follow the
+  same rule as every other ref argument), so a failure older than the latest
   page is still found. Rows carry `commit` and a bounded `message`.
-- `woodpecker_restart` re-runs a pipeline with its original event (push, pull_request), so
-  an event-specific failure reproduces. `woodpecker_trigger` creates a `manual` run
+- `woodpecker_restart` re-runs a pipeline's original event at that pipeline's commit, so
+  an event-specific failure reproduces. That includes tag, release, deployment and cron
+  pipelines (re-running whatever they publish or deploy) and old commits. `woodpecker_trigger` creates a `manual` run
   instead. No event or deploy-target override is exposed. It is a write verb: grant it as
   you grant `woodpecker_trigger`.
 - `woodpecker_pipeline_config` returns the compiled config files a run used, through the
@@ -290,9 +330,10 @@ id comes back separately as `internal_id`, for reference only; no tool accepts i
 - At most 500 lines and about 64 KB per response; `total_lines` and `truncated` are
   present whenever lines come back (a step that has not started returns `lines: null`
   and a `note` instead). Carriage-return progress redraws collapse to the last one.
-- Every line goes through `scrub()`, which removes **only githost-mcp's own configured
-  tokens and URL userinfo**. Other credentials a pipeline prints (unmasked environment
-  values, third-party tokens) pass through, so treat log text as sensitive and don't
+- Every line goes through `scrub()`, which removes githost-mcp's own configured tokens,
+  URL userinfo, `Authorization` values and vendor-prefixed tokens (see
+  [Credential shapes](#credential-isolation)). Other credentials a pipeline prints
+  (unmasked environment values, unprefixed third-party tokens) pass through, so treat log text as sensitive and don't
   paste it into public PRs or issues. See [Credential isolation](#credential-isolation).
 - Log text and the `grep` string are never written to the audit trail or the app log.
 
@@ -390,25 +431,38 @@ said only that the call succeeded — `git_commit` recorded `{repo_path, identit
 
 | Tool | `effect` |
 |---|---|
-| `git_commit` | `sha` (full), `parent_sha` (or `root: true`), `files_changed` (count) |
-| `git_push`, `git_push_force_with_lease` | `remote`, `ref`, `old_sha` (or `created: true`), `new_sha`, `forced`, `lease`, `flags` |
+| `git_commit` | `sha` (full), `parent_sha` (or `root: true`), `files_changed` (count); a merge commit adds `merge_parents` (every parent, first parent first) |
+| `git_push` | `remote`, `ref`, `old_sha` (or `created: true`), `new_sha`, `forced`, `lease`, `flags` |
+| `git_push_force_with_lease` | `remote`, `ref`, `old_sha`, `new_sha`, `forced`, `lease`, `flags` |
 | `git_pull`, `git_checkout` | `ref`, `old_head`, `new_head` |
 | `git_tag`, `git_branch` | `name`, `target_sha`, `action` |
 | `git_branch_delete_remote` | `remote`, `ref`, `old_sha`, `action` |
-| `git_clone`, `git_worktree` | `path`, `ref`, `head_sha` (clone: the remote `host`, never the URL) |
-| `git_add` | `paths_staged` (count) |
+| `git_clone` | `path`, the remote `host` (never the URL), then `ref` and `head_sha`, or `empty: true` |
+| `git_worktree` | `path`, `ref`, `head_sha`, `action` |
+| `git_add` | `paths_staged` (count of the whole staged set after the call, including earlier staging) |
 | `git_remote` | `name`, `action` (add: the URL's `host`) |
 | `*_pr_create` / `gitlab_mr_create` | `pr_number`, `head_sha`, `base` |
-| `*_pr_merge` / `gitlab_mr_merge` | `pr_number`, `merge_sha`, `method` |
-| `*_pr_review`, `gitea_pr_comment`, `gitlab_mr_review` | `pr_number`, `review_id` or `comment_id`, `state` |
+| `github_pr_merge` | `pr_number`, `merge_sha`, `method`, `custom_body` (whether `commit_message` was given; never the text) |
+| `gitea_pr_merge` | `pr_number`, `merge_sha`, `method`, `branch_delete_requested` |
+| `gitlab_mr_merge` | `pr_number`, `merge_sha`, `method` |
+| `github_pr_review`, `gitea_pr_review` | `pr_number`, `review_id`, `state` |
+| `gitlab_mr_review` | `pr_number`, `state` |
+| `gitea_pr_comment` | `pr_number`, `comment_id` |
 | `github_pr_update` | `pr_number`, `updated_fields` (names), `marked_ready` |
 | `*_issue_write` | `issue_number`, `action` (and `comment_id`) |
-| `*_create_release`, `*_release_update`, `*_release_delete` | `tag`, `release_id`, `action` |
+| `github_create_release`, `gitea_create_release` | `tag`, `release_id` |
+| `gitlab_create_release` | `tag`, `action` |
+| `github_release_update`, `gitea_release_update`, `github_release_delete` | `tag`, `release_id`, `action` |
+| `gitea_release_delete`, `gitlab_release_update`, `gitlab_release_delete` | `tag`, `action` |
 | `release` | `tag`, `tag_sha`, `targets` (per-target `ok`/`error`) |
-| `pypi_publish`, `npm_publish` | `target`, `package`, `version` |
-| `woodpecker_trigger`, `woodpecker_restart` | `pipeline_id` (the per-repo number) |
-| `woodpecker_pipeline_cancel`, Actions/pipeline write methods | the run or pipeline id, `action` |
-| `*_repo_create`, `github_fork` | `repo`/`fork`, `repo_id`, `visibility` |
+| `pypi_publish`, `npm_publish` | `target`, `package`, `version` (npm: the registry's host only) |
+| `woodpecker_trigger` | `pipeline_id` (the per-repo number), `branch` |
+| `woodpecker_restart` | `pipeline_id` (the new run), `restarted_from` |
+| `woodpecker_pipeline_cancel` | `pipeline_id`, `action` |
+| `github_actions`, `gitea_actions` write methods | `run_id`, `action`, `ref` (`github_actions` dispatch: `dispatched`) |
+| `gitlab_pipeline` write methods | `pipeline_id`, `action`, `ref` |
+| `github_repo_create`, `gitea_repo_create` | `repo`, `repo_id`, `visibility` |
+| `github_fork` | `fork`, `repo_id` |
 
 Rules:
 
@@ -573,6 +627,13 @@ manifest `access: readonly` entry now populates `allowed_read_roots` (previously
 granted **no access at all**). `access: readwrite` continues to populate both read and
 write lists.
 
+**Roots are matched as written (0.21.0).** A root is expanded (`~`) and normalised, never
+resolved, and only the requested path is resolved. Before, the root was resolved at check
+time, so replacing a root directory with a symlink moved the grant to the link's target. A
+root that is itself a symlink is refused: at load (logged as
+`allowlist_root_refused_symlink` with its path) and at check time (named in the refusal).
+host-forge/scripts' `workspace_policy.py` applies the same rule.
+
 **When no source yields a root for the requested operation, it is denied** — fail closed,
 not open. A malformed or unreadable manifest or policy file resolves to zero roots rather
 than raising, so it fails closed the same way an unset `ALLOWED_REPO_ROOTS` does.
@@ -638,9 +699,10 @@ leaking direction.
 |---|---|
 | No remotes | agent — nothing to publish to |
 | All remotes on the Gitea host | agent + `agent-id:` trailer |
-| GitHub repo under a forge-owned account, **not** a fork of a repo you don't own | agent + trailer |
+| GitHub repo under a forge-owned account, **not** a fork of a repo you don't own, **private** | agent + trailer |
+| GitHub repo under a forge-owned account, **not** a fork, **public** (0.21.0) | public, no trailer |
 | GitHub repo under a forge-owned account that **is** a fork of a repo you don't own | public, no trailer |
-| Fork provenance could not be determined | public, no trailer |
+| Fork provenance or visibility could not be determined | public, no trailer |
 | Any third-party remote | public, no trailer |
 | A remote URL that cannot be parsed | **refused** |
 | A local filesystem path remote | agent — a path on your own disk |
@@ -666,6 +728,14 @@ not pin the answer for the repo's lifetime. That direction is deliberate: the co
 missing `agent-id:` trailer on an internal repo, against leaking the agent identity into
 permanent public history. Since the audit log records the real acting agent in both modes,
 what is lost is a convenience, not accountability.
+
+**Visibility (0.21.0, vikunja#609).** A repo of your own that is public is public history
+too, so an owned, non-fork GitHub repo gets the agent identity only when GitHub says it is
+private. The answer is cached per process per repo (a restart re-reads it), and the
+provenance lookup fills it from the same API response, so it costs no extra call there. A
+failed or non-boolean answer resolves public and is not cached. `identity_reason` says
+which it saw: `public repository: <owner/repo>`, `…, and private`, or `visibility could
+not be determined`. Gitea and local-path remotes are unchanged.
 
 Two refusals, both deliberate. An unparseable remote is refused rather than guessed at:
 defaulting to the agent identity leaks it, defaulting to the public identity breaks
@@ -702,8 +772,8 @@ Token values never appear in:
 
 As of 0.9.0, every caller-facing error return in the tool modules (`git_local.py`,
 `release.py`, `woodpecker.py`, `registry.py`, `gitea.py`/`github.py`/`gitlab.py`) is
-scrubbed via **`security.scrub()`** — `redact_url_credentials(mask_credentials(text))` —
-rather than `mask_credentials()` alone. `mask_credentials()` only replaces githost-mcp's
+scrubbed via **`security.scrub()`** (configured tokens, then URL userinfo, then credential
+shapes since 0.21.0) rather than `mask_credentials()` alone. `mask_credentials()` only replaces githost-mcp's
 own *configured* token values, so a credential a human embedded in a remote by hand
 (`https://user:token@host/...`) previously survived it. `redact_url_credentials()` strips
 the userinfo component from any scheme-qualified URL by shape, independent of whether
@@ -712,13 +782,56 @@ scheme and are left readable — that's the form most SSH remotes use. This
 closes the gap where `git_push`'s new `summary` field (the remote's raw rejection text)
 could otherwise have surfaced a credential verbatim.
 
-**Known limit (vikunja#913, deferred).** `scrub()` removes githost-mcp's own configured
-token values and URL userinfo, and nothing else. A credential the process does not hold
-in its config, appearing **outside** a URL (e.g. `Authorization: Bearer <token>` in a
-remote's error text), passes through both passes intact, into the tool's return value and
-into the audit log, including `rejected_value`. A shape-based redactor was deliberately
-not added: `scrub()` sits on every return path, and an over-broad one would silently
-mangle legitimate error text.
+**Credential shapes (0.21.0, vikunja#913).** `scrub()` also redacts by shape: the value
+after an `Authorization` keyword (quoted as in a dict or JSON repr, or prefixed as in
+`HTTP_AUTHORIZATION=`) that follows a `Bearer`, `token`, `Basic`, `Digest` or `Negotiate`
+scheme word, or is at least 20 characters with no scheme word; and vendor-prefixed tokens (`ghp_`, `gho_`,
+`ghs_`, `ghu_`, `ghr_`, `github_pat_`, `glpat-`, `xoxb-`/`xoxp-`, `npm_`, `pypi-`), keeping
+the prefix (`ghp_***`). Because `scrub()` sits on every return path, the shapes are narrow,
+and a corpus of real failure text from git, PyGithub, httpx, twine and npm
+(`tests/fixtures/scrub_corpus.json`) checks both directions: every planted credential is
+redacted, and every ordinary message comes back byte-identical. The two real leaks it
+holds are git stderr: a curl trace, and a failing hook printing its environment. A
+credential with none of these shapes, held nowhere in this process's config, still passes.
+
+URL userinfo is found with one authority parser (`security.split_authority`), shared by
+the remote-URL validator, the redactor, `url_host` and the npm registry target. Any `@`
+before the first `/` makes everything up to the last such `@` userinfo, even with a `?`,
+`#` or quote in front of it, so the redactor never removes less than the 0.20.0 pattern
+did. A credential in front of a `/` (`https://<token>/x@host/...`) also counts as userinfo
+when the part before the first `/`, `?` or `#` is not host-shaped and the part after the
+last `@` is a host (a dotted name, an IP literal, `localhost`, `name:port`, or a bare name
+when the head could not be a host). Userinfo that holds a `/`, `?` or `#` is ambiguous: the
+validator refuses the URL, the redactor removes it, and `url_host` returns no host rather
+than guess. A URL in free text ends at whitespace or the next URL, not at a quote.
+
+Residuals: a dotted credential (a JWT), or a `name:<1-5 digits>` pair (the shape of
+`host:port`), in front of `/…@host` reads as a host and is not redacted; and an `@` that
+sits only after the first `/` behind a single-label head (`https://verdaccio/@scope/pkg`)
+is read as part of the path. Redaction can also remove text that is not a credential: in
+output with no whitespace (compact JSON in an error body), a URL with no `/` followed later
+by any `@` makes everything between them userinfo, so
+`{"url":"https://github.com","email":"dev@example.com"}` comes back as
+`{"url":"https://***@example.com"}`. That is the 0.20.0 pattern's behaviour, kept so the
+redactor never removes less than it did.
+
+Subprocess output (`twine`, `npm`, `python -m build`) is scrubbed before it is cut to 500
+characters, not after: cutting first could split a token past recognition.
+
+**Publish child environment (0.21.0, vikunja#610).** `python -m build` runs the
+repository's own build backend, and `npm publish` its lifecycle scripts, so before 0.21.0
+repository code received githost's whole environment, every forge token included.
+`clean_env()` is now an allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`,
+`LANG`, `TZ`, `TMPDIR` and the seven POSIX `LC_*` names), and each call site adds the one
+credential its child needs (`TWINE_PASSWORD`, `NPM_TOKEN`). Tests run a real
+`python -m build` and a real `npm pack` with code that writes the environment it got.
+GitPython's own git children, and repository hooks, still get the full environment
+(vikunja#1446). The allowlist keeps the environment out of a child's inherited variables;
+it does not isolate the child. Build code runs as githost's own user, so it can still read
+the parent process's environment from `/proc` and files under `HOME`. That residual closes
+only with per-agent users (vikunja#1193). The allowlist also drops proxy and CA variables
+(`HTTPS_PROXY`, `SSL_CERT_FILE` and similar); a host that needs them for publishing does
+not get them in the child.
 
 Each provider has its own env vars — a compromised GitHub token does not expose Gitea or GitLab credentials.
 
@@ -882,6 +995,13 @@ Both files rotate by rename (`.1` newest); entries are never truncated or rewrit
 HMACs are per-entry rather than a chain, so a rotated entry verifies exactly as it did before
 the rename, and `audit_log_query` searches the rotated backups as well as the live file —
 its `sources_searched` field reports which files a given result actually covered.
+
+The audit directory is created `0700` when githost creates it (0.21.0); an existing
+directory keeps its mode.
+
+stderr carries WARNING and above only. As of 0.21.0 the HTTP server starts with no FastMCP
+banner, no "Update available" notice (the update check is off in-process) and no uvicorn
+INFO lines, so PM2's `githost-mcp-<agent>-error.log` holds only what needs reading.
 
 ### Observability (all opt-in)
 

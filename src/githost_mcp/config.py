@@ -296,6 +296,33 @@ def _resolve_allowed_roots(
     return [], [], [], [], "none"
 
 
+def root_as_written(root: str) -> str:
+    """A root as configured: `~` expanded and normalised, never resolved (vikunja#996).
+
+    Resolving a root at check time let whoever could replace the root directory with a
+    symlink move the grant to wherever the link pointed. The root is matched as written;
+    only the requested path is resolved.
+    """
+    return os.path.normpath(os.path.abspath(os.path.expanduser(root)))
+
+
+def refuse_symlinked_roots(roots: list[str]) -> list[str]:
+    """`roots` as written, minus any that is itself a symlink (logged, by name).
+
+    A root that is a symlink would be matched as written while the requested path is
+    resolved, so it grants nothing it seems to; refusing it at load says so.
+    security._validate_path refuses one swapped in after load the same way.
+    """
+    kept = []
+    for root in roots:
+        written = root_as_written(root)
+        if os.path.islink(written):
+            log.warning("allowlist_root_refused_symlink", root=written)
+            continue
+        kept.append(written)
+    return kept
+
+
 def _env_int(name: str, raw: str) -> int:
     """Parse an integer env var, naming the variable and the bad value on failure.
 
@@ -340,6 +367,8 @@ def load_config() -> Config:
             _agent_id, os.getenv("ALLOWED_REPO_ROOTS", ""), _policy_path, _manifest_path
         )
     )
+    _read_roots = refuse_symlinked_roots(_read_roots)
+    _write_roots = refuse_symlinked_roots(_write_roots)
 
     # The application log defaults to the audit log's sizing so that splitting the
     # two settings apart needs no change to any deployed env file.

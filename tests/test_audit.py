@@ -429,13 +429,16 @@ def test_rotation_failure_logs_and_does_not_break_the_write(rotating_audit_env, 
         )(),
     )
 
-    write_audit_entry("git_status", "local", "/tmp/after", {}, "ok", 1)
+    # Its own marker, the filler's length: the filler writes "/tmp/after", so asserting
+    # on that passed with this write dropped (CodeRabbit CR-15, p4; probed).
+    write_audit_entry("git_status", "local", "/tmp/TESTD", {}, "ok", 1)
 
     assert any(e == "audit_rotation_failed" for e, _ in events), (
         f"a failed rotation must not be silent: {events}"
     )
     # The entry itself must still land — rotation failure never loses an audit entry.
-    assert any(e["repo"] == "/tmp/after" for e in _read_entries(rotating_audit_env / "audit.jsonl"))
+    repos = [e["repo"] for e in _read_entries(rotating_audit_env / "audit.jsonl")]
+    assert repos.count("/tmp/TESTD") == 1
 
 
 def test_rotation_backup_shift_failure_is_logged(rotating_audit_env, monkeypatch):
@@ -519,3 +522,20 @@ def test_info_reaches_the_log_file_but_not_stderr(tmp_path, monkeypatch, capfd):
     assert "warning_marker_event" in log_text
     assert "info_marker_event" not in err
     assert "warning_marker_event" in err
+
+
+def test_audit_directory_is_created_0700(tmp_path, monkeypatch):
+    """#1434 R2-02: the audit directory used to get the umask's mode."""
+    import stat as _stat
+
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(tmp_path / "newdir" / "audit.jsonl"))
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "app.log"))
+    monkeypatch.setenv("AUDIT_SIGNING_KEY", "testsecret1234567890abcdef12345678")
+    old = os.umask(0o022)
+    try:
+        reset_config()
+        init_logging()
+        write_audit_entry("git_status", "local", "/r", {}, "ok", 1)
+    finally:
+        os.umask(old)
+    assert _stat.S_IMODE((tmp_path / "newdir").stat().st_mode) == 0o700
