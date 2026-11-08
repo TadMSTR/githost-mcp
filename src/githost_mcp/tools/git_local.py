@@ -349,6 +349,7 @@ def _lookup_fork_provenance(
         verdict = PROVENANCE_OWN
         for full_name in full_names:
             gh_repo = github_call(gh.get_repo, full_name)
+            _remember_visibility(full_name, getattr(gh_repo, "private", None))
             parent = getattr(gh_repo, "parent", None)
             if (
                 classify_fork_provenance(
@@ -366,6 +367,43 @@ def _lookup_fork_provenance(
         return None
     _write_cached_provenance(repo, verdict)
     return verdict
+
+
+# full_name (lowercased) -> True when the repo is private. Per process: visibility can
+# change, and a restart re-reads it. Only a definite answer is kept.
+_VISIBILITY_CACHE: dict[str, bool] = {}
+
+
+def _remember_visibility(full_name: str, private) -> None:
+    if isinstance(private, bool):
+        _VISIBILITY_CACHE[full_name.lower()] = private
+
+
+def _lookup_visibility(full_names: list[str]) -> tuple[list[str], list[str]]:
+    """(public repos, repos whose visibility could not be determined) among these.
+
+    GitHub's `private` flag, cached per process per repo (vikunja#609). A failed or
+    non-boolean answer is undetermined and not cached.
+    """
+    public: list[str] = []
+    unknown: list[str] = []
+    gh = None
+    for full_name in full_names:
+        private = _VISIBILITY_CACHE.get(full_name.lower())
+        if private is None:
+            try:
+                gh = gh or get_github()
+                value = getattr(github_call(gh.get_repo, full_name), "private", None)
+            except Exception as e:
+                log.warning("visibility_lookup_failed", repo=full_name, error=str(e))
+                value = None
+            _remember_visibility(full_name, value)
+            private = value if isinstance(value, bool) else None
+        if private is None:
+            unknown.append(full_name)
+        elif not private:
+            public.append(full_name)
+    return public, unknown
 
 
 def _resolve_identity_mode(repo: git.Repo, requested: str, config) -> tuple[str, str]:
@@ -402,7 +440,18 @@ def _resolve_identity_mode(repo: git.Repo, requested: str, config) -> tuple[str,
             "fork provenance could not be determined for "
             f"{', '.join(candidates)} — defaulting to the public identity"
         )
-    return ownership.mode, f"{ownership.reason}, and not a fork of a repo we do not own"
+    # Ours, and not a fork: still public history if the repo is public (vikunja#609). The
+    # agent identity goes only into private repos. Undetermined resolves public, for the
+    # same reason as undetermined provenance above.
+    public, unknown = _lookup_visibility(candidates)
+    if public:
+        return IDENTITY_PUBLIC, f"public repository: {', '.join(public)}"
+    if unknown:
+        return IDENTITY_PUBLIC, (
+            f"visibility could not be determined for {', '.join(unknown)} — defaulting to "
+            "the public identity"
+        )
+    return ownership.mode, (f"{ownership.reason}, not a fork of a repo we do not own, and private")
 
 
 def _public_identity(repo: git.Repo, config) -> tuple[str, str]:

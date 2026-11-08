@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
+import fastmcp
 import structlog
 from fastmcp import FastMCP
 from fastmcp.server.auth import StaticTokenVerifier
@@ -50,6 +51,10 @@ if _config.auth_token:
     _auth = StaticTokenVerifier(
         tokens={_config.auth_token: {"sub": "scoped-mcp", "client_id": "cli"}}
     )
+
+# FastMCP checks PyPI for a newer release when it prints its banner. The banner is off;
+# this keeps the check off too, in-process, without an env var (vikunja#1437).
+fastmcp.settings.check_for_updates = "off"
 
 mcp = FastMCP(
     name="githost-mcp",
@@ -95,7 +100,15 @@ def main() -> None:
                 f">= {_MIN_AUTH_TOKEN_LENGTH}) to be reliably redacted by the credential filter. "
                 'Generate one with: python3 -c "import secrets; print(secrets.token_hex(32))"'
             )
-        mcp.run(transport="http", host=config.http_host, port=config.http_port)
+        # stderr is PM2's error log: no banner, no update notice, and WARNING and above
+        # from FastMCP and uvicorn only (vikunja#1437). log_level sets both.
+        mcp.run(
+            transport="http",
+            host=config.http_host,
+            port=config.http_port,
+            show_banner=False,
+            log_level="warning",
+        )
     else:
         mcp.run()
 

@@ -176,6 +176,20 @@ async def test_list_forwards_every_filter_to_the_server(tools):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arg", "value"),
+    [("branch", "a..b"), ("branch", "-x"), ("branch", "a b"), ("ref", "x\n"), ("ref", "a//b")],
+)
+async def test_list_refuses_a_filter_validate_ref_refuses(tools, arg, value):
+    """#1431 F-08: the filters follow validate_ref; such a value names no branch or ref."""
+    with respx.mock:
+        route = respx.get(f"{REPO_URL}/pipelines").mock(return_value=httpx.Response(200, json=[]))
+        result = await tools["woodpecker_list_pipelines"]("owner/repo", **{arg: value})
+    assert "error" in result
+    assert not route.called
+
+
+@pytest.mark.asyncio
 async def test_list_rows_carry_number_handle_and_commit(tools):
     row = _pipeline(FAILED_1235, message="x" * 1000)
     with respx.mock:

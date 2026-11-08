@@ -1000,10 +1000,11 @@ def _seed_provenance(path, verdict):
 
 
 def test_git_commit_forge_owned_remote_keeps_agent_identity(tools, public_identity_env):
-    """The other direction: internal repos must keep per-agent attribution."""
+    """The other direction: internal (private) repos must keep per-agent attribution."""
     fns, path = tools
     git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
     _seed_provenance(path, "own")
+    _seed_visibility("TadMSTR/githost-mcp", private=True)
     _stage_a_file(path)
 
     result = fns["git_commit"](str(path), "internal change")
@@ -1185,9 +1186,18 @@ def test_git_commit_forge_gitea_host_keeps_agent_identity(tools, public_identity
 # ---------------------------------------------------------------------------
 
 
-def _mock_github(fork: bool, parent_full_name: str | None):
+def _seed_visibility(full_name: str, private: bool) -> None:
+    from githost_mcp.tools import git_local
+
+    git_local._VISIBILITY_CACHE[full_name.lower()] = private
+
+
+def _mock_github(fork: bool, parent_full_name: str | None, private: bool = True):
+    """`private` defaults to True: since 0.21.0 an owned public repo gets the public
+    identity (vikunja#609), and these tests are about fork provenance."""
     gh_repo = MagicMock()
     gh_repo.fork = fork
+    gh_repo.private = private
     if parent_full_name:
         gh_repo.parent = MagicMock()
         gh_repo.parent.full_name = parent_full_name
@@ -1854,3 +1864,111 @@ def test_git_tag_cannot_push_a_branch_by_full_ref(tools, bare_remote):
 
     assert "error" in result, result
     assert _remote_heads(bare) == heads_before, "git_tag pushed a branch"
+
+
+# ---------------------------------------------------------------------------
+# Visibility (vikunja#609): an owned, non-fork GitHub repo that is public gets the public
+# identity. The agent identity goes only into private repos.
+# ---------------------------------------------------------------------------
+
+
+def test_git_commit_public_owned_repo_uses_public_identity(tools, public_identity_env):
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _stage_a_file(path)
+
+    p1, p2 = _patch_lookup(_mock_github(fork=False, parent_full_name=None, private=False))
+    with p1, p2:
+        result = fns["git_commit"](str(path), "public change")
+
+    assert result["identity"] == "public", result
+    assert result["identity_reason"] == "public repository: TadMSTR/githost-mcp"
+    commit = git.Repo(str(path)).head.commit
+    assert commit.author.email == "69825253+TadMSTR@users.noreply.github.com"
+    assert "agent-id" not in commit.message
+
+
+def test_git_commit_private_owned_repo_keeps_agent_identity(tools, public_identity_env):
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/private-thing.git")
+    _stage_a_file(path)
+
+    p1, p2 = _patch_lookup(_mock_github(fork=False, parent_full_name=None, private=True))
+    with p1, p2:
+        result = fns["git_commit"](str(path), "internal")
+
+    assert result["identity"] == "agent", result
+    assert result["identity_reason"].endswith("and private")
+
+
+def test_git_commit_visibility_lookup_failure_uses_public_identity(tools, public_identity_env):
+    """Provenance known (cached), visibility unknown: resolve public."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _seed_provenance(path, "own")
+    _stage_a_file(path)
+
+    with patch("githost_mcp.tools.git_local.get_github", side_effect=ValueError("offline")):
+        result = fns["git_commit"](str(path), "offline")
+
+    assert result["identity"] == "public", result
+    assert "visibility could not be determined" in result["identity_reason"]
+
+
+def test_git_commit_non_boolean_visibility_is_undetermined(tools, public_identity_env):
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/githost-mcp.git")
+    _seed_provenance(path, "own")
+    _stage_a_file(path)
+    gh = _mock_github(fork=False, parent_full_name=None)
+    gh.get_repo.return_value.private = None
+
+    p1, p2 = _patch_lookup(gh)
+    with p1, p2:
+        result = fns["git_commit"](str(path), "x")
+    assert result["identity"] == "public", result
+
+
+def test_git_commit_third_party_fork_is_still_public(tools, public_identity_env):
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/claudecodeui.git")
+    _stage_a_file(path)
+
+    p1, p2 = _patch_lookup(
+        _mock_github(fork=True, parent_full_name="siteboon/claudecodeui", private=False)
+    )
+    with p1, p2:
+        result = fns["git_commit"](str(path), "upstream fix")
+    assert result["identity"] == "public"
+    assert "fork of a repo we do not own" in result["identity_reason"]
+
+
+def test_git_commit_visibility_is_looked_up_once_per_process(tools, public_identity_env):
+    """The provenance lookup records visibility from the same API answer, and later
+    commits read the per-process cache: one get_repo call for two commits."""
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "https://github.com/TadMSTR/private-thing.git")
+    gh = _mock_github(fork=False, parent_full_name=None, private=True)
+
+    p1, p2 = _patch_lookup(gh)
+    with p1, p2:
+        _stage_a_file(path, "a.txt")
+        assert fns["git_commit"](str(path), "one")["identity"] == "agent"
+        _stage_a_file(path, "b.txt")
+        assert fns["git_commit"](str(path), "two")["identity"] == "agent"
+    assert gh.get_repo.call_count == 1
+
+
+def test_gitea_remote_identity_is_unchanged_by_visibility(tools, public_identity_env, monkeypatch):
+    """Gitea remotes are forge-internal; no GitHub visibility lookup happens."""
+    monkeypatch.setenv("GITEA_URL", "https://gitea.example.com")
+    from githost_mcp.config import reset_config
+
+    reset_config()
+    fns, path = tools
+    git.Repo(str(path)).create_remote("origin", "git@gitea.example.com:org/repo.git")
+    _stage_a_file(path)
+    with patch("githost_mcp.tools.git_local.get_github") as get_gh:
+        result = fns["git_commit"](str(path), "internal")
+    assert result["identity"] == "agent", result
+    get_gh.assert_not_called()

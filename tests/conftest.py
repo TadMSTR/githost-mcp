@@ -31,10 +31,13 @@ def reset_config(monkeypatch):
     monkeypatch.delenv("AGENT_MANIFEST_PATH", raising=False)
     monkeypatch.setenv("WORKSPACE_POLICY_PATH", "/nonexistent/workspace-policy-test-sentinel.yml")
     from githost_mcp.config import reset_config
+    from githost_mcp.tools import git_local
 
     reset_config()
+    git_local._VISIBILITY_CACHE.clear()
     yield
     reset_config()
+    git_local._VISIBILITY_CACHE.clear()
 
 
 @pytest.fixture(autouse=True)

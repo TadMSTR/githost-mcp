@@ -23,7 +23,7 @@
 // unconditionally, overwriting anything set there. A per-agent value in
 // githost-mcp-<agent>.env is read and silently discarded — see vikunja #408
 // for the tracked fix (would need new per-agent secrets, `headers:` blocks in
-// six manifests, and a coordinated restart of six githost-mcp + six scoped-mcp
+// six manifests, and a coordinated restart of the githost-mcp and scoped-mcp
 // processes).
 //
 // AGENT_ID does NOT come from that file and never has — buildApp() below injects
@@ -58,29 +58,17 @@ const sharedEnv = parseEnvFile(path.join(HOME, ".secrets", "forge.env"));
 // AGENT_ID -> per-agent HTTP port. Contiguous range per the build plan
 // (githost-mcp-http-pm2-migration-2026-07); keep in sync with
 // host-forge/services.md when adding or renumbering agents.
+// 8625 and 8627 stay reserved: they were harlock's and steward's, both decommissioned
+// (vikunja#367). Do not reuse them for a new agent; a stale PM2 entry or firewall note
+// may still name them. 8626 is backrest-mcp.
 const AGENTS = {
   developer: { httpPort: 8620 },
   sysadmin: { httpPort: 8621 },
   security: { httpPort: 8622 },
   writer: { httpPort: 8623 },
   research: { httpPort: 8624 },
-  harlock: { httpPort: 8625 },
-  // steward — the config-owning agent (vikunja#350, build
-  // steward-config-agent-2026-08). Its git job is narrow by design: branch,
-  // commit, push and open a PR on host-forge-scripts carrying a config
-  // proposal. It holds no merge, release, tag or publish verb — enforced by a
-  // tool_allowlist in steward-agent.yml rather than a denylist, so a future
-  // githost-mcp release cannot add a write verb steward silently inherits.
-  //
-  // 8627, not the contiguous 8626: that is backrest-mcp. 8625 stays
-  // reserved to harlock rather than being reclaimed here — harlock's
-  // decommission (vikunja#270) is only through Phase 0 and reassigning a port
-  // out from under a half-removed agent is how two services end up racing for
-  // one bind. Renumber both together when that decommission finishes.
-  steward: { httpPort: 8627 },
   fleet: { httpPort: 8628 },
 };
-
 function buildApp(agentId, ports) {
   const env = parseEnvFile(path.join(HOME, ".secrets", `githost-mcp-${agentId}.env`));
 
@@ -108,13 +96,10 @@ function buildApp(agentId, ports) {
   // root-owned and not ted-writable, so the file cannot be renamed out from
   // under us the way it could beneath /opt/appdata.
   //
-  // Set for every agent, including harlock, so no process retains the
-  // working-tree fallback path. This does NOT cut an agent over on its own:
-  // ALLOWED_REPO_ROOTS still wins wherever it is set (_resolve_allowed_roots
-  // returns early on an explicit value), and harlock deliberately keeps its env
-  // because its manifest has zero git_backed readwrite entries (vikunja #270,
-  // id 281). If the file is missing or unparseable the allowlist resolves empty
-  // — fail closed, not fall back.
+  // Set for every agent, so no process retains the working-tree fallback path. This
+  // does NOT cut an agent over on its own: ALLOWED_REPO_ROOTS still wins wherever it is
+  // set (_resolve_allowed_roots returns early on an explicit value). If the file is
+  // missing or unparseable the allowlist resolves empty — fail closed, not fall back.
   //
   // vikunja#271; closes vikunja#47 and accepted risk M-2.
   env.AGENT_MANIFEST_PATH = `/etc/forge/manifests/${agentId}-agent.yml`;
@@ -136,7 +121,7 @@ function buildApp(agentId, ports) {
   // future change to that default.
   env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:4317";
   env.OTEL_EXPORTER_OTLP_PROTOCOL = "grpc";
-  // Per-agent, or all seven processes register as one service named "githost-mcp"
+  // Per-agent, or every process registers as one service named "githost-mcp"
   // (config.py's default) and collapse into a single row in SigNoz — which would
   // make "which agent hit this limit" unanswerable from traces, the one question
   // this telemetry exists to answer. Matches the scoped-mcp-<agent> convention
