@@ -1807,10 +1807,9 @@ def test_git_tag_push_refuses_refspec_forms(tools, bare_remote, value):
 # ---------------------------------------------------------------------------
 # Push namespace pinning (audit round 2 R2-01, githost-scoped-2026-11-p3-grant-model).
 #
-# A plain name is not enough: git_push accepted a tag name or a full ref and pushed
-# it, so an unpushed local tag reached the remote (a tag-triggered publish), and
-# a `refs/heads/x` tag name reached the push as a branch ref. The git_push rows fail
-# on 4695853 (the remote gains a ref) and pass once the push pins its namespace.
+# git_push pushes an existing local branch to the same-named remote branch only,
+# and git_tag pushes under refs/tags/ only. The git_push rows fail on 4695853 (the
+# remote gains a ref) and pass once the push pins its namespace.
 # ---------------------------------------------------------------------------
 
 
