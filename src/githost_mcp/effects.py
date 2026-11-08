@@ -127,7 +127,11 @@ EFFECT_TOOLS = frozenset(
 #:
 #: - `git_push` pushes one existing local branch to the same-named remote branch, with the
 #:   namespace pinned (`refs/heads/<n>:refs/heads/<n>`). It cannot push a tag, delete a ref
-#:   or force an update, so it reaches none of the gated effects below.
+#:   or force an update. It CAN fast-forward any branch, the default branch included, which
+#:   is the effect the merge gate below exists for, and the push starts that branch's
+#:   push-triggered pipelines. githost applies no protected-branch check here, because doc
+#:   repos are committed to their default branch directly; server-side branch protection
+#:   is the only control on that route. Same decision (vikunja#1440).
 #: - `git_tag(push=True)`, `*_create_release`, `*_release_update`, and the
 #:   `github_actions` `run_workflow`/`rerun_*` methods: NOT reversible in every repo. Where
 #:   a pushed `v*` tag, a published release or a dispatched workflow runs a registry

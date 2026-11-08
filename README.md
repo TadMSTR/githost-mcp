@@ -331,8 +331,9 @@ ship without a HITL gate. Three pieces make that checkable by a machine:
   the class is a reviewed edit. Ungated is not the same as harmless: `git_tag` push, the
   release create/update tools and `github_actions` workflow dispatch can trigger an
   irreversible registry publish in a repo that publishes on a tag, a release or a
-  dispatch, and `github_actions`/`gitlab_pipeline` can cancel a pipeline. githost puts
-  no control on those today. `effects.py` gives the reason for each, and their gating is
+  dispatch, `github_actions`/`gitlab_pipeline` can cancel a pipeline, and `git_push` can
+  fast-forward a default branch (the effect the merge gate exists for), with server-side
+  branch protection as the only control. githost puts no control on those today. `effects.py` gives the reason for each, and their gating is
   an open decision (vikunja#1440).
 - **`githost-mcp --list-tools [--json]`** prints every registered tool with its `kind`
   (`read` | `effect`) and `hitl` flag, then exits. It starts no server, needs no env var,
