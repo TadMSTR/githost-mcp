@@ -1,14 +1,20 @@
 """
-OTEL, Loki, Prometheus, and NATS observability — all opt-in via env vars.
+OpenTelemetry traces and metrics, opt-in via OTEL_EXPORTER_OTLP_ENDPOINT.
 
-None of these activate unless the corresponding env var is set. Import errors
-for optional dependencies are silenced so the server starts without them.
+Nothing activates unless the endpoint is set, and an import error for the optional
+`otel` extra is swallowed so the server starts without it.
+
+The Loki push, the Prometheus endpoint and the NATS publisher were removed in 0.19.0.
+None had a consumer: the async emitter that fed Loki and NATS had no caller, and no
+scrape job read ports 9620-9628 (githost-scoped-2026-11 p2, #1426 (id 1509), #530
+(id 613)). OTel is the one live path; the audit JSONL is the durable record.
 """
 
 from __future__ import annotations
 
-import json
-import time
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from typing import Any
 
 import structlog
@@ -16,9 +22,6 @@ import structlog
 from .config import get_config
 
 log = structlog.get_logger(__name__)
-
-# Loopback-only, deliberately not configurable. See _init_prometheus.
-METRICS_BIND_ADDR = "127.0.0.1"
 
 # ---------------------------------------------------------------------------
 # OTEL (opentelemetry-sdk + exporter)
@@ -79,159 +82,187 @@ def _init_otel() -> None:
             metric_readers=[PeriodicExportingMetricReader(metric_exporter)],
         )
         metrics.set_meter_provider(mp)
-        meter = metrics.get_meter(config.otel_service_name)
-        _tool_calls_counter = meter.create_counter(
-            "githost.tool.calls",
-            description="Number of githost-mcp tool calls",
-        )
-        _tool_denied_counter = meter.create_counter(
-            "githost.tool.denied",
-            description="githost-mcp tool calls that did not succeed, by reason class",
-        )
-        _tool_duration_histogram = meter.create_histogram(
-            "githost.tool.duration",
-            unit="ms",
-            description="Duration of githost-mcp tool calls",
-        )
-        _release_targets_counter = meter.create_counter(
-            "githost.release.targets",
-            description="Number of release target publishes",
-        )
+        bind_meter(metrics.get_meter(config.otel_service_name))
         log.info("otel_initialized", endpoint=config.otel_endpoint)
     except Exception as exc:
         log.warning("otel_init_failed", error=str(exc))
 
 
+def bind_meter(meter: Any) -> None:
+    """Create the githost instruments on `meter`. Split out so tests can bind a meter
+    backed by an in-memory reader and assert on real counters."""
+    global _meter, _tool_calls_counter, _tool_denied_counter
+    global _tool_duration_histogram, _release_targets_counter
+    _meter = meter
+    _tool_calls_counter = meter.create_counter(
+        "githost.tool.calls",
+        description="Number of githost-mcp tool calls",
+    )
+    # reason_class is bounded by construction: classify_reason() can only return a member
+    # of errors.REASON_CLASSES. The unbounded detail (exception messages, which carry repo
+    # paths and branch names) stays in the audit record's `reason` field and is never an
+    # attribute here.
+    _tool_denied_counter = meter.create_counter(
+        "githost.tool.denied",
+        description="githost-mcp tool calls that did not succeed, by reason class",
+    )
+    _tool_duration_histogram = meter.create_histogram(
+        "githost.tool.duration",
+        unit="ms",
+        description="Duration of githost-mcp tool calls",
+    )
+    _release_targets_counter = meter.create_counter(
+        "githost.release.targets",
+        description="Number of release target publishes",
+    )
+
+
 # ---------------------------------------------------------------------------
-# Prometheus (/metrics scrape endpoint)
+# Spans
+#
+# The githost.<tool> span used to be opened inside AuditCtx.finish(), after the work was
+# done: 23 µs long, starting at the very end of the call, with no children (trace
+# 9113fefe1e69c4185a50818bcdaddc17). It is now opened when the AuditCtx is created and
+# ended by finish(), and git and HTTP calls inside it get child spans.
+#
+# Trace propagation itself already worked and is not touched: FastMCP carries
+# `traceparent` in the request `_meta` and starts its server span from it, and the tool
+# span is created as a child of whatever span is current, which is that server span.
 # ---------------------------------------------------------------------------
 
-_prom_tool_calls: Any = None
-_prom_tool_denied: Any = None
-_prom_tool_duration: Any = None
-_prom_release_targets: Any = None
+#: Child-span attribute keys, and nothing else. Values are bounded below. A URL, a query
+#: string, a request or response body, a commit message or a file name never belongs in a
+#: span attribute: the span leaves this host for SigNoz.
+CHILD_ATTR_KEYS = frozenset(
+    {
+        "githost.op",
+        "githost.remote",
+        "githost.api.call",
+        "http.request.method",
+        "http.response.status_code",
+        "server.address",
+        "url.template",
+    }
+)
+_ATTR_STR_MAX = 128
+_ATTR_TEXT_RE = re.compile(r"\A[A-Za-z0-9_.:/{}\-]*\Z")
 
 
-def _init_prometheus() -> None:
-    global _prom_tool_calls, _prom_tool_denied, _prom_tool_duration, _prom_release_targets
-    config = get_config()
-    if not config.metrics_port:
+def _bounded_attr(value: Any) -> Any:
+    """Keep ints and bools; keep a string only if it is short and plain, else drop it."""
+    if isinstance(value, bool | int):
+        return value
+    if isinstance(value, str) and len(value) <= _ATTR_STR_MAX and _ATTR_TEXT_RE.match(value):
+        return value
+    return None
+
+
+def bounded_child_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
+    """The subset of `attrs` that may go on a child span: known keys, plain values."""
+    out: dict[str, Any] = {}
+    for key, value in attrs.items():
+        if key not in CHILD_ATTR_KEYS:
+            continue
+        shown = _bounded_attr(value)
+        if shown is not None:
+            out[key] = shown
+    return out
+
+
+def start_tool_span(tool: str) -> Any:
+    """Open `githost.<tool>` as a child of the current span; None when OTel is off."""
+    if _tracer is None:
+        return None
+    try:
+        return _tracer.start_span(f"githost.{tool}")
+    except Exception as exc:
+        log.warning("otel_span_failed", error=str(exc))
+        return None
+
+
+def end_tool_span(span: Any, attrs: dict[str, Any], error: bool) -> None:
+    """Set the final attributes, mark an error, and end the span. Never raises."""
+    if span is None:
         return
     try:
-        from prometheus_client import Counter, Histogram, start_http_server  # type: ignore
+        span.set_attributes({k: v for k, v in attrs.items() if v is not None})
+        if error:
+            from opentelemetry.trace import Status, StatusCode  # type: ignore
 
-        _prom_tool_calls = Counter(
-            "githost_tool_calls_total",
-            "Total githost-mcp tool calls",
-            ["tool", "provider", "agent_id", "result"],
-        )
-        # reason_class is bounded by construction: classify_reason() can only return a
-        # member of errors.REASON_CLASSES. The unbounded detail (exception messages,
-        # which carry repo paths and branch names) stays in the audit record's `reason`
-        # field and is deliberately never a label here.
-        _prom_tool_denied = Counter(
-            "githost_tool_denied_total",
-            "Total githost-mcp tool calls that did not succeed, by reason class",
-            ["tool", "agent_id", "reason_class"],
-        )
-        _prom_tool_duration = Histogram(
-            "githost_tool_duration_ms",
-            "githost-mcp tool call duration in ms",
-            ["tool", "provider"],
-        )
-        _prom_release_targets = Counter(
-            "githost_release_targets_total",
-            "Total release target publishes",
-            ["target", "result"],
-        )
-        # addr is NOT optional here: prometheus_client defaults to 0.0.0.0, which
-        # made the metrics endpoint LAN-reachable while every other githost-mcp
-        # listener is loopback-only by design (vikunja #272, id 283). Hardcoded
-        # rather than configurable — there is no deployment that wants otherwise,
-        # and an env knob is how this regresses.
-        start_http_server(config.metrics_port, addr=METRICS_BIND_ADDR)
-        log.info("prometheus_started", port=config.metrics_port, addr=METRICS_BIND_ADDR)
+            span.set_status(Status(StatusCode.ERROR))
     except Exception as exc:
-        log.warning("prometheus_init_failed", error=str(exc))
+        log.warning("otel_span_failed", error=str(exc))
+    finally:
+        try:
+            span.end()
+        except Exception as exc:  # pragma: no cover - defence in depth
+            log.warning("otel_span_end_failed", error=str(exc))
 
 
-# ---------------------------------------------------------------------------
-# Loki log push
-# ---------------------------------------------------------------------------
+@contextmanager
+def child_span(parent: Any, name: str, attrs: dict[str, Any]) -> Iterator[Any]:
+    """A child of `parent` around one git or HTTP operation. A no-op without a parent.
 
-_loki_url: str = ""
-_loki_static_labels: dict[str, str] = {}
-
-
-def _init_loki() -> None:
-    global _loki_url, _loki_static_labels
-    config = get_config()
-    if not config.loki_url:
-        return
-    _loki_url = config.loki_url.rstrip("/")
-    _loki_static_labels = {"app": "githost-mcp"}
-    for pair in config.loki_labels.split(","):
-        pair = pair.strip()
-        if "=" in pair:
-            k, v = pair.split("=", 1)
-            _loki_static_labels[k.strip()] = v.strip()
-    log.info("loki_configured", url=_loki_url)
-
-
-async def _push_loki(labels: dict[str, str], message: str) -> None:
-    if not _loki_url:
+    The exception, if any, propagates unchanged. Only its type is recorded: the message
+    can carry a remote URL or a server's response text, and span data leaves the host.
+    """
+    if parent is None or _tracer is None:
+        yield None
         return
     try:
-        import httpx  # already a core dep
+        from opentelemetry import trace  # type: ignore
+        from opentelemetry.trace import Status, StatusCode  # type: ignore
 
-        all_labels = {**_loki_static_labels, **labels}
-        ts_ns = str(int(time.time() * 1e9))
-        payload = {"streams": [{"stream": all_labels, "values": [[ts_ns, message]]}]}
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post(
-                f"{_loki_url}/loki/api/v1/push",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
+        span = _tracer.start_span(
+            name,
+            context=trace.set_span_in_context(parent),
+            attributes=bounded_child_attrs(attrs),
+        )
     except Exception as exc:
-        log.warning("loki_push_failed", error=str(exc))
-
-
-# ---------------------------------------------------------------------------
-# NATS publishing
-# ---------------------------------------------------------------------------
-
-_nats_client: Any = None
-_nats_prefix: str = "githost"
-
-
-async def _init_nats() -> None:
-    global _nats_client, _nats_prefix
-    config = get_config()
-    if not config.nats_url:
+        log.warning("otel_span_failed", error=str(exc))
+        yield None
         return
     try:
-        import nats  # type: ignore
+        yield span
+    except BaseException as exc:
+        try:
+            span.set_attribute("error.type", type(exc).__name__)
+            span.set_status(Status(StatusCode.ERROR))
+        except Exception:  # pragma: no cover - defence in depth
+            pass
+        raise
+    finally:
+        with suppress(Exception):
+            span.end()
 
-        _nats_client = await nats.connect(config.nats_url)
-        _nats_prefix = config.nats_subject_prefix
-        log.info("nats_connected", url=config.nats_url)
-    except Exception as exc:
-        log.warning("nats_init_failed", error=str(exc))
 
-
-async def _publish_nats(subject_suffix: str, data: dict) -> None:
-    if _nats_client is None:
+def set_child_attrs(span: Any, attrs: dict[str, Any]) -> None:
+    """Add bounded attributes to a child span after the fact (e.g. a status code)."""
+    if span is None:
         return
+    with suppress(Exception):
+        span.set_attributes(bounded_child_attrs(attrs))
+
+
+def trace_id_hex(span: Any) -> str | None:
+    """The 32-hex trace id of `span`, else of the current span, else None.
+
+    Without githost's own tracer the current span is FastMCP's server span, which still
+    carries the trace scoped-mcp started, so an audit line joins to SigNoz either way.
+    """
     try:
-        subject = f"{_nats_prefix}.{subject_suffix}"
-        await _nats_client.publish(subject, json.dumps(data).encode())
-    except Exception as exc:
-        log.warning("nats_publish_failed", error=str(exc))
+        from opentelemetry import trace  # type: ignore
+
+        ctx = (span if span is not None else trace.get_current_span()).get_span_context()
+        if ctx.is_valid:
+            return format(ctx.trace_id, "032x")
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Unified emit — called by audit.py after each tool invocation
+# Metrics — called by AuditCtx.finish() after each tool invocation
 # ---------------------------------------------------------------------------
 
 
@@ -243,38 +274,18 @@ def emit_tool_event_sync(
     duration_ms: int,
     reason_class: str | None = None,
 ) -> None:
-    """Span, OTel metrics and Prometheus for one finished tool call.
+    """OTel metrics for one finished tool call. The span is AuditCtx's own now.
 
-    Split out of emit_tool_event() because this is the half that AuditCtx.finish()
-    can call: finish() is sync, and 45 of githost-mcp's 65 tools are sync functions
-    that FastMCP runs on a worker thread where there is no running event loop to
-    await into. Every backend touched here has a synchronous, thread-safe API.
+    Sync because AuditCtx.finish() is: most tools are sync functions that FastMCP runs on
+    a worker thread with no event loop. The OTel metric API is thread-safe.
 
-    `reason_class` is set only for a call that did not succeed, and must be a member
-    of errors.REASON_CLASSES — it is a Prometheus label.
+    `reason_class` is set only for a call that did not succeed, and must be a member of
+    errors.REASON_CLASSES — it is a metric attribute.
 
-    Each backend is guarded independently: telemetry must never be able to fail a
+    Each instrument is guarded independently: telemetry must never be able to fail a
     tool call that otherwise worked.
     """
-    config = get_config()
-    agent_id = config.agent_id
-
-    if _tracer is not None:
-        try:
-            with _tracer.start_as_current_span(f"githost.{tool}") as span:
-                attrs = {
-                    "githost.tool": tool,
-                    "githost.provider": provider,
-                    "githost.agent_id": agent_id,
-                    "githost.repo": repo_basename,
-                    "githost.result": result,
-                    "githost.duration_ms": duration_ms,
-                }
-                if reason_class is not None:
-                    attrs["githost.reason_class"] = reason_class
-                span.set_attributes(attrs)
-        except Exception as exc:
-            log.warning("otel_span_failed", error=str(exc))
+    agent_id = get_config().agent_id
 
     if _tool_calls_counter is not None:
         try:
@@ -293,73 +304,6 @@ def emit_tool_event_sync(
         except Exception as exc:
             log.warning("otel_denied_metric_failed", error=str(exc))
 
-    if _prom_tool_calls is not None:
-        try:
-            _prom_tool_calls.labels(
-                tool=tool, provider=provider, agent_id=agent_id, result=result
-            ).inc()
-            _prom_tool_duration.labels(tool=tool, provider=provider).observe(duration_ms)
-        except Exception as exc:
-            log.warning("prometheus_record_failed", error=str(exc))
-
-    if reason_class is not None and _prom_tool_denied is not None:
-        try:
-            _prom_tool_denied.labels(tool=tool, agent_id=agent_id, reason_class=reason_class).inc()
-        except Exception as exc:
-            log.warning("prometheus_denied_failed", error=str(exc))
-
-
-def loki_or_nats_configured() -> bool:
-    """True if either async-only backend has anything to send to.
-
-    AuditCtx.finish() uses this to decide whether the async tail is worth dispatching
-    at all. Neither is configured for githost-mcp on forge today, so the common path
-    does no event-loop work whatsoever.
-    """
-    return bool(_loki_url) or _nats_client is not None
-
-
-async def emit_tool_event(
-    tool: str,
-    provider: str,
-    repo_basename: str,
-    result: str,
-    duration_ms: int,
-    reason_class: str | None = None,
-) -> None:
-    """Full emit: the sync backends above, then the two that need an event loop."""
-    emit_tool_event_sync(tool, provider, repo_basename, result, duration_ms, reason_class)
-
-    config = get_config()
-    agent_id = config.agent_id
-
-    # Loki
-    if _loki_url:
-        loki_labels = {"agent_id": agent_id, "tool": tool, "provider": provider}
-        payload = {
-            "tool": tool,
-            "provider": provider,
-            "result": result,
-            "duration_ms": duration_ms,
-        }
-        if reason_class is not None:
-            payload["reason_class"] = reason_class
-        await _push_loki(loki_labels, json.dumps(payload))
-
-    # NATS
-    if _nats_client is not None:
-        body = {
-            "tool": tool,
-            "provider": provider,
-            "agent_id": agent_id,
-            "repo": repo_basename,
-            "result": result,
-            "duration_ms": duration_ms,
-        }
-        if reason_class is not None:
-            body["reason_class"] = reason_class
-        await _publish_nats(f"tool.{tool}", body)
-
 
 def emit_release_target(target: str, result: str) -> None:
     if _release_targets_counter is not None:
@@ -367,11 +311,6 @@ def emit_release_target(target: str, result: str) -> None:
             _release_targets_counter.add(1, {"target": target, "result": result})
         except Exception as exc:
             log.warning("otel_release_metric_failed", error=str(exc))
-    if _prom_release_targets is not None:
-        try:
-            _prom_release_targets.labels(target=target, result=result).inc()
-        except Exception as exc:
-            log.warning("prometheus_release_failed", error=str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -380,44 +319,24 @@ def emit_release_target(target: str, result: str) -> None:
 
 
 def init_sync() -> None:
-    """Call at process start (before event loop) for sync init."""
+    """Call at process start, after init_logging()."""
     _init_otel()
-    _init_prometheus()
-    _init_loki()
-    _warn_if_async_only_backend_configured()
+    _warn_if_removed_backend_configured()
 
 
-def _warn_if_async_only_backend_configured() -> None:
-    """Say so if Loki or NATS is configured but cannot be reached from the live path.
+def _warn_if_removed_backend_configured() -> None:
+    """One warning naming any removed-backend variable that is still set.
 
-    Tool events are emitted from AuditCtx.finish(), which is sync — 45 of the 65 tools
-    are sync functions that FastMCP runs on a worker thread with no event loop to await
-    into, so only emit_tool_event_sync() runs in production. Loki and NATS live on the
-    async tail, which has no production caller.
-
-    Neither is configured for githost-mcp on forge, so nothing is lost today. But a
-    backend that is configured and silently receives nothing is exactly the failure this
-    build existed to remove from the metrics path, and it would be indistinguishable
-    from an idle server. Warn rather than let it be discovered by an audit later.
+    Names only: LOKI_URL and NATS_URL can carry credentials in their userinfo.
     """
-    config = get_config()
-    unreachable = [
-        name
-        for name, configured in (("loki", bool(config.loki_url)), ("nats", bool(config.nats_url)))
-        if configured
-    ]
-    if unreachable:
+    removed = get_config().removed_backend_env
+    if removed:
         log.warning(
-            "async_backend_not_wired_to_tool_events",
-            backends=unreachable,
+            "config_ignored_removed_backend",
+            variables=removed,
             detail=(
-                "configured, but tool events are emitted from a sync path that cannot "
-                "reach them; they will receive nothing until emit_tool_event()'s async "
-                "tail has a production caller"
+                "githost-mcp 0.19.0 removed the Loki, Prometheus and NATS backends; these "
+                "variables are ignored. OTel (OTEL_EXPORTER_OTLP_ENDPOINT) is the telemetry "
+                "path, and the audit JSONL is the durable record."
             ),
         )
-
-
-async def init_async() -> None:
-    """Call inside async lifespan for async init."""
-    await _init_nats()

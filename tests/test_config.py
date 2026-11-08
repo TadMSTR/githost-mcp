@@ -786,9 +786,7 @@ def test_workspace_policy_path_env_overrides_default_location(tmp_path, monkeypa
 # the value.
 
 
-@pytest.mark.parametrize(
-    "var", ["METRICS_PORT", "HTTP_PORT", "AUDIT_LOG_MAX_BYTES", "AUDIT_LOG_BACKUP_COUNT"]
-)
+@pytest.mark.parametrize("var", ["HTTP_PORT", "AUDIT_LOG_MAX_BYTES", "AUDIT_LOG_BACKUP_COUNT"])
 def test_malformed_int_env_names_the_variable(monkeypatch, var):
     monkeypatch.setenv(var, "not-a-number")
     reset_config()
@@ -796,6 +794,25 @@ def test_malformed_int_env_names_the_variable(monkeypatch, var):
         load_config()
     assert var in str(exc.value), f"error does not name the variable: {exc.value}"
     assert "not-a-number" in str(exc.value), f"error does not show the bad value: {exc.value}"
+
+
+def test_removed_backend_variables_are_named_not_parsed(monkeypatch):
+    """0.19.0 removed the Loki, Prometheus and NATS backends. Their variables are recorded
+    by name for the startup warning, and a malformed METRICS_PORT no longer stops the
+    process: nothing reads it."""
+    monkeypatch.setenv("METRICS_PORT", "not-a-number")
+    monkeypatch.setenv("NATS_URL", "nats://user:secret@host:4222")
+    reset_config()
+    config = load_config()
+    assert config.removed_backend_env == ["METRICS_PORT", "NATS_URL"]
+    assert "secret" not in repr(config.removed_backend_env)
+
+
+def test_no_removed_backend_variables_by_default(monkeypatch):
+    for name in ("LOKI_URL", "LOKI_LABELS", "METRICS_PORT", "NATS_URL", "NATS_SUBJECT_PREFIX"):
+        monkeypatch.delenv(name, raising=False)
+    reset_config()
+    assert load_config().removed_backend_env == []
 
 
 def test_log_rotation_settings_default_to_audit_values(monkeypatch):

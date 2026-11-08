@@ -74,6 +74,7 @@ def register(mcp) -> None:
                     "description": description or "",
                 },
             )
+            ac.effect(tag=tag, action="create")
             ac.finish("ok")
             return {
                 "tag": tag,
@@ -215,6 +216,7 @@ def register(mcp) -> None:
                     "description": description or "",
                 },
             )
+            ac.effect(pr_number=mr.iid, head_sha=lambda: mr.sha, base=target_branch)
             ac.finish("ok")
             return {
                 "iid": mr.iid,
@@ -296,6 +298,11 @@ def register(mcp) -> None:
             if merge_commit_message:
                 kwargs["merge_commit_message"] = merge_commit_message
             gitlab_call(mr.merge, **kwargs)
+            ac.effect(
+                pr_number=mr_iid,
+                merge_sha=lambda: mr.merge_commit_sha or mr.squash_commit_sha,
+                method="squash" if squash else "merge",
+            )
             ac.finish("ok")
             return {"iid": mr.iid, "state": mr.state, "merged": True, "web_url": mr.web_url}
         except Exception as e:
@@ -376,11 +383,13 @@ def register(mcp) -> None:
 
             if method == "approve":
                 gitlab_call(mr.approve)
+                ac.effect(pr_number=mr_iid, state="approved")
                 ac.finish("ok")
                 return {"project": project, "mr_iid": mr_iid, "approved": True}
 
             if method == "unapprove":
                 gitlab_call(mr.unapprove)
+                ac.effect(pr_number=mr_iid, state="unapproved")
                 ac.finish("ok")
                 return {"project": project, "mr_iid": mr_iid, "approved": False}
 
@@ -468,6 +477,7 @@ def register(mcp) -> None:
                 if not ref:
                     raise MissingArgument("ref is required for create")
                 pipe = gitlab_call(proj.pipelines.create, {"ref": ref})
+                ac.effect(action=method, pipeline_id=lambda: pipe.id, ref=ref)
                 ac.finish("ok")
                 return {
                     "project": project,
@@ -504,10 +514,12 @@ def register(mcp) -> None:
                 }
             if method == "retry":
                 gitlab_call(pipe.retry)
+                ac.effect(action=method, pipeline_id=pipeline_id)
                 ac.finish("ok")
                 return {"project": project, "id": pipeline_id, "retried": True}
             # cancel
             gitlab_call(pipe.cancel)
+            ac.effect(action=method, pipeline_id=pipeline_id)
             ac.finish("ok")
             return {"project": project, "id": pipeline_id, "cancelled": True}
         except Exception as e:
@@ -545,6 +557,7 @@ def register(mcp) -> None:
             if description is not None:
                 release.description = description
             gitlab_call(release.save)
+            ac.effect(tag=tag, action="update")
             ac.finish("ok")
             return {
                 "tag": release.tag_name,
@@ -575,6 +588,7 @@ def register(mcp) -> None:
             gl = get_gitlab()
             proj = gitlab_call(gl.projects.get, project)
             gitlab_call(proj.releases.delete, tag)
+            ac.effect(tag=tag, action="delete")
             ac.finish("ok")
             return {"project": project, "tag": tag, "deleted": True}
         except Exception as e:
@@ -733,6 +747,7 @@ def register(mcp) -> None:
                 if labels:
                     data["labels"] = labels
                 issue = gitlab_call(proj.issues.create, data)
+                ac.effect(issue_number=lambda: issue.iid, action=method)
                 ac.finish("ok")
                 return {
                     "iid": issue.iid,
@@ -756,6 +771,7 @@ def register(mcp) -> None:
                 if not changed:
                     raise MissingArgument("update requires at least one of title or description")
                 gitlab_call(issue.save)
+                ac.effect(issue_number=issue_iid, action=method)
                 ac.finish("ok")
                 return {"project": project, "iid": issue_iid, "updated": True}
 
@@ -763,12 +779,14 @@ def register(mcp) -> None:
                 if not comment:
                     raise MissingArgument("comment is required for add_comment")
                 note = gitlab_call(issue.notes.create, {"body": comment})
+                ac.effect(issue_number=issue_iid, comment_id=lambda: note.id, action=method)
                 ac.finish("ok")
                 return {"project": project, "issue_iid": issue_iid, "comment_id": note.id}
 
             # close / reopen
             issue.state_event = "close" if method == "close" else "reopen"
             gitlab_call(issue.save)
+            ac.effect(issue_number=issue_iid, action=method)
             ac.finish("ok")
             return {
                 "project": project,

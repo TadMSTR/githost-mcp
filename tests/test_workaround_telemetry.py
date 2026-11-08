@@ -245,7 +245,9 @@ def test_finish_emits_a_tool_event(audit_env, monkeypatch):
         "githost_mcp.audit.emit_tool_event_sync",
         lambda *a: calls.append(a),
     )
-    AuditCtx("git_push", "local", "/srv/repos/myrepo", {}).finish("ok")
+    ac = AuditCtx("git_push", "local", "/srv/repos/myrepo", {})
+    ac.effect(ref="main")
+    ac.finish("ok")
     assert len(calls) == 1
     tool, provider, repo_basename, result, _duration, reason_class = calls[0]
     assert (tool, provider, result) == ("git_push", "local", "ok")
@@ -265,7 +267,9 @@ def test_finish_emits_reason_class_for_a_denial(audit_env, monkeypatch):
 def test_ok_prefixed_results_are_not_counted_as_denials(audit_env, monkeypatch):
     calls = []
     monkeypatch.setattr("githost_mcp.audit.emit_tool_event_sync", lambda *a: calls.append(a))
-    AuditCtx("git_branch_delete_remote", "local", "/repo", {}).finish("ok:already_absent")
+    ac = AuditCtx("git_branch_delete_remote", "local", "/repo", {})
+    ac.effect(action="already_absent")
+    ac.finish("ok:already_absent")
     assert calls[0][-1] is None
 
 
@@ -279,33 +283,47 @@ def test_telemetry_failure_cannot_fail_the_tool_call(audit_env, monkeypatch):
 
 
 def test_denied_counter_increments_only_for_denials(audit_env, monkeypatch):
-    """Phase 2 acceptance, against the real Prometheus objects."""
-    from prometheus_client import CollectorRegistry, Counter
+    """Phase 2 acceptance, against a real OTel counter read back through an in-memory
+    reader. Prometheus (the original backend for this test) was removed in 0.19.0; the
+    bounded reason_class is still asserted on a real instrument, not a stub."""
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
     from githost_mcp import observability as obs
 
-    registry = CollectorRegistry()
-    denied = Counter(
-        "githost_tool_denied_total",
-        "test",
-        ["tool", "agent_id", "reason_class"],
-        registry=registry,
-    )
-    monkeypatch.setattr(obs, "_prom_tool_denied", denied)
-    monkeypatch.setattr(obs, "_prom_tool_calls", None)
+    for name in (
+        "_meter",
+        "_tool_calls_counter",
+        "_tool_denied_counter",
+        "_tool_duration_histogram",
+        "_release_targets_counter",
+    ):
+        monkeypatch.setattr(obs, name, getattr(obs, name))
+    reader = InMemoryMetricReader()
+    obs.bind_meter(MeterProvider(metric_readers=[reader]).get_meter("test"))
+
+    def points():
+        data = reader.get_metrics_data()
+        for rm in data.resource_metrics if data else []:
+            for sm in rm.scope_metrics:
+                for metric in sm.metrics:
+                    if metric.name == "githost.tool.denied":
+                        yield from metric.data.data_points
 
     def value(**labels):
-        return registry.get_sample_value("githost_tool_denied_total", labels) or 0.0
+        return sum(p.value for p in points() if dict(p.attributes) == labels)
 
     labels = {"tool": "git_add", "agent_id": "test-agent", "reason_class": "write_glob_denied"}
 
     obs.emit_tool_event_sync("git_add", "local", "repo", "ok", 5, None)
-    assert value(**labels) == 0.0, "a successful call must not increment the denial counter"
+    assert sum(p.value for p in points()) == 0, (
+        "a successful call must not increment the denial counter under any attributes"
+    )
 
     obs.emit_tool_event_sync(
         "git_add", "local", "repo", "denied:write_glob", 5, "write_glob_denied"
     )
-    assert value(**labels) == 1.0
+    assert value(**labels) == 1
 
 
 def test_audit_rejection_records_and_returns_the_error(audit_env):
@@ -373,31 +391,35 @@ def test_a_normal_reason_is_not_truncated(audit_env):
     assert "truncated" not in entry["reason"]
 
 
-def test_configured_loki_warns_that_it_is_unreachable(audit_env, monkeypatch, caplog):
-    """A configured backend that silently receives nothing is the same failure this
-    build removed from the metrics path."""
+def test_a_removed_backend_variable_is_warned_about_by_name(audit_env, monkeypatch, caplog):
+    """0.19.0 removed Loki/Prometheus/NATS. A stale variable must be visible, not silently
+    ignored, and the warning names the variable, never its value (LOKI_URL and NATS_URL
+    can carry userinfo)."""
     import logging
 
     from githost_mcp import observability as obs
 
-    monkeypatch.setenv("LOKI_URL", "http://127.0.0.1:3100")
+    monkeypatch.setenv("LOKI_URL", "http://user:hunter2@127.0.0.1:3100")
     reset_config()
     with caplog.at_level(logging.WARNING):
-        obs._warn_if_async_only_backend_configured()
-    assert any("async_backend_not_wired_to_tool_events" in r.getMessage() for r in caplog.records)
+        obs._warn_if_removed_backend_configured()
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("config_ignored_removed_backend" in m and "LOKI_URL" in m for m in messages)
+    assert not any("hunter2" in m for m in messages)
 
 
-def test_no_warning_when_no_async_backend_is_configured(audit_env, caplog):
+def test_no_warning_when_no_removed_backend_is_configured(audit_env, monkeypatch, caplog):
     """Both directions — otherwise a function that always warned would pass."""
     import logging
 
     from githost_mcp import observability as obs
 
+    for name in ("LOKI_URL", "LOKI_LABELS", "METRICS_PORT", "NATS_URL", "NATS_SUBJECT_PREFIX"):
+        monkeypatch.delenv(name, raising=False)
+    reset_config()
     with caplog.at_level(logging.WARNING):
-        obs._warn_if_async_only_backend_configured()
-    assert not any(
-        "async_backend_not_wired_to_tool_events" in r.getMessage() for r in caplog.records
-    )
+        obs._warn_if_removed_backend_configured()
+    assert not any("config_ignored_removed_backend" in r.getMessage() for r in caplog.records)
 
 
 def test_truncation_happens_after_scrubbing_not_before(audit_env):

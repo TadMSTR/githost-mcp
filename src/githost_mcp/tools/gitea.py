@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 from urllib.parse import quote
 
@@ -148,6 +149,7 @@ def register(mcp) -> None:
                 "prerelease": prerelease,
             }
             result = await gitea_post(f"/repos/{owner}/{repo_name}/releases", data)
+            ac.effect(tag=tag, release_id=result.get("id"))
             ac.finish("ok")
             return {"id": result.get("id"), "tag": tag, "url": result.get("html_url")}
         except Exception as e:
@@ -292,6 +294,11 @@ def register(mcp) -> None:
         try:
             data = {"title": title, "head": head, "base": base, "body": body or "", "draft": draft}
             result = await gitea_post(f"/repos/{owner}/{repo_name}/pulls", data)
+            ac.effect(
+                pr_number=result.get("number"),
+                head_sha=(result.get("head") or {}).get("sha"),
+                base=base,
+            )
             ac.finish("ok")
             return {
                 "number": result.get("number"),
@@ -358,6 +365,7 @@ def register(mcp) -> None:
             result = await gitea_post(
                 f"/repos/{owner}/{repo_name}/issues/{pr_number}/comments", {"body": body}
             )
+            ac.effect(pr_number=pr_number, comment_id=result.get("id"))
             ac.finish("ok")
             return {
                 "id": result.get("id"),
@@ -415,6 +423,13 @@ def register(mcp) -> None:
             if message:
                 data["merge_message_title"] = message
             await gitea_post_void(f"/repos/{owner}/{repo_name}/pulls/{pr_number}/merge", data)
+            # The merge endpoint returns no body, so the merge sha is read back from the PR.
+            # Best effort: a failed read-back is an incomplete effect, never a failed merge.
+            merge_sha = None
+            with contextlib.suppress(Exception):
+                merged = await gitea_get(f"/repos/{owner}/{repo_name}/pulls/{pr_number}")
+                merge_sha = merged.get("merge_commit_sha") if isinstance(merged, dict) else None
+            ac.effect(pr_number=pr_number, merge_sha=merge_sha, method=merge_style)
             ac.finish("ok")
             return {"merged": True, "pr_number": pr_number}
         except Exception as e:
@@ -514,6 +529,9 @@ def register(mcp) -> None:
                 result = await gitea_post(
                     f"{base}/reviews", {"event": event_map[event], "body": body or ""}
                 )
+                ac.effect(
+                    pr_number=pr_number, review_id=result.get("id"), state=result.get("state")
+                )
                 ac.finish("ok")
                 return {
                     "repo": repo,
@@ -531,6 +549,7 @@ def register(mcp) -> None:
                 f"{base}/reviews/{review_id}/dismissals",
                 {"message": message, "priors": False},
             )
+            ac.effect(pr_number=pr_number, review_id=review_id, state="dismissed")
             ac.finish("ok")
             return {"repo": repo, "pr": pr_number, "review_id": review_id, "dismissed": True}
         except Exception as e:
@@ -709,6 +728,9 @@ def register(mcp) -> None:
                     f"{base}/workflows/{workflow}/dispatches",
                     {"ref": ref, "inputs": inputs or {}},
                 )
+                # Gitea returns no run id for a dispatch. The workflow file name stays out
+                # of the effect (no file names); it is the caller's own argument.
+                ac.effect(action=method, ref=ref)
                 ac.finish("ok")
                 return {"repo": repo, "workflow": workflow, "ref": ref, "dispatched": True}
 
@@ -717,6 +739,7 @@ def register(mcp) -> None:
                 raise MissingArgument(f"run_id is required for {method}")
             suffix = "rerun" if method == "rerun_run" else "rerun-failed-jobs"
             await gitea_post_void(f"{base}/runs/{run_id}/{suffix}", {})
+            ac.effect(action=method, run_id=run_id)
             ac.finish("ok")
             return {"repo": repo, "run_id": run_id, method: True}
         except Exception as e:
@@ -824,6 +847,7 @@ def register(mcp) -> None:
             if prerelease is not None:
                 data["prerelease"] = prerelease
             result = await gitea_patch(f"/repos/{owner}/{repo_name}/releases/{rid}", data)
+            ac.effect(tag=tag, release_id=rid, action="update")
             ac.finish("ok")
             return {
                 "id": result.get("id"),
@@ -860,6 +884,7 @@ def register(mcp) -> None:
         ac = AuditCtx("gitea_release_delete", "gitea", repo, {"repo": repo, "tag": tag})
         try:
             await gitea_delete(f"/repos/{owner}/{repo_name}/releases/tags/{tag}")
+            ac.effect(tag=tag, action="delete")
             ac.finish("ok")
             return {"repo": repo, "tag": tag, "deleted": True}
         except Exception as e:
@@ -1026,6 +1051,7 @@ def register(mcp) -> None:
                 if assignees:
                     data["assignees"] = assignees
                 result = await gitea_post(base, data)
+                ac.effect(issue_number=result.get("number"), action=method)
                 ac.finish("ok")
                 return {
                     "number": result.get("number"),
@@ -1046,6 +1072,7 @@ def register(mcp) -> None:
                 if not data:
                     raise MissingArgument("update requires at least one of title or body")
                 await gitea_patch(f"{base}/{issue_number}", data)
+                ac.effect(issue_number=issue_number, action=method)
                 ac.finish("ok")
                 return {"repo": repo, "number": issue_number, "updated": True}
 
@@ -1053,6 +1080,7 @@ def register(mcp) -> None:
                 if not comment:
                     raise MissingArgument("comment is required for add_comment")
                 result = await gitea_post(f"{base}/{issue_number}/comments", {"body": comment})
+                ac.effect(issue_number=issue_number, comment_id=result.get("id"), action=method)
                 ac.finish("ok")
                 return {
                     "repo": repo,
@@ -1064,6 +1092,7 @@ def register(mcp) -> None:
             # close / reopen
             new_state = "closed" if method == "close" else "open"
             await gitea_patch(f"{base}/{issue_number}", {"state": new_state})
+            ac.effect(issue_number=issue_number, action=method)
             ac.finish("ok")
             return {"repo": repo, "number": issue_number, "state": new_state}
         except Exception as e:
@@ -1192,6 +1221,7 @@ def register(mcp) -> None:
             warning = readback_warning("Gitea", visibility, reported, readback_error)
             if warning:
                 result["warning"] = warning
+            ac.effect(repo=result["full_name"], repo_id=created.get("id"), visibility=reported)
             ac.finish(readback_result(reported, warning), warning)
             return result
         except Exception as e:

@@ -6,7 +6,9 @@ from typing import Any
 
 import structlog
 
+from ..audit import current_child
 from ..config import get_config
+from .github_client import api_call_name
 
 log = structlog.get_logger(__name__)
 
@@ -31,9 +33,13 @@ def get_gitlab():
 
 
 def gitlab_call(fn, *args, **kwargs):
-    """Execute a python-gitlab call, masking credentials from any exception."""
+    """Execute a python-gitlab call, masking credentials from any exception.
+
+    A child span `http.gitlab` of the current tool span, as github_call() does for GitHub.
+    """
     try:
-        return fn(*args, **kwargs)
+        with current_child("http.gitlab", **{"githost.api.call": api_call_name(fn)}):
+            return fn(*args, **kwargs)
     except Exception as e:
         msg = str(e)
         config = get_config()

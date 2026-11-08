@@ -1,11 +1,11 @@
 // PM2 ecosystem — one long-lived HTTP-transport githost-mcp process per agent.
 //
 // Replaces the per-turn-recycled stdio launchers (run-githost-mcp-<agent>.py)
-// with real PM2 services so Prometheus/OTEL/Loki/NATS survive across calls and
+// with real PM2 services so OTel exporters survive across calls and
 // `pm2 restart githost-mcp-<agent>` applies a code change without bouncing
 // scoped-mcp. See README.md "Deploy" for the full stdio-vs-http cutover.
 //
-// Single source of truth is the AGENTS map below (AGENT_ID -> ports) — add a
+// Single source of truth is the AGENTS map below (AGENT_ID -> port) — add a
 // row here to onboard a new agent, no separate generator script needed since
 // PM2 ecosystem files are plain Node and this one builds its own `apps` array.
 //
@@ -27,8 +27,8 @@
 // processes).
 //
 // AGENT_ID does NOT come from that file and never has — buildApp() below injects
-// it, along with TRANSPORT, HTTP_HOST, HTTP_PORT, AGENT_MANIFEST_PATH and
-// METRICS_PORT. Taking the old wording at face value cost a cutover: an
+// it, along with TRANSPORT, HTTP_HOST, HTTP_PORT and AGENT_MANIFEST_PATH (and, before
+// 0.19.0, METRICS_PORT). Taking the old wording at face value cost a cutover: an
 // audit-LOW sanity check in agent-allowlist-cutover.sh asserted the rewritten
 // env file still carried AGENT_ID, an invariant that had never been true, and
 // the cutover failed closed for every agent on its first real run (fixed in
@@ -55,16 +55,16 @@ const HOME = os.homedir();
 const SHARED_TOKEN_KEYS = ["GITHUB_TOKEN", "GITEA_TOKEN", "GITLAB_TOKEN"];
 const sharedEnv = parseEnvFile(path.join(HOME, ".secrets", "forge.env"));
 
-// AGENT_ID -> per-agent port block. Contiguous ranges per the build plan
+// AGENT_ID -> per-agent HTTP port. Contiguous range per the build plan
 // (githost-mcp-http-pm2-migration-2026-07); keep in sync with
 // host-forge/services.md when adding or renumbering agents.
 const AGENTS = {
-  developer: { httpPort: 8620, metricsPort: 9620 },
-  sysadmin: { httpPort: 8621, metricsPort: 9621 },
-  security: { httpPort: 8622, metricsPort: 9622 },
-  writer: { httpPort: 8623, metricsPort: 9623 },
-  research: { httpPort: 8624, metricsPort: 9624 },
-  harlock: { httpPort: 8625, metricsPort: 9625 },
+  developer: { httpPort: 8620 },
+  sysadmin: { httpPort: 8621 },
+  security: { httpPort: 8622 },
+  writer: { httpPort: 8623 },
+  research: { httpPort: 8624 },
+  harlock: { httpPort: 8625 },
   // steward — the config-owning agent (vikunja#350, build
   // steward-config-agent-2026-08). Its git job is narrow by design: branch,
   // commit, push and open a PR on host-forge-scripts carrying a config
@@ -72,13 +72,13 @@ const AGENTS = {
   // tool_allowlist in steward-agent.yml rather than a denylist, so a future
   // githost-mcp release cannot add a write verb steward silently inherits.
   //
-  // 8627/9627, not the contiguous 8626: that is backrest-mcp. 8625/9625 stay
+  // 8627, not the contiguous 8626: that is backrest-mcp. 8625 stays
   // reserved to harlock rather than being reclaimed here — harlock's
   // decommission (vikunja#270) is only through Phase 0 and reassigning a port
   // out from under a half-removed agent is how two services end up racing for
   // one bind. Renumber both together when that decommission finishes.
-  steward: { httpPort: 8627, metricsPort: 9627 },
-  fleet: { httpPort: 8628, metricsPort: 9628 },
+  steward: { httpPort: 8627 },
+  fleet: { httpPort: 8628 },
 };
 
 function buildApp(agentId, ports) {
@@ -118,18 +118,15 @@ function buildApp(agentId, ports) {
   //
   // vikunja #271 (id 282); closes #47 (id 55) and accepted risk M-2.
   env.AGENT_MANIFEST_PATH = `/etc/forge/manifests/${agentId}-agent.yml`;
-  // Re-enabled 2026-07-27 (vikunja #272, id 283). The 2026-07-16 stopgap left this
-  // unset because observability.py called start_http_server() without addr= and so
-  // bound 0.0.0.0; it now passes addr="127.0.0.1" unconditionally. Verify with
-  // `ss -tlnp` — a metrics endpoint answering on localhost proves nothing about
-  // which interface it is on, and that confusion is how the 0.0.0.0 bind shipped.
-  env.METRICS_PORT = String(ports.metricsPort);
+  // No METRICS_PORT: the Prometheus endpoint was removed in 0.19.0. No job scraped
+  // 9620-9628, and the OTel metrics below already reach SigNoz (githost-scoped-2026-11
+  // p2). A running process started from the old file keeps METRICS_PORT in its PM2 env
+  // across restarts; 0.19.0 ignores it and logs config_ignored_removed_backend once.
 
   // OTLP export to the SigNoz collector (signoz-otel-collector, 4317 gRPC /
   // 4318 HTTP). Until this was set, githost-mcp's telemetry reached nothing:
-  // _init_otel() returns immediately when OTEL_EXPORTER_OTLP_ENDPOINT is unset,
-  // and the Prometheus endpoint on metricsPort was scraped by no job — 9620-9627
-  // are not among prometheus.yml's targets.
+  // _init_otel() returns immediately when OTEL_EXPORTER_OTLP_ENDPOINT is unset.
+  // This is now githost-mcp's only telemetry export.
   //
   // The protocol is set EXPLICITLY even though "grpc" is already config.py's
   // default. An exporter that is correct only because a variable is unset is the

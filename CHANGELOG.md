@@ -1,5 +1,98 @@
 # Changelog
 
+## [0.19.0] — 2026-11-08
+
+Attribution and telemetry (githost-scoped-2026-11 part 2). An audit entry now records what a
+write call changed and which dispatcher run, task and trace it belonged to, and the
+`githost.<tool>` span covers the real work. Covers #1426 (id 1509) except its Loki item
+(programme part 6), and closes #530 (id 613) by removing the NATS publisher.
+
+### Audit entry: before and after
+
+A `git_push` with the branch left to default, as 0.18.0 wrote it (developer, 2026-11-08):
+
+```json
+{"tool": "git_push", "provider": "local", "repo": "/home/ted/repos/gitea/host-forge-build-reports",
+ "params": {"repo_path": "/home/ted/repos/gitea/host-forge-build-reports", "remote": "origin", "branch": null},
+ "result": "ok", "duration_ms": 766}
+```
+
+The same call in 0.19.0, through scoped-mcp ≥ 1.20.0 with `forward_identity: true`:
+
+```json
+{"tool": "git_push", "provider": "local", "repo": "/home/ted/repos/gitea/host-forge-build-reports",
+ "params": {"repo_path": "/home/ted/repos/gitea/host-forge-build-reports", "remote": "origin", "branch": null},
+ "result": "ok", "duration_ms": 766,
+ "run_id": "<uuid>", "task_id": "<uuid>", "session_id": "<scoped-mcp session>", "trace_id": "<32 hex>",
+ "effect": {"remote": "origin", "ref": "main", "new_sha": "<40 hex>", "old_sha": "<40 hex>",
+            "lease": false, "forced": false, "flags": ["FAST_FORWARD"]}}
+```
+
+`run_id`, `task_id`, `session_id` and `trace_id` are on every entry, rejections included, and
+`null` when absent. `effect` is on successful write calls only. A real pair from the worktree
+probe is in the build report.
+
+### Added
+
+- **`effect` on every write verb**: SHAs, the resolved ref, PR/issue/review/comment/release/
+  run/pipeline numbers and counts (README, "What a call changed"). Never a commit message,
+  body, file name or URL; strings are scrubbed, then bounded. A field that cannot be
+  determined is `null` and listed in `effect_incomplete`; the call still succeeds.
+  `gitea_pr_merge` reads the merge sha back from the PR, since the merge endpoint returns no
+  body.
+- **Closed-world classification** (`effects.py`): every tool is in `EFFECT_TOOLS` or
+  `READ_TOOLS`, and a test fails on an unclassified one. Multi-method tools name their write
+  methods in `EFFECT_SELECTORS`. A successful write call that records no effect logs
+  `effect_not_recorded`; under test it fails the test.
+- **Correlation ids**: `X-Forge-Run-Id`, `X-Forge-Task-Id` and `X-Forge-Session-Id`, sent by
+  scoped-mcp ≥ 1.20.0, are validated (UUID / `[A-Za-z0-9._:-]{1,128}`) and written to the
+  audit entry and the span (`forge.run_id`, `forge.task_id`, `forge.session_id`). An invalid
+  header is dropped and named in `correlation_invalid`. **Attribution only**: any holder of the
+  bearer token can send any value, and nothing gates on them. Works with or without the
+  headers.
+- **`trace_id`** on every entry: the OTel trace of the call, so an entry joins to SigNoz even
+  without a run id.
+- **`audit_log_query`** filters `run_id`, `task_id` and `trace_id` (exact match, validated). It
+  still reads the calling agent's own file only.
+- **Child spans**: `git.push`/`fetch`/`pull`/`clone`/`commit`/`add`/`checkout`/`worktree`/
+  `ls_remote` around git operations; `http.gitea`, `http.woodpecker`, `http.github` per request
+  and `http.github`/`http.gitlab` per PyGithub/python-gitlab call. Attributes are method,
+  host, status, remote name, API method name and a path template built from a fixed word list
+  (`/api/v1/repos/{}/{}/pulls`); no URL, query, token, body or exception message.
+- **`CallScopeMiddleware`**: reads the correlation headers once per call and finishes any
+  `AuditCtx` a tool left open (`error:unfinished`), so no span leaks. `AuditCtx` is also a
+  context manager.
+
+### Changed
+
+- **The `githost.<tool>` span opens when the `AuditCtx` is created** and ends when the entry is
+  written. It used to open inside `finish()`, after the work: 23 µs long, starting at the end
+  of a 1.49 s push (trace `9113fefe1e69c4185a50818bcdaddc17`). `githost.duration_ms` stays as an
+  attribute. A call ending in `error:*` marks the span ERROR. Trace propagation itself was
+  already working (FastMCP carries `traceparent`) and is unchanged.
+- **stderr carries WARNING and above only**, whatever `LOG_LEVEL` says. PM2's
+  `githost-mcp-<agent>-error.log` received every INFO line (764 of 764 on 2026-11-07). The
+  file log keeps `LOG_LEVEL`.
+- **A second `finish()` on one `AuditCtx` is ignored** with `audit_ctx_finished_twice`: one
+  call, one audit entry.
+- Audit entries are about 80 bytes longer (the four correlation fields), so the audit file
+  reaches `AUDIT_LOG_MAX_BYTES` sooner.
+
+### Removed
+
+- **The Loki push, NATS publisher and Prometheus endpoint.** The async `emit_tool_event()` that
+  fed Loki and NATS had no caller, and no scrape job read ports 9620–9628. The OTel metrics
+  (`githost.tool.calls`, `.denied`, `.duration`, `githost.release.targets`) already reach
+  SigNoz and are unchanged. `METRICS_PORT`, `LOKI_URL`, `LOKI_LABELS`, `NATS_URL` and
+  `NATS_SUBJECT_PREFIX` are ignored; a set one logs `config_ignored_removed_backend` once, by
+  name. Closes #530 (id 613) ("provision a NATS user or drop the emitter": dropped).
+- **The `loki`, `prometheus` and `nats` extras.** `observability` keeps its name and is now
+  `githost-mcp[otel]`. `prometheus-client` and `nats-py` leave the lock; the denial-counter
+  test now asserts against a real OTel counter through an in-memory reader.
+- **`metricsPort` / `METRICS_PORT` in `ecosystem.config.js`.** The harlock and steward rows
+  stay (part 4 removes them). A process started from the old file keeps `METRICS_PORT` in its
+  PM2 env across a plain restart; 0.19.0 ignores it, so this needs no deploy step.
+
 ## [0.18.0] — 2026-11-07
 
 CI diagnostics (githost-scoped-2026-11 part 1). An agent can now find out, with githost-mcp

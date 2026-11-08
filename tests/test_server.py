@@ -41,10 +41,10 @@ def test_server_main_invokes_run(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_server_lifespan_runs_async_init(monkeypatch, tmp_path):
+async def test_server_lifespan_enters_and_exits(monkeypatch, tmp_path):
     srv = _import_server(monkeypatch, tmp_path)
     async with srv.lifespan(object()):
-        pass  # entering and exiting exercises init_async + start/stop logging
+        pass  # entering and exiting exercises the start/stop logging
 
 
 def test_main_stdio_calls_run_with_no_transport_kwargs(monkeypatch, tmp_path):

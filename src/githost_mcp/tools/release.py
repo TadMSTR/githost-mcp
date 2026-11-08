@@ -73,6 +73,7 @@ def register(mcp) -> None:
                 effective_targets.append("npm")
 
         if dry_run:
+            # A dry run changes nothing and records no effect (effects.EFFECT_SELECTORS).
             ac.finish("ok")
             return {
                 "dry_run": True,
@@ -100,6 +101,9 @@ def register(mcp) -> None:
 
         urls: dict = {}
         created: list[str] = []
+        # Per-target outcome for the effect record: ok | error. Targets never attempted
+        # are absent.
+        target_results: dict[str, str] = {}
 
         # Step 1: git tag + push
         #
@@ -137,6 +141,7 @@ def register(mcp) -> None:
                 url = await _create_release_sync(github_repo, tag, notes)
                 urls["github"] = url
                 created.append("github")
+                target_results["github"] = "ok"
                 emit_release_target("github", "ok")
             except Exception as e:
                 emit_release_target("github", "error")
@@ -156,6 +161,7 @@ def register(mcp) -> None:
                 result = await gitea_post(f"/repos/{owner}/{repo_name}/releases", data)
                 urls["gitea"] = result.get("html_url", "")
                 created.append("gitea")
+                target_results["gitea"] = "ok"
                 emit_release_target("gitea", "ok")
             except Exception as e:
                 emit_release_target("gitea", "error")
@@ -176,6 +182,7 @@ def register(mcp) -> None:
                 )
                 urls["gitlab"] = getattr(gl_rel, "_links", {}).get("self", "")
                 created.append("gitlab")
+                target_results["gitlab"] = "ok"
                 emit_release_target("gitlab", "ok")
             except Exception as e:
                 emit_release_target("gitlab", "error")
@@ -210,11 +217,14 @@ def register(mcp) -> None:
                     urls["pypi"] = (
                         f"https://pypi.org/project/{_get_package_name(repo_path)}/{version}/"
                     )
+                    target_results["pypi"] = "ok"
                     emit_release_target("pypi", "ok")
                 else:
+                    target_results["pypi"] = "error"
                     emit_release_target("pypi", "error")
                     log.warning("pypi_publish_failed", stderr=scrub(result.stderr[:200]))
             except Exception as e:
+                target_results["pypi"] = "error"
                 emit_release_target("pypi", "error")
                 log.warning("pypi_publish_exception", error=scrub(str(e)))
 
@@ -237,14 +247,21 @@ def register(mcp) -> None:
                     timeout=120,
                 )
                 if result.returncode == 0:
+                    target_results["npm"] = "ok"
                     emit_release_target("npm", "ok")
                 else:
+                    target_results["npm"] = "error"
                     emit_release_target("npm", "error")
                     log.warning("npm_publish_failed", stderr=scrub(result.stderr[:200]))
             except Exception as e:
+                target_results["npm"] = "error"
                 emit_release_target("npm", "error")
                 log.warning("npm_publish_exception", error=scrub(str(e)))
 
+        tag_sha = None
+        with contextlib.suppress(Exception):
+            tag_sha = repo.tags[tag].commit.hexsha
+        ac.effect(tag=tag, tag_sha=tag_sha, targets=target_results)
         ac.finish("ok")
         return {
             "success": True,

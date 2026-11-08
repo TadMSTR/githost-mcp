@@ -16,7 +16,8 @@ from fastmcp.server.auth import StaticTokenVerifier
 
 from .audit import init_logging
 from .config import get_config
-from .observability import init_async, init_sync
+from .correlation import CallScopeMiddleware
+from .observability import init_sync
 from .tools import audit_query, git_local, gitea, github, gitlab, registry, release, woodpecker
 
 log = structlog.get_logger(__name__)
@@ -33,7 +34,6 @@ _MIN_AUTH_TOKEN_LENGTH = 16
 
 @asynccontextmanager
 async def lifespan(app):
-    await init_async()
     log.info("githost_mcp_started")
     yield
     log.info("githost_mcp_stopped")
@@ -63,6 +63,10 @@ mcp = FastMCP(
     auth=_auth,
 )
 
+# One CallScope per tool call: reads the X-Forge-* correlation headers scoped-mcp forwards,
+# and finishes any AuditCtx a tool left open so no span leaks (correlation.py).
+mcp.add_middleware(CallScopeMiddleware())
+
 # Register tools from each module
 git_local.register(mcp)
 github.register(mcp)
@@ -73,7 +77,7 @@ registry.register(mcp)
 woodpecker.register(mcp)
 audit_query.register(mcp)
 
-# Sync init (logging, OTEL, Prometheus) runs at import time so it's ready before first tool call
+# Sync init (logging, OTel) runs at import time so it's ready before first tool call
 init_logging()
 init_sync()
 

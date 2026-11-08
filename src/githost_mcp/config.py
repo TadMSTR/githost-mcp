@@ -55,14 +55,10 @@ class Config:
     otel_endpoint: str = ""
     otel_protocol: str = "grpc"
     otel_service_name: str = "githost-mcp"
-    # Loki
-    loki_url: str = ""
-    loki_labels: str = "app=githost-mcp"
-    # Prometheus
-    metrics_port: int | None = None
-    # NATS
-    nats_url: str = ""
-    nats_subject_prefix: str = "githost"
+    # Names (never values) of environment variables for the Loki, Prometheus and NATS
+    # backends that 0.19.0 removed. observability.init_sync() warns once when any is set,
+    # so a stale variable is visible instead of silently ignored.
+    removed_backend_env: list[str] = field(default_factory=list)
     # GitHub
     github_token: str = ""
     github_owner: str = ""
@@ -107,6 +103,18 @@ _DEFAULT_POLICY_PATH = "/etc/forge/workspace-policy.yml"
 # PUTS a worktree. Every destination is still validated against the write roots, so
 # the policy stays the only authority over writes and this needs no manifest change.
 _DEFAULT_WORKTREE_ROOT = "~/repos/personal/_worktrees"
+
+# The Loki push, Prometheus endpoint and NATS publisher were removed in 0.19.0: none of
+# them had a consumer (githost-scoped-2026-11 p2, #1426 (id 1509), #530 (id 613)). The
+# OTel exporter is the one live telemetry path. PM2 keeps a process's launch env across
+# restarts, so METRICS_PORT stays set on the running apps; it is now inert.
+REMOVED_BACKEND_ENV = (
+    "LOKI_URL",
+    "LOKI_LABELS",
+    "METRICS_PORT",
+    "NATS_URL",
+    "NATS_SUBJECT_PREFIX",
+)
 
 
 def _default_manifest_path(agent_id: str) -> str:
@@ -291,7 +299,7 @@ def _resolve_allowed_roots(
 def _env_int(name: str, raw: str) -> int:
     """Parse an integer env var, naming the variable and the bad value on failure.
 
-    get_config() runs at import time (server.py), so a malformed METRICS_PORT used
+    get_config() runs at import time (server.py), so a malformed port variable used
     to kill the process with a bare `invalid literal for int()` traceback that did
     not say which variable was at fault.
     """
@@ -302,7 +310,6 @@ def _env_int(name: str, raw: str) -> int:
 
 
 def load_config() -> Config:
-    metrics_raw = os.getenv("METRICS_PORT", "")
     http_port_raw = os.getenv("HTTP_PORT", "")
     _agent_id = os.getenv("AGENT_ID", "unknown")
     _git_agent_name = (
@@ -369,11 +376,7 @@ def load_config() -> Config:
         otel_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         otel_protocol=os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
         otel_service_name=os.getenv("OTEL_SERVICE_NAME", "githost-mcp"),
-        loki_url=os.getenv("LOKI_URL", ""),
-        loki_labels=os.getenv("LOKI_LABELS", "app=githost-mcp"),
-        metrics_port=_env_int("METRICS_PORT", metrics_raw) if metrics_raw else None,
-        nats_url=os.getenv("NATS_URL", ""),
-        nats_subject_prefix=os.getenv("NATS_SUBJECT_PREFIX", "githost"),
+        removed_backend_env=[name for name in REMOVED_BACKEND_ENV if os.getenv(name)],
         github_token=os.getenv("GITHUB_TOKEN", ""),
         github_owner=os.getenv("GITHUB_OWNER", ""),
         gitea_url=os.getenv("GITEA_URL", ""),
