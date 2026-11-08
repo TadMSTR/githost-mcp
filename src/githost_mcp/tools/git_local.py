@@ -229,6 +229,9 @@ def rename_noreplace(src: str, dst: str) -> None:
     os.rename(src, dst)
 
 
+# SECURITY[deferred]: a fetch refspec that excludes the branch can leave a stale tracking
+# ref, which is then reported. Ticket vikunja#1450. Target: open.
+# Audit: 2026-11-08/githost-scoped-2026-11-p4-githost-correctness (CR-17).
 def sent_sha(repo: git.Repo, remote: str, branch: str, captured: str) -> str:
     """The sha a successful push actually sent: the remote-tracking ref git just updated.
 

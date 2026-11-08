@@ -425,9 +425,15 @@ def register(mcp) -> None:
             # The same rule as every other ref argument (#1431 F-08): a value it refuses
             # cannot name a real branch or ref, so the filter used to return an empty list.
             if branch is not None:
+                # SECURITY[accepted]: validate_ref is ASCII-only, so a unicode branch name is
+                # refused with an explicit error rather than matched; forge branch names are
+                # ASCII. Audit: 2026-11-08/githost-scoped-2026-11-p4-githost-correctness (CR-11).
                 validate_ref(branch)
                 params["branch"] = branch
             if ref is not None:
+                # SECURITY[deferred]: whether Woodpecker's list filter matches `ref` exactly or
+                # as a substring is unverified. Ticket vikunja#1449. Target: open.
+                # Audit: 2026-11-08/githost-scoped-2026-11-p4-githost-correctness (CR-12).
                 validate_ref(ref)
                 params["ref"] = ref
             if before is not None:

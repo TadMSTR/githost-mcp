@@ -1061,6 +1061,9 @@ def register(mcp) -> None:
                     for cr in runs:
                         if cr.conclusion not in _FAILED_CONCLUSIONS:
                             continue
+                        # SECURITY[deferred]: this read, PR comments and workflow jobs still
+                        # fetch pages outside their span. Ticket vikunja#1451. Target: open.
+                        # Audit: 2026-11-08/githost-scoped-2026-11-p4-githost-correctness (CR-18).
                         for a in github_call(cr.get_annotations):
                             if len(found) >= _MAX_ANNOTATIONS:
                                 more = True
