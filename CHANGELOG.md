@@ -64,14 +64,16 @@ Closes #1425 (id 1508); the githost half of #1389 (id 1472).
   trailing newline no longer passes. This covers repo, owner, tag, workflow, ref, remote-name,
   scp-remote and GitLab project checks.
 - **CI log bodies are byte-capped before parsing** (32 MiB), and the read stops at the cap:
-  Woodpecker log and config responses (refused past the cap), and Gitea job logs (cut, and
+  Woodpecker log and config responses (refused at or past the cap), and Gitea job logs (cut, and
   flagged `download_cut`).
 - **A cut log drops its partial last line.** The cap can fall inside a token, which the
   scrubber can't recognise by halves; `tail` returned exactly that line. Everything after
   the last newline of a cut body is now dropped (GitHub and Gitea job logs).
-- **The signed Actions log URL no longer reaches the DEBUG log.** httpcore's trace line
-  for the 302 carried the `Location` header; its query is now redacted, as the httpx INFO
-  line's already was.
+- **The signed Actions log URL no longer reaches the DEBUG log** when GitHub sends it, as
+  a lowercase `https://` Location. httpcore's trace line for the 302 carried the `Location`
+  header; its query is now redacted, as the httpx INFO line's already was. A Location with
+  an upper- or mixed-case scheme, or `http://`, is not redacted in that trace line
+  (DEBUG only; deferred).
 
 ### Fixed (review of this release, before merge)
 
