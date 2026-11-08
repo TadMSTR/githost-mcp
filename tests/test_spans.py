@@ -241,3 +241,21 @@ def test_traced_client_without_proxy_env_still_traces(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     client = httptrace.sync_client("gitea")
     assert isinstance(client._transport, httptrace.TracingTransport)
+
+
+def test_an_httpx_without_the_private_attrs_gets_an_untraced_client(monkeypatch):
+    """Self-check OV-12 (round 2): if httpx moves _transport/_mounts, the client still works,
+    untraced, with one warning, instead of every HTTP tool failing at construction."""
+    from githost_mcp import httptrace
+
+    class Moved:
+        pass
+
+    warnings = []
+    monkeypatch.setattr(httptrace, "_private_attrs_missing_logged", False)
+    monkeypatch.setattr(httptrace.log, "warning", lambda event, **kw: warnings.append(event))
+    for _ in range(2):
+        client = Moved()
+        httptrace._wrap_transports(client, lambda inner: inner)
+        assert not hasattr(client, "_transport")
+    assert warnings == ["httptrace_untraced_httpx_internals_moved"]

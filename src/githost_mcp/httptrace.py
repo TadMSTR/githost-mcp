@@ -24,9 +24,12 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import structlog
 
 from . import audit
 from .observability import set_child_attrs
+
+log = structlog.get_logger(__name__)
 
 #: API path words kept verbatim in a url.template. Everything else becomes `{}`.
 _PATH_WORDS = frozenset(
@@ -111,6 +114,9 @@ class TracingTransport(httpx.BaseTransport):
         self._inner.close()
 
 
+_private_attrs_missing_logged = False
+
+
 def _wrap_transports(client: httpx.Client | httpx.AsyncClient, wrap: Any) -> None:
     """Wrap the client's own transport and every env-proxy mount in a tracing transport.
 
@@ -119,12 +125,22 @@ def _wrap_transports(client: httpx.Client | httpx.AsyncClient, wrap: Any) -> Non
     afterwards. That keeps HTTP(S)_PROXY / NO_PROXY, and every kwarg (`verify`, `cert`,
     ...) applies to the inner transports exactly as it would without tracing. `_transport`
     and `_mounts` are private to httpx (0.27 and 0.28 both have them);
-    test_httptrace.py::test_client_private_transport_attrs_exist fails if they move.
+    test_spans.py::test_client_private_transport_attrs_exist fails if they move, and an
+    httpx without them gets an untraced client and one warning, never a failure.
     """
-    client._transport = wrap(client._transport)  # type: ignore[union-attr]
+    global _private_attrs_missing_logged
+    transport = getattr(client, "_transport", None)
+    mounts = getattr(client, "_mounts", None)
+    if transport is None or not isinstance(mounts, dict):
+        # An httpx that moved them: keep the working client untraced rather than fail
+        # every HTTP tool. Said once per process so the lost child spans are visible.
+        if not _private_attrs_missing_logged:
+            _private_attrs_missing_logged = True
+            log.warning("httptrace_untraced_httpx_internals_moved")
+        return
+    client._transport = wrap(transport)  # type: ignore[union-attr]
     client._mounts = {  # type: ignore[union-attr]
-        pattern: (wrap(transport) if transport is not None else None)
-        for pattern, transport in client._mounts.items()  # type: ignore[union-attr]
+        pattern: (wrap(inner) if inner is not None else None) for pattern, inner in mounts.items()
     }
 
 
