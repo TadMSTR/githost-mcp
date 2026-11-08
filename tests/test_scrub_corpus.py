@@ -135,3 +135,38 @@ def test_shapes_are_linear():
     for blob in blobs:
         scrub(blob)
     assert time.perf_counter() - start < 0.5
+
+
+# Each anchor a scrub pattern starts from, then a long run of one character. The test above
+# repeats the anchor, so no single run is long and a pattern with two adjacent quantifiers
+# over the same characters still passed it (16 KB of spaces after `authorization:` took 4 s).
+ANCHORS = [
+    "authorization",
+    "Authorization:",
+    "authorization: '",
+    "'Authorization': \"",
+    "HTTP_AUTHORIZATION=",
+    "authorization: bearer",
+    "authorization: bearer '",
+    "ghp_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "npm_",
+    "pypi-",
+    "https://",
+    "https://user",
+    "https://user:pw@",
+    "https://a/",
+    "https://a.b",
+]
+FILLERS = [" ", "\t", "'", '"', ":", "=", "a", "_", "-", ".", "@", "/", "a.", "a:1", "a@"]
+
+
+@pytest.mark.parametrize("anchor", ANCHORS)
+def test_each_anchor_then_a_long_run_is_linear(anchor):
+    """IV-78: 20 KB of each filler after the anchor, ended by a character no shape takes."""
+    start = time.perf_counter()
+    for filler in FILLERS:
+        scrub(anchor + filler * (20000 // len(filler)) + "!")
+    assert time.perf_counter() - start < 0.5, anchor

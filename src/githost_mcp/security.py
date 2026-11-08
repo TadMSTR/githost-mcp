@@ -582,11 +582,12 @@ def redact_url_credentials(text: str) -> str:
 # After it comes either a scheme word (Bearer, token, Basic, Digest, Negotiate) and a value
 # of any length, or a bare value of at least 20 characters, so `Authorization: Bearer`
 # alone and `authorization: required` are left as they are (audit F-02). Linear: a fixed
-# keyword whose start a lookbehind pins, then one character class with no overlap with
-# what precedes it.
+# keyword whose start a lookbehind pins, possessive quantifiers between it and the value
+# (two plain `\s*` around an optional quote split one run of spaces every way: quadratic),
+# then one character class with no overlap with what precedes it.
 _AUTH_HEADER_RE = re.compile(
-    r"(?i)((?<![A-Za-z0-9])authorization['\"]?\s*[:=]\s*['\"]?\s*"
-    r"(?:(?:bearer|token|basic|digest|negotiate)\s+(?=[^\s'\"<>,;])|(?=[^\s'\"<>,;]{20})))"
+    r"(?i)((?<![A-Za-z0-9])authorization['\"]?+\s*+[:=]\s*+['\"]?+\s*+"
+    r"(?:(?:bearer|token|basic|digest|negotiate)\s++(?=[^\s'\"<>,;])|(?=[^\s'\"<>,;]{20})))"
     r"[^\s'\"<>,;]+"
 )
 # Vendor-prefixed tokens, keeping the prefix (it says which credential leaked). Each length
