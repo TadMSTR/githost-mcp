@@ -577,6 +577,61 @@ def test_validate_branch_name_rejects_unsafe_shapes(name):
         validate_branch_name(name)
 
 
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "_x",
+        "fix/#1",
+        "#383",
+        "main",
+        "feature/deploy-guardrails",
+        "v1.2.0+build",
+        "a" * 40,
+        "release/v1.2.0",
+        "user_name/topic",
+    ],
+)
+def test_validate_ref_accepts_valid_git_branch_names(ref):
+    """vikunja#1429: a leading `_` and `#` are valid git branch names."""
+    from githost_mcp.security import validate_ref
+
+    validate_ref(ref)
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "",
+        "-x",
+        "a..b",
+        "../x",
+        "x y",
+        "x" * 300,
+        "main\n",
+        "a//b",
+        "trailing/",
+        "a/./b",
+        ".hidden",
+        "a/.b",
+        "x.lock",
+        "ctrl\x01",
+        "tab\tx",
+        "q?x",
+        "a~1",
+        "a^",
+        "a:b",
+        "a\\b",
+        "@{0}",
+    ],
+)
+def test_validate_ref_rejects_unsafe_shapes(ref):
+    from githost_mcp.errors import InvalidArgument
+    from githost_mcp.security import validate_ref
+
+    with pytest.raises(InvalidArgument):
+        validate_ref(ref)
+
+
 def test_validators_refuse_a_trailing_newline():
     """`$` matches before a final newline under re.match (KB IV-70); every validator uses \\Z."""
     from githost_mcp.errors import InvalidArgument, RemoteNameInvalid

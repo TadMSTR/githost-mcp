@@ -429,13 +429,16 @@ def test_rotation_failure_logs_and_does_not_break_the_write(rotating_audit_env, 
         )(),
     )
 
-    write_audit_entry("git_status", "local", "/tmp/after", {}, "ok", 1)
+    # Its own marker, the filler's length: the filler writes "/tmp/after", so asserting
+    # on that passed with this write dropped (CodeRabbit CR-15, p4; probed).
+    write_audit_entry("git_status", "local", "/tmp/TESTD", {}, "ok", 1)
 
     assert any(e == "audit_rotation_failed" for e, _ in events), (
         f"a failed rotation must not be silent: {events}"
     )
     # The entry itself must still land — rotation failure never loses an audit entry.
-    assert any(e["repo"] == "/tmp/after" for e in _read_entries(rotating_audit_env / "audit.jsonl"))
+    repos = [e["repo"] for e in _read_entries(rotating_audit_env / "audit.jsonl")]
+    assert repos.count("/tmp/TESTD") == 1
 
 
 def test_rotation_backup_shift_failure_is_logged(rotating_audit_env, monkeypatch):

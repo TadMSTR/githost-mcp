@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import re
-from itertools import islice
 
 import structlog
 
 from .. import logview
-from .._providers.github_client import fetch_job_log, get_github, github_call
+from .._providers.github_client import fetch_job_log, get_github, github_call, github_list
 from ..audit import AuditCtx, audit_rejection, reject_enum
 from ..bootstrap import (
     VISIBILITIES,
@@ -21,12 +20,6 @@ from ..errors import AlreadyExists, InvalidArgument, MissingArgument
 from ..security import mask_credentials, scrub, validate_branch_name, validate_ref
 
 log = structlog.get_logger(__name__)
-
-# PyGithub's PaginatedList must be capped with islice, never `[:limit]`. Slicing
-# returns a _Slice whose __iter__ indexes into the first page, so a zero-result
-# query raises IndexError — "no open PRs" became indistinguishable from a real API
-# failure (vikunja #178, id 189). PaginatedListBase.__iter__ only yields and grows,
-# so it is safe on an empty list, and unlike totalCount it costs no extra API call.
 
 # GitHub full names are always exactly 'owner/repo' (one slash, no numeric-ID form).
 # `\Z`, not `$`: `$` also matches before a trailing newline, so `re.match` accepted
@@ -243,7 +236,7 @@ def register(mcp) -> None:
             gh = get_github()
             gh_repo = github_call(gh.get_repo, repo)
             releases = []
-            for r in github_call(gh_repo.get_releases).get_page(0)[:limit]:
+            for r in github_list(gh_repo.get_releases, limit=limit):
                 releases.append(
                     {
                         "tag": r.tag_name,
@@ -279,7 +272,7 @@ def register(mcp) -> None:
             if ref:
                 kwargs["branch"] = ref
             runs = []
-            for run in islice(github_call(gh_repo.get_workflow_runs, **kwargs), limit):
+            for run in github_list(gh_repo.get_workflow_runs, limit=limit, **kwargs):
                 runs.append(
                     {
                         "id": run.id,
@@ -342,7 +335,7 @@ def register(mcp) -> None:
             gh = get_github()
             gh_repo = github_call(gh.get_repo, repo)
             prs = []
-            for pr in islice(github_call(gh_repo.get_pulls, state=state), limit):
+            for pr in github_list(gh_repo.get_pulls, limit=limit, state=state):
                 prs.append(
                     {
                         "number": pr.number,
@@ -600,6 +593,7 @@ def register(mcp) -> None:
         pr_number: int,
         merge_method: str = "merge",
         commit_title: str | None = None,
+        commit_message: str | None = None,
     ) -> dict:
         """Merge a GitHub pull request.
 
@@ -612,6 +606,10 @@ def register(mcp) -> None:
             pr_number: Pull request number to merge.
             merge_method: One of 'merge', 'squash', or 'rebase' (default: merge).
             commit_title: Optional merge commit title.
+            commit_message: Optional merge commit body. For a squash merge GitHub otherwise
+                fills the body with every branch commit message concatenated; pass this to
+                replace it. The audit entry records only that a custom body was given
+                (`custom_body: true`), never the text.
         """
         if err := _bad_repo(repo):
             return audit_rejection("github_pr_merge", "github", repo, "bad_repo_format", err)
@@ -629,7 +627,12 @@ def register(mcp) -> None:
             "github_pr_merge",
             "github",
             repo,
-            {"repo": repo, "pr_number": pr_number, "merge_method": merge_method},
+            {
+                "repo": repo,
+                "pr_number": pr_number,
+                "merge_method": merge_method,
+                "custom_body": commit_message is not None,
+            },
         )
         try:
             gh = get_github()
@@ -638,8 +641,15 @@ def register(mcp) -> None:
             kwargs: dict = {"merge_method": merge_method}
             if commit_title:
                 kwargs["commit_title"] = commit_title
+            if commit_message is not None:
+                kwargs["commit_message"] = commit_message
             status = github_call(pr.merge, **kwargs)
-            ac.effect(pr_number=pr_number, merge_sha=status.sha, method=merge_method)
+            ac.effect(
+                pr_number=pr_number,
+                merge_sha=status.sha,
+                method=merge_method,
+                custom_body=commit_message is not None,
+            )
             ac.finish("ok")
             return {"merged": status.merged, "sha": status.sha, "message": status.message}
         except Exception as e:
@@ -723,7 +733,7 @@ def register(mcp) -> None:
                         "patch": f.patch,
                         "previous_filename": getattr(f, "previous_filename", None),
                     }
-                    for f in github_call(pr.get_files)
+                    for f in github_list(pr.get_files)
                 ]
                 ac.finish("ok")
                 return {"repo": repo, "pr": pr_number, "files": files}
@@ -737,7 +747,7 @@ def register(mcp) -> None:
                         "body": r.body,
                         "submitted_at": r.submitted_at.isoformat() if r.submitted_at else None,
                     }
-                    for r in github_call(pr.get_reviews)
+                    for r in github_list(pr.get_reviews)
                 ]
                 ac.finish("ok")
                 return {"repo": repo, "pr": pr_number, "reviews": reviews}
@@ -1013,7 +1023,7 @@ def register(mcp) -> None:
                 }
                 for st in (combined.statuses or [])
             ]
-            runs = list(islice(github_call(commit.get_check_runs), _MAX_CHECK_RUNS + 1))
+            runs = github_list(commit.get_check_runs, limit=_MAX_CHECK_RUNS + 1)
             runs_cut = len(runs) > _MAX_CHECK_RUNS
             runs = runs[:_MAX_CHECK_RUNS]
             check_runs = [
@@ -1193,7 +1203,7 @@ def register(mcp) -> None:
 
             if method == "list":
                 issues = []
-                for i in islice(github_call(gh_repo.get_issues, state=state), limit):
+                for i in github_list(gh_repo.get_issues, limit=limit, state=state):
                     if i.pull_request:  # get_issues includes PRs; skip them
                         continue
                     issues.append(
@@ -1237,7 +1247,7 @@ def register(mcp) -> None:
                     "body": c.body,
                     "created_at": c.created_at.isoformat() if c.created_at else None,
                 }
-                for c in github_call(issue.get_comments)
+                for c in github_list(issue.get_comments)
             ]
             ac.finish("ok")
             return {"repo": repo, "issue": issue_number, "comments": comments}

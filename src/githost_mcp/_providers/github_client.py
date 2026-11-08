@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from itertools import islice
 from typing import Any
 
 import httpx
@@ -64,6 +65,28 @@ def github_call(fn, *args, **kwargs):
         if config.github_token and config.github_token in msg:
             msg = msg.replace(config.github_token, "***")
         raise ValueError(msg) from None
+
+
+def github_list(fn, *args, limit: int | None = None, **kwargs) -> list:
+    """Call a PyGithub list method and read its items inside the call's span.
+
+    PyGithub returns a lazy PaginatedList: `github_call(pr.get_reviews)` makes no request,
+    and every page is fetched later, while the caller iterates, outside the span and
+    outside github_call's credential masking (CodeRabbit CR-02, githost-scoped-2026-11 p4;
+    probed: 3 of 3 page requests ran outside). This reads up to `limit` items (all when
+    None) before the span closes.
+
+    The cap is islice, never `[:limit]`: slicing a PaginatedList returns a _Slice that
+    indexes into the first page, so a zero-result query raised IndexError (vikunja #178,
+    id 189). Iteration only yields and grows, so it is safe on an empty list.
+    """
+
+    def _read():
+        items = fn(*args, **kwargs)
+        return list(items if limit is None else islice(items, limit))
+
+    _read.__name__ = api_call_name(fn)
+    return github_call(_read)
 
 
 # GitHub Actions job logs: `GET /repos/{o}/{r}/actions/jobs/{id}/logs` answers 302 with a

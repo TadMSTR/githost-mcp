@@ -40,6 +40,25 @@ async def gitea_get(path: str) -> Any:
         raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
 
 
+async def gitea_get_with_total(path: str) -> tuple[Any, int | None]:
+    """GET, also returning Gitea's `X-Total-Count` header (None when absent or not a number).
+
+    A paginated Gitea list puts the true item count only in that header: a body's own
+    `total_count` can be the page's length (the combined commit status does this).
+    """
+    try:
+        async with async_client("gitea", timeout=15.0) as client:
+            resp = await client.get(f"{_gitea_base()}{path}", headers=_get_gitea_headers())
+            _check_gitea_response(resp)
+            raw = resp.headers.get("x-total-count", "")
+            total = int(raw) if raw.isdigit() else None
+            return resp.json(), total
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
+
+
 async def gitea_get_optional(path: str) -> Any | None:
     """GET, returning None on a 404 instead of raising. For "does this exist?" reads.
 

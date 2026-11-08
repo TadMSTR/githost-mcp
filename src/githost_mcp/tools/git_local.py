@@ -148,14 +148,20 @@ def push_effect_fields(
 
     With `ref`, only the PushInfo for `refs/heads/<ref>` counts: a tag pushed alongside
     (push.followTags) would otherwise mark the branch `created` and drop its old sha. If
-    no PushInfo names the ref, every one is used, as before.
+    no PushInfo names the ref, every one is used, as before, but the fields may then
+    describe another ref: `ref_matched: None` is added, so AuditCtx names it in
+    `effect_incomplete`, and a warning is logged (#1434 R2-01).
     """
     infos = list(push_info)
+    unmatched = False
     if ref is not None:
         wanted = f"refs/heads/{ref}"
         matching = [i for i in infos if getattr(i, "remote_ref_string", None) == wanted]
         if matching:
             infos = matching
+        else:
+            unmatched = True
+            log.warning("push_effect_ref_unmatched", ref=ref, infos=len(infos))
     created = forced = up_to_date = False
     old: str | None = None
     for info in infos:
@@ -176,18 +182,51 @@ def push_effect_fields(
         fields["old_sha"] = new_sha
     else:
         fields["old_sha"] = old
+    if unmatched:
+        fields["ref_matched"] = None
     return fields
+
+
+def sent_sha(repo: git.Repo, remote: str, branch: str, captured: str) -> str:
+    """The sha a successful push actually sent: the remote-tracking ref git just updated.
+
+    `captured` is read before the push, but git resolves `refs/heads/<branch>` itself when
+    it runs, so a concurrent commit in that window was pushed while the captured sha was
+    reported (CodeRabbit CR-11, p4; probed). git updates `<remote>/<branch>` to the value it
+    pushed, so that is the answer; `captured` is the fallback when there is no tracking ref
+    (a remote with no fetch refspec).
+    """
+    try:
+        sha = repo.remotes[remote].refs[branch].commit.hexsha
+    except Exception:
+        return captured
+    if sha != captured:
+        log.warning("push_sent_a_moved_ref", remote=remote, branch=branch)
+    return sha
+
+
+def lease_unchecked(push_info, branch: str) -> bool:
+    """True when the push of `refs/heads/<branch>` was up to date, so git skipped the lease."""
+    wanted = f"refs/heads/{branch}"
+    return any(
+        getattr(i, "remote_ref_string", None) == wanted
+        and bool(i.flags & git.remote.PushInfo.UP_TO_DATE)
+        for i in push_info
+    )
 
 
 def commit_effect_fields(commit) -> dict:
     """`sha`, `parent_sha` (absent on a root commit, with `root: true`) and a file count.
 
+    A merge commit also records every parent, first parent first, as `merge_parents`.
     The count only: commit messages and file names never go in an effect record.
     """
     fields: dict = {"sha": commit.hexsha}
     parents = list(commit.parents)
     if parents:
         fields["parent_sha"] = parents[0].hexsha
+        if len(parents) > 1:
+            fields["merge_parents"] = [p.hexsha for p in parents]
     else:
         fields["root"] = True
     try:
@@ -195,6 +234,37 @@ def commit_effect_fields(commit) -> dict:
     except Exception:
         fields["files_changed"] = None
     return fields
+
+
+# The files `git commit` removes when it concludes a merge (builtin/commit.c,
+# remove_merge_branch_state). AUTO_MERGE is git 2.42+; unlinking a missing one is a no-op.
+_MERGE_STATE_FILES = ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "MERGE_RR", "AUTO_MERGE")
+_OBJECT_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def merge_head_shas(repo: git.Repo) -> list[str]:
+    """The shas in MERGE_HEAD, or [] when no merge is in progress.
+
+    `repo.git_dir` is the per-worktree git directory, which is where a linked worktree
+    keeps its MERGE_HEAD (not the common dir).
+    """
+    try:
+        text = (Path(repo.git_dir) / "MERGE_HEAD").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError):
+        raise InvalidArgument("A merge is in progress but MERGE_HEAD is unreadable") from None
+    shas = [line.strip() for line in text.splitlines() if line.strip()]
+    if not shas or not all(_OBJECT_SHA_RE.fullmatch(s) for s in shas):
+        raise InvalidArgument("A merge is in progress but MERGE_HEAD is malformed")
+    return shas
+
+
+def clear_merge_state(repo: git.Repo) -> None:
+    """Remove the merge state, as `git commit` does once the merge commit exists."""
+    for name in _MERGE_STATE_FILES:
+        with contextlib.suppress(FileNotFoundError):
+            (Path(repo.git_dir) / name).unlink()
 
 
 def url_host(url: str) -> str | None:
@@ -907,6 +977,9 @@ def register(mcp) -> None:
     def git_add(repo_path: str, paths: list[str]) -> dict:
         """Stage files or paths.
 
+        Returns `staged`: every path staged after the call (what the next commit will
+        include), not only the paths named here; a directory argument lists its files.
+
         Args:
             repo_path: Absolute path to the local git repository.
             paths: List of file or directory paths to stage (relative to repo root).
@@ -920,10 +993,12 @@ def register(mcp) -> None:
             # into .git/ internals. The git binary skips .git/ by design. (GHOST-1)
             with ac.child("git.add"):
                 repo.git.add("--", *paths)
-            staged = (
-                [item.a_path for item in repo.index.diff("HEAD")] if repo.head.is_valid() else paths
-            )
-            # A count, never the names: file names stay out of the effect record.
+            # The whole staged set after the call, read from the index: on an unborn branch
+            # this used to echo the caller's arguments, so `src/` counted as one path
+            # however many files it staged (CodeRabbit CR-10, p4).
+            staged = _staged_paths(repo)
+            # A count, never the names: file names stay out of the effect record. It counts
+            # everything staged, including paths staged before this call.
             ac.effect(paths_staged=len(staged))
             ac.finish("ok")
             return {"staged": staged}
@@ -989,16 +1064,36 @@ def register(mcp) -> None:
             signing_key = config.git_signing_key
             with ac.child("git.commit"):
                 if signing_key:
-                    # gitpython uses -S with GPG key ID (not the key value)
-                    cmd = []
-                    if actor:
-                        cmd += ["-c", f"user.name={actor.name}", "-c", f"user.email={actor.email}"]
-                    cmd += ["-S", f"--gpg-sign={signing_key}", "-m", full_message]
-                    repo.git.commit(*cmd)
+                    # gitpython uses -S with GPG key ID (not the key value). The git binary
+                    # reads MERGE_HEAD and clears the merge state itself. The identity goes
+                    # in the environment: after the subcommand, `-c` is `git commit
+                    # --reedit-message`, so `commit -c user.name=…` always failed.
+                    ident_env = (
+                        {
+                            "GIT_AUTHOR_NAME": actor.name,
+                            "GIT_AUTHOR_EMAIL": actor.email,
+                            "GIT_COMMITTER_NAME": actor.name,
+                            "GIT_COMMITTER_EMAIL": actor.email,
+                        }
+                        if actor
+                        else {}
+                    )
+                    with repo.git.custom_environment(**ident_env):
+                        repo.git.commit("-S", f"--gpg-sign={signing_key}", "-m", full_message)
                     commit = repo.head.commit
                 else:
                     kwargs = {"author": actor, "committer": actor} if actor else {}
+                    # index.commit ignores MERGE_HEAD: without this a resolved merge became a
+                    # one-parent commit and the merge state stayed behind (vikunja#1300).
+                    merge_heads = merge_head_shas(repo)
+                    if merge_heads:
+                        kwargs["parent_commits"] = [
+                            repo.head.commit,
+                            *(repo.commit(sha) for sha in merge_heads),
+                        ]
                     commit = repo.index.commit(full_message, **kwargs)
+                    if merge_heads:
+                        clear_merge_state(repo)
 
             ac.effect(**commit_effect_fields(commit))
             ac.finish("ok")
@@ -1053,8 +1148,8 @@ def register(mcp) -> None:
                 raise InvalidArgument(
                     f"'{branch_name}' is not a local branch: git_push pushes local branches only"
                 ) from None
-            # Captured before the push so the reported sha is the one that was
-            # actually sent, not whatever the ref moved to afterwards.
+            # Captured before the push as a fallback; sent_sha() replaces it with what
+            # git actually pushed once the push has succeeded.
             pushed_sha = head.commit.hexsha
             refspec = f"refs/heads/{branch_name}:refs/heads/{branch_name}"
             with ac.child("git.push", **{"githost.remote": remote}):
@@ -1080,6 +1175,8 @@ def register(mcp) -> None:
                     "flags": decoded,
                     "summary": reason,
                 }
+
+            pushed_sha = sent_sha(repo, remote, branch_name, pushed_sha)
 
             # Set upstream when it is missing: without it, the caller's natural
             # verification (`git rev-list @{u}..HEAD`) errors instead of confirming.
@@ -1440,6 +1537,18 @@ def register(mcp) -> None:
             # the push result for one.)
             with contextlib.suppress(IndexError, KeyError, AttributeError):
                 pushed_sha = repo.remotes[remote].refs[branch].commit.hexsha
+            # git answers "[up to date]" and exit 0 for a push that moves nothing without
+            # checking the lease at all: a stale `expected_sha` passed (CodeRabbit CR-12,
+            # p4; probed on git 2.47.3). Nothing moved, so there is nothing to replace, and
+            # claiming `replaced_sha: <expected>` would be false.
+            if lease_unchecked(push_info, branch) and pushed_sha != sha:
+                reason = (
+                    f"{remote}/{branch} is already at {pushed_sha}, not at expected_sha {sha}; "
+                    "nothing was pushed and the lease was never checked. Fetch, and pass the "
+                    "sha the remote branch is really at."
+                )
+                ac.finish("error:LeaseMismatch", reason)
+                return {"error": reason, "remote": remote, "branch": branch, "flags": outcome.flags}
             # The lease guarantees the remote was at `sha` when the push landed.
             ac.effect(
                 remote=remote,

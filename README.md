@@ -390,25 +390,38 @@ said only that the call succeeded — `git_commit` recorded `{repo_path, identit
 
 | Tool | `effect` |
 |---|---|
-| `git_commit` | `sha` (full), `parent_sha` (or `root: true`), `files_changed` (count) |
-| `git_push`, `git_push_force_with_lease` | `remote`, `ref`, `old_sha` (or `created: true`), `new_sha`, `forced`, `lease`, `flags` |
+| `git_commit` | `sha` (full), `parent_sha` (or `root: true`), `files_changed` (count); a merge commit adds `merge_parents` (every parent, first parent first) |
+| `git_push` | `remote`, `ref`, `old_sha` (or `created: true`), `new_sha`, `forced`, `lease`, `flags` |
+| `git_push_force_with_lease` | `remote`, `ref`, `old_sha`, `new_sha`, `forced`, `lease`, `flags` |
 | `git_pull`, `git_checkout` | `ref`, `old_head`, `new_head` |
 | `git_tag`, `git_branch` | `name`, `target_sha`, `action` |
 | `git_branch_delete_remote` | `remote`, `ref`, `old_sha`, `action` |
-| `git_clone`, `git_worktree` | `path`, `ref`, `head_sha` (clone: the remote `host`, never the URL) |
-| `git_add` | `paths_staged` (count) |
+| `git_clone` | `path`, the remote `host` (never the URL), then `ref` and `head_sha`, or `empty: true` |
+| `git_worktree` | `path`, `ref`, `head_sha`, `action` |
+| `git_add` | `paths_staged` (count of the whole staged set after the call, including earlier staging) |
 | `git_remote` | `name`, `action` (add: the URL's `host`) |
 | `*_pr_create` / `gitlab_mr_create` | `pr_number`, `head_sha`, `base` |
-| `*_pr_merge` / `gitlab_mr_merge` | `pr_number`, `merge_sha`, `method` |
-| `*_pr_review`, `gitea_pr_comment`, `gitlab_mr_review` | `pr_number`, `review_id` or `comment_id`, `state` |
+| `github_pr_merge` | `pr_number`, `merge_sha`, `method`, `custom_body` (whether `commit_message` was given; never the text) |
+| `gitea_pr_merge` | `pr_number`, `merge_sha`, `method`, `branch_deleted` |
+| `gitlab_mr_merge` | `pr_number`, `merge_sha`, `method` |
+| `github_pr_review`, `gitea_pr_review` | `pr_number`, `review_id`, `state` |
+| `gitlab_mr_review` | `pr_number`, `state` |
+| `gitea_pr_comment` | `pr_number`, `comment_id` |
 | `github_pr_update` | `pr_number`, `updated_fields` (names), `marked_ready` |
 | `*_issue_write` | `issue_number`, `action` (and `comment_id`) |
-| `*_create_release`, `*_release_update`, `*_release_delete` | `tag`, `release_id`, `action` |
+| `github_create_release`, `gitea_create_release` | `tag`, `release_id` |
+| `gitlab_create_release` | `tag`, `action` |
+| `github_release_update`, `gitea_release_update`, `github_release_delete` | `tag`, `release_id`, `action` |
+| `gitea_release_delete`, `gitlab_release_update`, `gitlab_release_delete` | `tag`, `action` |
 | `release` | `tag`, `tag_sha`, `targets` (per-target `ok`/`error`) |
-| `pypi_publish`, `npm_publish` | `target`, `package`, `version` |
-| `woodpecker_trigger`, `woodpecker_restart` | `pipeline_id` (the per-repo number) |
-| `woodpecker_pipeline_cancel`, Actions/pipeline write methods | the run or pipeline id, `action` |
-| `*_repo_create`, `github_fork` | `repo`/`fork`, `repo_id`, `visibility` |
+| `pypi_publish`, `npm_publish` | `target`, `package`, `version` (npm: the registry's host only) |
+| `woodpecker_trigger` | `pipeline_id` (the per-repo number), `branch` |
+| `woodpecker_restart` | `pipeline_id` (the new run), `restarted_from` |
+| `woodpecker_pipeline_cancel` | `pipeline_id`, `action` |
+| `github_actions`, `gitea_actions` write methods | `run_id`, `action`, `ref` (`github_actions` dispatch: `dispatched`) |
+| `gitlab_pipeline` write methods | `pipeline_id`, `action`, `ref` |
+| `github_repo_create`, `gitea_repo_create` | `repo`, `repo_id`, `visibility` |
+| `github_fork` | `fork`, `repo_id` |
 
 Rules:
 

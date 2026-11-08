@@ -323,12 +323,13 @@ def validate_tag_name(name: str) -> None:
 
 
 # A commit ref for the CI status reads: a SHA, or a branch/tag name. It lands in a URL path
-# (Gitea, via httpx, which resolves dot segments) or in PyGithub's, so `..`, a leading `-`
-# and anything outside the characters forge's branch and tag names use are refused.
-# SECURITY[deferred]: stricter than git (refuses a leading `_` and `#`); fails closed.
-# Widening tracked in vikunja#1429.
-# Audit: 2026-11-08/githost-scoped-2026-11-p1-ci-diagnostics (CR-11).
-_REF_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/+-]*\Z")
+# (Gitea, through quote(ref, safe=""); PyGithub's get_commit quotes it the same way), so it
+# is one encoded segment either way. The rules follow `git check-ref-format` where it
+# matters here (vikunja#1429): a leading `_` and a `#` are valid branch names, so they are
+# accepted; `..`, a leading `-`, a component starting with `.` (which covers `.` and `..`
+# segments), an empty segment, a trailing `/`, whitespace, control characters and git's
+# own forbidden characters are refused.
+_REF_RE = re.compile(r"\A[A-Za-z0-9_#][A-Za-z0-9._/+#-]*\Z")
 _REF_MAX = 255
 
 
@@ -338,10 +339,17 @@ def validate_ref(ref: str) -> None:
         raise InvalidArgument(f"ref must be 1-{_REF_MAX} characters")
     if ref.startswith("-"):
         raise InvalidArgument(f"ref {_LEADING_DASH_ERR}")
-    if ".." in ref or not _REF_RE.match(ref) or ref.endswith("/") or "//" in ref:
+    if (
+        ".." in ref
+        or not _REF_RE.match(ref)
+        or ref.endswith("/")
+        or "//" in ref
+        or "/." in ref
+        or ref.endswith(".lock")
+    ):
         raise InvalidArgument(
-            "ref must be a SHA or a branch/tag name (letters, digits, '.', '_', '/', '+', "
-            "'-'; no '..', no leading '-', no empty path segment)"
+            "ref must be a SHA or a branch/tag name (letters, digits, '.', '_', '#', '/', "
+            "'+', '-'; no '..', no leading '-', no empty or dot-led path segment)"
         )
 
 

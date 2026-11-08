@@ -15,6 +15,7 @@ from .._providers.gitea_client import (
     gitea_get_optional,
     gitea_get_text,
     gitea_get_text_capped,
+    gitea_get_with_total,
     gitea_patch,
     gitea_post,
     gitea_post_void,
@@ -48,6 +49,34 @@ def _err(e: Exception) -> dict:
 # (KB IV-23; githost-scoped-2026-11 p1 pre-audit).
 _REPO_RE = re.compile(r"\A(?!\.\.?/)[a-zA-Z0-9_.-]+/(?!\.\.?\Z)[a-zA-Z0-9_.-]+\Z")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
+
+# Combined commit status paging (vikunja#1430). 50 is Gitea's default MAX_RESPONSE_ITEMS;
+# a server configured lower returns shorter pages, which the loop handles (it compares
+# against X-Total-Count, not the page size).
+STATUS_PAGE_SIZE = 50
+STATUS_MAX_PAGES = 10
+# Worst first. An unknown state ranks just below failure: it is not a pass.
+_STATUS_STATE_RANK = {
+    "error": 5,
+    "failure": 4,
+    "pending": 2,
+    "warning": 1,
+    "success": 0,
+    "skipped": 0,
+}
+_UNKNOWN_STATE_RANK = 3
+
+
+def worst_status_state(a: str | None, b: str | None) -> str | None:
+    """The worse of two combined commit-status states (None counts as no information)."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    rank_a = _STATUS_STATE_RANK.get(a, _UNKNOWN_STATE_RANK)
+    rank_b = _STATUS_STATE_RANK.get(b, _UNKNOWN_STATE_RANK)
+    return b if rank_b > rank_a else a
+
 
 # String path segments (tag names, workflow file names) are interpolated into Gitea API
 # URLs and sent raw by httpx — unlike GitHub/GitLab which route through PyGithub/
@@ -382,6 +411,7 @@ def register(mcp) -> None:
         pr_number: int,
         merge_style: str = "merge",
         message: str | None = None,
+        delete_branch_after_merge: bool = False,
     ) -> dict:
         """Merge a Gitea pull request.
 
@@ -393,7 +423,10 @@ def register(mcp) -> None:
             repo: Repository in 'owner/repo' format.
             pr_number: Pull request number to merge.
             merge_style: One of 'merge', 'squash', or 'rebase' (default: merge).
-            message: Optional merge commit message title.
+            message: Optional merge commit title.
+            delete_branch_after_merge: Delete the PR's head branch once it is merged
+                (default: False). Gitea-only. GitHub has no such merge parameter; there
+                the repository's "Automatically delete head branches" setting does it.
         """
         if not _REPO_RE.match(repo):
             return audit_rejection(
@@ -416,12 +449,22 @@ def register(mcp) -> None:
             "gitea_pr_merge",
             "gitea",
             repo,
-            {"repo": repo, "pr_number": pr_number, "merge_style": merge_style},
+            {
+                "repo": repo,
+                "pr_number": pr_number,
+                "merge_style": merge_style,
+                "delete_branch_after_merge": delete_branch_after_merge,
+            },
         )
         try:
+            # Field names are MergePullRequestOption's in Gitea's swagger. The title is
+            # `merge_title_field`; the `merge_message_title` sent before 0.21.0 is not a
+            # field, so Gitea ignored it.
             data: dict = {"Do": merge_style}
             if message:
-                data["merge_message_title"] = message
+                data["merge_title_field"] = message
+            if delete_branch_after_merge:
+                data["delete_branch_after_merge"] = True
             await gitea_post_void(f"/repos/{owner}/{repo_name}/pulls/{pr_number}/merge", data)
             # The merge endpoint returns no body, so the merge sha is read back from the PR.
             # Best effort: a failed read-back is an incomplete effect, never a failed merge.
@@ -429,7 +472,12 @@ def register(mcp) -> None:
             with contextlib.suppress(Exception):
                 merged = await gitea_get(f"/repos/{owner}/{repo_name}/pulls/{pr_number}")
                 merge_sha = merged.get("merge_commit_sha") if isinstance(merged, dict) else None
-            ac.effect(pr_number=pr_number, merge_sha=merge_sha, method=merge_style)
+            ac.effect(
+                pr_number=pr_number,
+                merge_sha=merge_sha,
+                method=merge_style,
+                branch_deleted=delete_branch_after_merge,
+            )
             ac.finish("ok")
             return {"merged": True, "pr_number": pr_number}
         except Exception as e:
@@ -770,20 +818,36 @@ def register(mcp) -> None:
             owner, name = repo.split("/", 1)
             # Encoded as one segment: a branch like feature/x is accepted either way
             # (checked live), and an encoded slash cannot add a path segment.
-            # SECURITY[deferred]: whether Gitea computes `state` over every context or one
-            # page is unverified (vikunja#1430).
-            # Audit: 2026-11-08/githost-scoped-2026-11-p1-ci-diagnostics (CR-12).
-            data = await gitea_get(f"/repos/{owner}/{name}/commits/{quote(ref, safe='')}/status")
+            path = f"/repos/{owner}/{name}/commits/{quote(ref, safe='')}/status"
+            # Gitea computes the combined `state` over one page of contexts, and its body's
+            # `total_count` is that page's length; the real count is the X-Total-Count
+            # header (GetCombinedCommitStatusByRef / ToCombinedStatus, Gitea 1.27.3,
+            # vikunja#1430). So every page is read, up to a bound, and the worst page
+            # state wins.
+            data, total = await gitea_get_with_total(f"{path}?limit={STATUS_PAGE_SIZE}&page=1")
             if not isinstance(data, dict):
                 raise ValueError("Unexpected Gitea commit status response shape")
-            statuses = data.get("statuses") or []
+            statuses = list(data.get("statuses") or [])
+            state = data.get("state")
+            page = 1
+            while total is not None and len(statuses) < total and page < STATUS_MAX_PAGES:
+                page += 1
+                more, _ = await gitea_get_with_total(f"{path}?limit={STATUS_PAGE_SIZE}&page={page}")
+                page_statuses = more.get("statuses") if isinstance(more, dict) else None
+                if not page_statuses:
+                    break
+                statuses.extend(page_statuses)
+                state = worst_status_state(state, more.get("state"))
             ac.finish("ok")
             return {
                 "repo": repo,
                 "ref": ref,
                 "sha": data.get("sha"),
-                "state": data.get("state"),
-                "total_count": data.get("total_count"),
+                "state": state,
+                "total_count": total if total is not None else len(statuses),
+                # True when more contexts exist than were read (over the page bound):
+                # `state` then covers only the contexts listed.
+                "statuses_truncated": total is not None and len(statuses) < total,
                 "statuses": [
                     {
                         "context": st.get("context"),
