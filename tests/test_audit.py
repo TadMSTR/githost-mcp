@@ -199,10 +199,12 @@ def test_credential_not_in_audit_log(audit_env, monkeypatch):
 
 def test_audit_ctx(audit_env):
     ctx = AuditCtx("git_commit", "local", "/repo", {"message": "test"})
+    ctx.effect(sha="a" * 40)
     ctx.finish("ok")
     entries = _read_entries(os.environ["AUDIT_LOG_FILE"])
     assert entries[0]["tool"] == "git_commit"
     assert entries[0]["result"] == "ok"
+    assert entries[0]["effect"] == {"sha": "a" * 40}
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +235,25 @@ def rotating_audit_env(tmp_path, monkeypatch):
 def _write_n(n, tool="git_status"):
     for i in range(n):
         write_audit_entry(tool, "local", f"/tmp/repo{i}", {"repo_path": f"/tmp/repo{i}"}, "ok", i)
+
+
+def _fill_to_rotation_edge(path, max_bytes=1024):
+    """Write entries until the NEXT one must rotate, without rotating on the way.
+
+    Counted from the live size, not a fixed number of writes: an entry's size changes when
+    fields are added (0.19.0's correlation fields doubled it, and `_write_n(6)` then
+    rotated inside the setup instead of at the write under test). The filler has the same
+    shape as the write under test, so "the next one" is exactly that write.
+    """
+
+    def write():
+        write_audit_entry("git_status", "local", "/tmp/after", {}, "ok", 1)
+
+    write()
+    entry = path.stat().st_size
+    while path.stat().st_size + entry <= max_bytes:
+        write()
+    assert path.stat().st_size + entry > max_bytes
 
 
 def test_audit_log_rotates_at_configured_size(rotating_audit_env):
@@ -384,7 +405,7 @@ def test_concurrent_writes_do_not_lose_entries_across_rotation(rotating_audit_en
 def test_rotation_failure_logs_and_does_not_break_the_write(rotating_audit_env, monkeypatch):
     """A failed final rename means the live file never rolls and every subsequent
     write re-fails the same way. Silently, that grows past max_bytes forever."""
-    _write_n(6)  # get the live file over the 1024-byte threshold
+    _fill_to_rotation_edge(rotating_audit_env / "audit.jsonl")
 
     real_replace = os.replace
 
@@ -470,3 +491,31 @@ def test_missing_oldest_backup_is_not_logged_as_a_failure(rotating_audit_env, mo
     assert not any(e == "audit_rotation_step_failed" for e, _ in events), (
         f"absent backup file logged as a failure: {events}"
     )
+
+
+# --- stderr carries WARNING and above only (vikunja#1426 Done-when 5) -----
+
+
+def test_info_reaches_the_log_file_but_not_stderr(tmp_path, monkeypatch, capfd):
+    """PM2 writes stderr to githost-mcp-<agent>-error.log. It used to get every INFO
+    line (764 of 764 on 2026-11-07); the file handler keeps LOG_LEVEL."""
+    import logging
+
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "app.log"))
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    reset_config()
+    init_logging()
+    capfd.readouterr()
+
+    logging.getLogger("githost_mcp.test").info("info_marker_event")
+    logging.getLogger("githost_mcp.test").warning("warning_marker_event")
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    err = capfd.readouterr().err
+    log_text = (tmp_path / "app.log").read_text()
+    assert "info_marker_event" in log_text
+    assert "warning_marker_event" in log_text
+    assert "info_marker_event" not in err
+    assert "warning_marker_event" in err

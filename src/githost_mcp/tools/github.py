@@ -192,6 +192,7 @@ def register(mcp) -> None:
                 prerelease=prerelease,
                 generate_release_notes=generate_release_notes,
             )
+            ac.effect(tag=tag, release_id=release.id)
             ac.finish("ok")
             return {"id": release.id, "tag": tag, "url": release.html_url, "draft": draft}
         except Exception as e:
@@ -427,6 +428,7 @@ def register(mcp) -> None:
             # own NotSet sentinel, and None is neither.
             kwargs = {"organization": org} if org else {}
             fork = github_call(upstream.create_fork, **kwargs)
+            ac.effect(fork=lambda: fork.full_name, repo_id=lambda: fork.id)
             ac.finish("ok")
             return {
                 "fork": fork.full_name,
@@ -476,6 +478,7 @@ def register(mcp) -> None:
                 body=body or "",
                 draft=draft,
             )
+            ac.effect(pr_number=pr.number, head_sha=lambda: pr.head.sha, base=base)
             ac.finish("ok")
             return {
                 "number": pr.number,
@@ -574,6 +577,8 @@ def register(mcp) -> None:
             pr = github_call(gh_repo.get_pull, pr_number)
             if ready_for_review and pr.draft:
                 raise ValueError(f"PR #{pr_number} is still a draft after mark_ready_for_review")
+            # Field names only, never their new values (a title or body is free text).
+            ac.effect(pr_number=pr_number, updated_fields=sorted(kwargs), marked_ready=marked_ready)
             ac.finish("ok")
             return {
                 "number": pr.number,
@@ -634,6 +639,7 @@ def register(mcp) -> None:
             if commit_title:
                 kwargs["commit_title"] = commit_title
             status = github_call(pr.merge, **kwargs)
+            ac.effect(pr_number=pr_number, merge_sha=status.sha, method=merge_method)
             ac.finish("ok")
             return {"merged": status.merged, "sha": status.sha, "message": status.message}
         except Exception as e:
@@ -747,6 +753,7 @@ def register(mcp) -> None:
                 if event in {"REQUEST_CHANGES", "COMMENT"} and not body:
                     raise MissingArgument(f"body is required when event is {event}")
                 review = github_call(pr.create_review, body=body or "", event=event)
+                ac.effect(pr_number=pr_number, review_id=review.id, state=review.state)
                 ac.finish("ok")
                 return {
                     "repo": repo,
@@ -763,6 +770,7 @@ def register(mcp) -> None:
                 raise MissingArgument("message is required for dismiss_review")
             review = github_call(pr.get_review, review_id)
             github_call(review.dismiss, message)
+            ac.effect(pr_number=pr_number, review_id=review_id, state="dismissed")
             ac.finish("ok")
             return {"repo": repo, "pr": pr_number, "review_id": review_id, "dismissed": True}
         except Exception as e:
@@ -889,6 +897,9 @@ def register(mcp) -> None:
                     created = github_call(wf.create_dispatch, ref, inputs)
                 else:
                     created = github_call(wf.create_dispatch, ref)
+                # GitHub returns no run id for a dispatch; the workflow name is the
+                # caller's own argument and stays out of the effect.
+                ac.effect(action=method, ref=ref, dispatched=bool(created))
                 ac.finish("ok")
                 return {"repo": repo, "workflow": workflow, "ref": ref, "dispatched": bool(created)}
 
@@ -898,14 +909,17 @@ def register(mcp) -> None:
 
             if method == "rerun_workflow":
                 github_call(run.rerun)
+                ac.effect(action=method, run_id=run_id)
                 ac.finish("ok")
                 return {"repo": repo, "run_id": run_id, "rerun": True}
             if method == "rerun_failed_jobs":
                 github_call(run.rerun_failed_jobs)
+                ac.effect(action=method, run_id=run_id)
                 ac.finish("ok")
                 return {"repo": repo, "run_id": run_id, "rerun_failed_jobs": True}
             if method == "cancel_run":
                 github_call(run.cancel)
+                ac.effect(action=method, run_id=run_id)
                 ac.finish("ok")
                 return {"repo": repo, "run_id": run_id, "cancelled": True}
 
@@ -1098,6 +1112,7 @@ def register(mcp) -> None:
                 draft if draft is not None else release.draft,
                 prerelease if prerelease is not None else release.prerelease,
             )
+            ac.effect(tag=tag, release_id=updated.id, action="update")
             ac.finish("ok")
             return {
                 "id": updated.id,
@@ -1130,6 +1145,7 @@ def register(mcp) -> None:
             gh_repo = github_call(gh.get_repo, repo)
             release = github_call(gh_repo.get_release, tag)
             github_call(release.delete_release)
+            ac.effect(tag=tag, release_id=release.id, action="delete")
             ac.finish("ok")
             return {"repo": repo, "tag": tag, "deleted": True}
         except Exception as e:
@@ -1291,6 +1307,7 @@ def register(mcp) -> None:
                 if assignees:
                     kwargs["assignees"] = assignees
                 issue = github_call(gh_repo.create_issue, **kwargs)
+                ac.effect(issue_number=issue.number, action=method)
                 ac.finish("ok")
                 return {
                     "number": issue.number,
@@ -1312,6 +1329,7 @@ def register(mcp) -> None:
                 if not kwargs:
                     raise MissingArgument("update requires at least one of title or body")
                 github_call(issue.edit, **kwargs)
+                ac.effect(issue_number=issue_number, action=method)
                 ac.finish("ok")
                 return {"repo": repo, "number": issue_number, "updated": True}
 
@@ -1319,16 +1337,19 @@ def register(mcp) -> None:
                 if not comment:
                     raise MissingArgument("comment is required for add_comment")
                 c = github_call(issue.create_comment, comment)
+                ac.effect(issue_number=issue_number, comment_id=c.id, action=method)
                 ac.finish("ok")
                 return {"repo": repo, "issue": issue_number, "comment_id": c.id, "url": c.html_url}
 
             if method == "close":
                 github_call(issue.edit, state="closed")
+                ac.effect(issue_number=issue_number, action=method)
                 ac.finish("ok")
                 return {"repo": repo, "number": issue_number, "state": "closed"}
 
             # reopen
             github_call(issue.edit, state="open")
+            ac.effect(issue_number=issue_number, action=method)
             ac.finish("ok")
             return {"repo": repo, "number": issue_number, "state": "open"}
         except Exception as e:
@@ -1450,6 +1471,7 @@ def register(mcp) -> None:
             warning = readback_warning("GitHub", visibility, reported, readback_error)
             if warning:
                 result["warning"] = warning
+            ac.effect(repo=created.full_name, repo_id=lambda: created.id, visibility=reported)
             ac.finish(readback_result(reported, warning), warning)
             return result
         except Exception as e:

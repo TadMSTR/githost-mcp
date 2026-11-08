@@ -28,10 +28,14 @@ src/githost_mcp/
   logview.py                 Bounded, scrubbed CI log view (tail/head/range, literal grep)
   bootstrap.py               git_clone / *_repo_create guards: names, ownership,
                              computed clone URL and destination, timed clone
-  audit.py                   JSONL audit logging — every tool call recorded
+  audit.py                   JSONL audit logging — every tool call recorded; AuditCtx
+                             owns the githost.<tool> span and the effect record
+  effects.py                 EFFECT_TOOLS / READ_TOOLS classification, effect bounding
+  correlation.py             X-Forge-* correlation ids; per-call scope middleware
+  httptrace.py               httpx clients traced as child spans (path templates only)
   security.py                ALLOWED_REPO_ROOTS enforcement for write operations
   config.py                  Env var loading
-  observability.py           OTEL + Prometheus init
+  observability.py           OTel init, span helpers, metrics
 tests/                       pytest tests
 pyproject.toml
 ```
@@ -78,6 +82,9 @@ pyproject.toml
 
 - **`ALLOWED_REPO_ROOTS` is a security control** — write operations (commit, push, merge, publish) check the repo path against this allowlist before executing. Do not bypass this check or widen the matching logic. If unset (or empty), `config.py` falls back to reading `git_backed: true` entries from the agent's manifest at `AGENT_MANIFEST_PATH` — the explicit env var always wins when set.
 - **Every tool call is audit-logged** — `audit.py` writes a JSONL record with agent_id, tool name, args, and outcome for every invocation. `audit_query` lets agents review their own call history.
+- **A new tool is classified before it ships** — every tool belongs to exactly one of `effects.EFFECT_TOOLS` or `effects.READ_TOOLS` (`tests/test_effects.py` fails otherwise). An effect tool calls `ac.effect(...)` before `ac.finish("ok")`, with ids, SHAs, refs and counts only — never a message, body, file name or URL. A tool that writes only for some `method`/`action` values names them in `EFFECT_SELECTORS`. The test suite fails any test in which a successful write call recorded no effect (`tests/conftest.py`).
+- **`X-Forge-Run-Id` / `-Task-Id` / `-Session-Id` are attribution only** — `correlation.py` validates and records them; nothing may gate on them. Any holder of the bearer token can send any value.
+- **Spans and their attributes** — `AuditCtx` opens `githost.<tool>` at construction; wrap git operations in `ac.child("git.<op>")` and build HTTP clients with `httptrace.async_client()`/`sync_client()`. Child-span attributes are filtered to `observability.CHILD_ATTR_KEYS`; never put a URL, query string, body or exception message on a span.
 - **`woodpecker_get_logs` content is excluded from audit** — log output can be large and may contain sensitive values. Only the call metadata (repo, pipeline_id, step_name, workflow, mode, whether `grep` was given; `file` for `woodpecker_pipeline_config`) is recorded; the log text and the grep string are not. The same holds for `gitea_actions`/`github_actions` `get_job_log`.
 - **Registry publishing uses subprocess** — `npm_publish` and `pypi_publish` shell out rather than using library APIs. This keeps credentials out of the server process and delegates to the standard toolchains.
 - **Per-agent processes, not a shared process (Option A)** — `TRANSPORT=http` runs one PM2

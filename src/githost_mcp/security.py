@@ -427,7 +427,7 @@ def redact_url_credentials(text: str) -> str:
 # a failure mode harder to notice than the leak it fixes. Needs its own build with a
 # fixture corpus asserting both directions.
 #
-# Target: vikunja#913 (id 996). Audit: 2026-09-19/agent-build-workflow-2026-09-p1-githost-telemetry.
+# Target: vikunja#913. Audit: 2026-09-19/agent-build-workflow-2026-09-p1-githost-telemetry.
 def scrub(text: str) -> str:
     """Full credential scrub for caller-facing strings: known tokens + URL userinfo.
 

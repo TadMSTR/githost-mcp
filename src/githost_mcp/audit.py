@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import hmac as _hmac
 import json
@@ -10,14 +11,24 @@ import os
 import sys
 import threading
 import time
+import types
+from contextlib import nullcontext
 from logging.handlers import RotatingFileHandler
 from typing import Any
 
 import structlog
 
+from . import correlation as _correlation
 from .config import get_config
+from .effects import bound_effect, requires_effect
 from .errors import classify_reason
-from .observability import emit_tool_event_sync
+from .observability import (
+    child_span,
+    emit_tool_event_sync,
+    end_tool_span,
+    start_tool_span,
+    trace_id_hex,
+)
 from .security import scrub
 
 #: Cap on any single string written into an audit record. `repo` at an audit_rejection()
@@ -27,6 +38,9 @@ from .security import scrub
 #: corruption, but there was no bound anywhere in the write path. Generous enough that no
 #: real repo path, branch name or exception message is touched.
 MAX_AUDIT_FIELD_CHARS = 2048
+
+#: Level of the stderr handler (PM2's -error.log), independent of LOG_LEVEL.
+STDERR_LEVEL = logging.WARNING
 
 # Bound at init_logging() time
 _agent_id: str = "unknown"
@@ -140,6 +154,10 @@ def init_logging() -> None:
     ]
 
     stderr_handler: logging.Handler = logging.StreamHandler(sys.stderr)
+    # WARNING and above only, whatever LOG_LEVEL says. PM2 writes stderr to
+    # githost-mcp-<agent>-error.log, and with the root level it received every INFO line:
+    # 764 of 764 lines on 2026-11-07 (vikunja#1426). The file handler keeps LOG_LEVEL.
+    stderr_handler.setLevel(STDERR_LEVEL)
     handlers: list[logging.Handler] = [stderr_handler]
     if config.log_file:
         handlers.append(
@@ -335,6 +353,17 @@ def _rotate_if_needed(incoming_bytes: int) -> None:
     log.info("audit_log_rotated", path=_audit_log_path, size_bytes=current)
 
 
+def _scrub_url_deep(val: Any) -> Any:
+    """security.scrub() on every string in a nested structure (URL userinfo by shape)."""
+    if isinstance(val, str):
+        return scrub(val)
+    if isinstance(val, dict):
+        return {k: _scrub_url_deep(v) for k, v in val.items()}
+    if isinstance(val, list | tuple):
+        return [_scrub_url_deep(i) for i in val]
+    return val
+
+
 def write_audit_entry(
     tool: str,
     provider: str,
@@ -343,24 +372,35 @@ def write_audit_entry(
     result: str,
     duration_ms: int,
     reason: str | None = None,
+    *,
+    correlation: _correlation.Correlation | None = None,
+    trace_id: str | None = None,
+    effect: dict | None = None,
+    effect_incomplete: list[str] | None = None,
 ) -> None:
     """Append one signed audit record.
 
     `reason` is the human-readable detail behind a non-ok `result` — usually an
     exception message. It is an audit-record field and deliberately NOT a metric
-    label: messages carry repo paths and branch names, which would make Prometheus
+    label: messages carry repo paths and branch names, which would make metric
     cardinality unbounded. The bounded counterpart is `reason_class`, emitted to the
-    metrics backends by AuditCtx.finish().
+    metrics by AuditCtx.finish().
 
     It is scrubbed harder than `result` is. `_scrub_value()` only replaces token
     values githost-mcp has in its own config, so a one-off PAT a human embedded in a
     git remote by hand survives it; security.scrub() additionally strips URL userinfo
     by shape. Exception text is exactly where such a URL surfaces, so both run.
+
+    `run_id`, `task_id`, `session_id` and `trace_id` are on every entry, null when
+    absent, so a reader can tell "not forwarded" from "field did not exist yet" by the
+    entry's shape. `effect` is present only on a successful write call; see effects.py.
+    Every one of these sits inside the HMAC'd entry.
     """
     # Scrub credentials from params and result before writing
     tokens = _config_tokens()
     safe_params = {k: _truncate_deep(_scrub_value(v, tokens)) for k, v in params.items()}
     safe_result = _scrub_value(result, tokens)
+    corr = correlation or _correlation.Correlation()
 
     entry: dict = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
@@ -371,18 +411,33 @@ def write_audit_entry(
         "params": safe_params,
         "result": safe_result,
         "duration_ms": duration_ms,
+        "run_id": corr.run_id,
+        "task_id": corr.task_id,
+        "session_id": corr.session_id,
+        "trace_id": trace_id,
     }
+    if corr.invalid:
+        entry["correlation_invalid"] = list(corr.invalid)
     if reason is not None:
         entry["reason"] = _truncate(scrub(_scrub_value(reason, tokens)))
+    if effect is not None:
+        # Scrubbed (configured tokens, then URL userinfo by shape) BEFORE it is bounded:
+        # cutting first can split a credential so neither pass recognises it.
+        entry["effect"] = _truncate_deep(
+            bound_effect(_scrub_url_deep(_scrub_value(effect, tokens)))
+        )
+    if effect_incomplete:
+        entry["effect_incomplete"] = list(effect_incomplete)
     if _signing_key:
         entry["hmac"] = _compute_hmac(entry)
 
-    audit_dir = os.path.dirname(_audit_log_path)
-    if audit_dir:
-        os.makedirs(audit_dir, exist_ok=True)
-
     line = json.dumps(entry) + "\n"
     try:
+        # makedirs sits inside the try: an OSError escaping here would propagate out of
+        # finish() after `finished` is set and before the span ends, leaking the span.
+        audit_dir = os.path.dirname(_audit_log_path)
+        if audit_dir:
+            os.makedirs(audit_dir, exist_ok=True)
         # One lock for check-and-rotate plus write. Under the HTTP transport this
         # runs on a threadpool, so an unguarded rotate would race a concurrent
         # append and lose entries.
@@ -398,33 +453,117 @@ def write_audit_entry(
 # Timing context helper
 # ---------------------------------------------------------------------------
 
+#: The innermost unfinished AuditCtx in this context. Lets the HTTP transport and the
+#: PyGithub/python-gitlab wrappers open child spans without every call site passing the
+#: ctx down. A sync tool runs on a worker thread with its own copy of the context, so
+#: concurrent calls never see each other's ctx.
+_current_ctx: contextvars.ContextVar[AuditCtx | None] = contextvars.ContextVar(
+    "githost_audit_ctx", default=None
+)
+
+
+def _report_missing_effect(tool: str, params: dict) -> None:
+    """A successful write call that recorded no effect. Tests replace this to fail."""
+    log.warning("effect_not_recorded", tool=tool)
+
 
 class AuditCtx:
-    """Capture duration and write audit entry on finish()."""
+    """One tool call: its span, its effect, and its audit entry, written by finish().
+
+    The `githost.<tool>` span opens here, as a child of the current span (FastMCP's
+    server span), and finish() ends it, so the span covers the work. Use as a context
+    manager where a code path could return without calling finish(): `__exit__` finishes
+    with `error:unfinished` (or the exception's type) so the span cannot stay open. In
+    the HTTP server, correlation.CallScopeMiddleware does the same for every call.
+    """
 
     def __init__(self, tool: str, provider: str, repo: str, params: dict) -> None:
         self.tool = tool
         self.provider = provider
         self.repo = repo
         self.params = params
+        self.finished = False
+        self._effect: dict | None = None
+        self._effect_incomplete: list[str] = []
+        self._correlation = _correlation.current_correlation()
         self._t0 = time.perf_counter()
+        self._span = start_tool_span(tool)
+        self._prev = _current_ctx.get()
+        _current_ctx.set(self)
+        _correlation.register(self)
+
+    def __enter__(self) -> AuditCtx:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if not self.finished:
+            if exc is not None:
+                self.finish(f"error:{exc_type.__name__}", exc)
+            else:
+                self.finish("error:unfinished")
+        return False
+
+    def effect(self, **fields: Any) -> None:
+        """Record what this call changed. Call before finish("ok").
+
+        Counts, ids, SHAs and refs only (effects.py). A value may be a lambda, evaluated here
+        with any exception turned into None. A field passed as None could not be
+        determined: it is kept as null and named in `effect_incomplete`. The call still
+        succeeds — telemetry never fails a tool call.
+        """
+        if self._effect is None:
+            self._effect = {}
+        for key, value in fields.items():
+            if isinstance(value, types.FunctionType):
+                # A lambda defers a read that could itself fail (a lazy PyGithub attribute):
+                # a failure is an unknown field, never a failed call.
+                try:
+                    value = value()
+                except Exception:
+                    value = None
+            self._effect[key] = value
+            if value is None:
+                if key not in self._effect_incomplete:
+                    self._effect_incomplete.append(key)
+            elif key in self._effect_incomplete:
+                self._effect_incomplete.remove(key)
+
+    def child(self, name: str, **attrs: Any):
+        """A child span of this call's span around one git or HTTP operation.
+
+        Attributes are filtered to observability.CHILD_ATTR_KEYS with plain, short values.
+        A no-op when OTel is off.
+        """
+        if self.finished:
+            return nullcontext(None)
+        return child_span(self._span, name, attrs)
 
     def finish(self, result: str = "ok", reason: str | BaseException | None = None) -> None:
-        """Write the audit record and emit the metrics for this call.
+        """Write the audit record, end the span, and emit the metrics for this call.
 
         `reason` takes the exception itself wherever one is in scope, not just its
         message: the type is what classify_reason() maps to a bounded reason_class,
         and a string would throw that away. A plain string is accepted for the call
         sites that reject before any exception exists.
 
-        This is also the only place tool metrics are produced. They previously had no
-        producer at all — emit_tool_event() was defined and called by nothing, so
-        githost_tool_calls_total had never incremented in production and the metrics
-        ports served zero githost series.
+        A second finish() is ignored with a warning: one call, one audit entry.
         """
+        if self.finished:
+            log.warning("audit_ctx_finished_twice", tool=self.tool, result=result)
+            return
+        self.finished = True
         duration_ms = int((time.perf_counter() - self._t0) * 1000)
         exc = reason if isinstance(reason, BaseException) else None
         reason_text = None if reason is None else str(reason)
+        succeeded = result.startswith("ok")
+
+        effect = self._effect if succeeded else None
+        incomplete = list(self._effect_incomplete) if effect is not None else []
+        if succeeded and effect is None and requires_effect(self.tool, self.params):
+            _report_missing_effect(self.tool, self.params)
+            incomplete = ["effect_not_recorded"]
+
+        trace_id = trace_id_hex(self._span)  # never raises
 
         write_audit_entry(
             self.tool,
@@ -434,6 +573,10 @@ class AuditCtx:
             result,
             duration_ms,
             reason=reason_text,
+            correlation=self._correlation,
+            trace_id=trace_id,
+            effect=effect,
+            effect_incomplete=incomplete,
         )
 
         # Any result that is not a success is a denial for counting purposes —
@@ -441,13 +584,32 @@ class AuditCtx:
         # counter answers is "which githost-mcp limits do agents actually hit", and
         # an error the caller cannot get past is a limit regardless of which prefix
         # it carries. "ok:already_absent" and friends are successes.
-        reason_class = None if result.startswith("ok") else classify_reason(result, exc)
+        reason_class = None if succeeded else classify_reason(result, exc)
+        repo_basename = os.path.basename(self.repo.rstrip("/")) if self.repo else ""
+
+        corr = self._correlation
+        end_tool_span(
+            self._span,
+            {
+                "githost.tool": self.tool,
+                "githost.provider": self.provider,
+                "githost.agent_id": _agent_id,
+                "githost.repo": repo_basename,
+                "githost.result": result,
+                "githost.duration_ms": duration_ms,
+                "githost.reason_class": reason_class,
+                "forge.run_id": corr.run_id,
+                "forge.task_id": corr.task_id,
+                "forge.session_id": corr.session_id,
+            },
+            error=result.startswith("error"),
+        )
 
         try:
             emit_tool_event_sync(
                 self.tool,
                 self.provider,
-                os.path.basename(self.repo.rstrip("/")) if self.repo else "",
+                repo_basename,
                 result,
                 duration_ms,
                 reason_class,
@@ -455,6 +617,17 @@ class AuditCtx:
         except Exception as exc_emit:  # pragma: no cover - defence in depth
             # Telemetry must never fail a tool call that otherwise succeeded.
             log.warning("tool_event_emit_failed", error=str(exc_emit))
+
+        if _current_ctx.get() is self:
+            _current_ctx.set(self._prev)
+
+
+def current_child(name: str, **attrs: Any):
+    """A child span under the current call's AuditCtx, or a no-op if there is none."""
+    ctx = _current_ctx.get()
+    if ctx is None or ctx.finished:
+        return nullcontext(None)
+    return ctx.child(name, **attrs)
 
 
 #: Bound on a rejected argument value recorded by audit_rejection(). An enum value an

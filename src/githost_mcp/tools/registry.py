@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -15,6 +18,39 @@ log = structlog.get_logger(__name__)
 
 _PYPI_URL = "https://upload.pypi.org/legacy/"
 _TESTPYPI_URL = "https://test.pypi.org/legacy/"
+
+# Package names and versions as they appear in a distribution file name or package.json.
+# Anything that does not match is recorded as unknown rather than copied into the effect.
+_DIST_RE = re.compile(r"([A-Za-z0-9_.]+)-(\d[A-Za-z0-9_.+!]*?)(?:-.+\.whl|\.tar\.gz|\.zip)")
+_NPM_NAME_RE = re.compile(r"(@[a-z0-9._-]+/)?[a-z0-9._-]{1,214}")
+_VERSION_RE = re.compile(r"[0-9A-Za-z.+!_-]{1,64}")
+
+
+def dist_identity(dist_path: str) -> tuple[str | None, str | None]:
+    """(package, version) from the first distribution file name in `dist_path`."""
+    try:
+        names = sorted(os.listdir(dist_path))
+    except OSError:
+        return None, None
+    for name in names:
+        m = _DIST_RE.fullmatch(name)
+        if m:
+            return m.group(1), m.group(2)
+    return None, None
+
+
+def npm_identity(repo_path: str) -> tuple[str | None, str | None]:
+    """(name, version) from package.json, each only if it has the expected shape."""
+    try:
+        with open(os.path.join(repo_path, "package.json")) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None, None
+    name, version = data.get("name"), data.get("version")
+    return (
+        name if isinstance(name, str) and _NPM_NAME_RE.fullmatch(name) else None,
+        version if isinstance(version, str) and _VERSION_RE.fullmatch(version) else None,
+    )
 
 
 def register(mcp) -> None:
@@ -101,6 +137,8 @@ def register(mcp) -> None:
             if upload_result.returncode != 0:
                 raise ValueError(f"Upload failed: {upload_result.stderr[:500]}")
 
+            package, version = dist_identity(dist_path)
+            ac.effect(target=target, package=package, version=version)
             ac.finish("ok")
             return {"target": target, "dist_dir": dist_path, "stdout": upload_result.stdout[:500]}
         except Exception as e:
@@ -157,6 +195,18 @@ def register(mcp) -> None:
             if result.returncode != 0:
                 raise ValueError(f"npm publish failed: {result.stderr[:500]}")
 
+            package, version = npm_identity(repo_path)
+            # SECURITY[deferred]: with no `registry` argument the target is assumed to be
+            # registry.npmjs.org even when .npmrc points elsewhere (CR-14). Ticket
+            # vikunja#1435. Target: programme part 4. Audit: 2026-11-08/githost-scoped-2026-11-p2.
+            # The registry is recorded as its host only (a URL may carry userinfo). A
+            # lambda, because urlsplit can raise after the publish happened; a raising
+            # lambda becomes null plus effect_incomplete instead of failing the call.
+            ac.effect(
+                target=lambda: urlsplit(registry).hostname if registry else "registry.npmjs.org",
+                package=package,
+                version=version,
+            )
             ac.finish("ok")
             return {
                 "stdout": result.stdout[:500],

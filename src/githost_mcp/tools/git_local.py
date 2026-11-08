@@ -106,6 +106,109 @@ def _gitea_host(gitea_url: str) -> str:
     return urlsplit(gitea_url).hostname or ""
 
 
+_ABBREV_SHA_RE = re.compile(r"[0-9a-f]{4,40}")
+_HOST_RE = re.compile(r"[A-Za-z0-9.-]{1,253}")
+
+
+def _head_sha(repo: git.Repo) -> str | None:
+    """Full sha HEAD points at, or None (unborn branch)."""
+    try:
+        return repo.head.commit.hexsha
+    except Exception:
+        return None
+
+
+def _head_ref(repo: git.Repo) -> str:
+    """The checked-out branch name, or 'HEAD' when detached."""
+    try:
+        return "HEAD" if repo.head.is_detached else repo.active_branch.name
+    except Exception:
+        return "HEAD"
+
+
+def _resolve_sha(repo: git.Repo, abbrev: str | None) -> str | None:
+    """Expand a PushInfo's abbreviated sha to the full one when the object is local."""
+    if not abbrev or not _ABBREV_SHA_RE.fullmatch(abbrev):
+        return None
+    try:
+        return repo.commit(abbrev).hexsha
+    except Exception:
+        return abbrev
+
+
+def push_effect_fields(
+    repo: git.Repo, push_info, new_sha: str | None, ref: str | None = None
+) -> dict:
+    """`created`/`old_sha` and `forced` for a push effect, read from the PushInfo list.
+
+    A new branch has no old sha (`created: true`); an up-to-date push did not move the ref
+    (old == new). Otherwise the old sha comes from the porcelain line, which GitPython
+    keeps abbreviated; it is expanded when the object exists locally.
+
+    With `ref`, only the PushInfo for `refs/heads/<ref>` counts: a tag pushed alongside
+    (push.followTags) would otherwise mark the branch `created` and drop its old sha. If
+    no PushInfo names the ref, every one is used, as before.
+    """
+    infos = list(push_info)
+    if ref is not None:
+        wanted = f"refs/heads/{ref}"
+        matching = [i for i in infos if getattr(i, "remote_ref_string", None) == wanted]
+        if matching:
+            infos = matching
+    created = forced = up_to_date = False
+    old: str | None = None
+    for info in infos:
+        flags = info.flags
+        forced = forced or bool(flags & git.remote.PushInfo.FORCED_UPDATE)
+        created = created or bool(
+            flags & (git.remote.PushInfo.NEW_HEAD | git.remote.PushInfo.NEW_TAG)
+        )
+        up_to_date = up_to_date or bool(flags & git.remote.PushInfo.UP_TO_DATE)
+        # Private GitPython attribute (git/remote.py PushInfo.__init__): the public
+        # `old_commit` resolves a Commit object and raises when it is not local.
+        # test_effects.py::test_pushinfo_private_old_sha_attr_exists fails if it is renamed.
+        old = old or _resolve_sha(repo, getattr(info, "_old_commit_sha", None))
+    fields: dict = {"forced": forced}
+    if created:
+        fields["created"] = True
+    elif up_to_date:
+        fields["old_sha"] = new_sha
+    else:
+        fields["old_sha"] = old
+    return fields
+
+
+def commit_effect_fields(commit) -> dict:
+    """`sha`, `parent_sha` (absent on a root commit, with `root: true`) and a file count.
+
+    The count only: commit messages and file names never go in an effect record.
+    """
+    fields: dict = {"sha": commit.hexsha}
+    parents = list(commit.parents)
+    if parents:
+        fields["parent_sha"] = parents[0].hexsha
+    else:
+        fields["root"] = True
+    try:
+        fields["files_changed"] = len(commit.stats.files)
+    except Exception:
+        fields["files_changed"] = None
+    return fields
+
+
+def url_host(url: str) -> str | None:
+    """The host of a remote URL, never the URL: `https://u:p@host/x` and `git@host:x` → host.
+
+    Total: it runs after a side effect (git_remote add, git_clone), so it must never raise.
+    urlsplit refuses some URLs validate_remote_url accepts (an unbalanced `[`); those are None.
+    """
+    try:
+        host = urlsplit(url).hostname if "://" in url else url.split("@", 1)[-1].split(":", 1)[0]
+    except ValueError:
+        return None
+    return host if host and _HOST_RE.fullmatch(host) else None
+
+
 _PROVENANCE_SECTION = "githost-mcp"
 _PROVENANCE_KEY = "upstream-provenance"
 
@@ -464,8 +567,9 @@ def register(mcp) -> None:
             repo_path = validate_read_path(repo_path)
             repo = _open_repo(repo_path)
             commit = repo.commit(ref)
-            ac.finish("ok")
-            return {
+            # Build the whole result before finish("ok"): commit.stats runs git and can
+            # raise, and a second finish() from the except path would be ignored.
+            result = {
                 "sha": commit.hexsha,
                 "author": f"{commit.author.name} <{commit.author.email}>",
                 "date": commit.authored_datetime.isoformat(),
@@ -476,6 +580,8 @@ def register(mcp) -> None:
                     "deletions": commit.stats.total["deletions"],
                 },
             }
+            ac.finish("ok")
+            return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
@@ -532,7 +638,8 @@ def register(mcp) -> None:
             elif action == "create":
                 if not branch_name:
                     raise MissingArgument("branch_name required for create")
-                repo.create_head(branch_name)
+                head = repo.create_head(branch_name)
+                ac.effect(name=branch_name, target_sha=head.commit.hexsha, action="create")
                 ac.finish("ok")
                 # `create` deliberately does NOT check out — `git branch` and
                 # `git checkout -b` are different operations, and switching would
@@ -556,6 +663,7 @@ def register(mcp) -> None:
                 except (IndexError, KeyError):
                     deleted_sha = None
                 repo.delete_head(branch_name, force=force)
+                ac.effect(name=branch_name, target_sha=deleted_sha, action="delete")
                 ac.finish("ok")
                 return {
                     "deleted": branch_name,
@@ -610,8 +718,10 @@ def register(mcp) -> None:
             # Authoritative existence check against the remote itself. repo.remotes
             # [remote].refs is the local cache of remote-tracking refs and goes stale
             # the moment anyone else pushes; ls-remote is a live query.
-            listing = repo.git.ls_remote("--heads", remote, f"refs/heads/{branch_name}")
+            with ac.child("git.ls_remote", **{"githost.remote": remote}):
+                listing = repo.git.ls_remote("--heads", remote, f"refs/heads/{branch_name}")
             if not listing.strip():
+                ac.effect(remote=remote, ref=branch_name, action="already_absent")
                 ac.finish("ok:already_absent")
                 return {
                     "already_absent": True,
@@ -625,7 +735,8 @@ def register(mcp) -> None:
             deleted_sha = listing.split()[0]
 
             try:
-                push_info = repo.remotes[remote].push(refspec=f":refs/heads/{branch_name}")
+                with ac.child("git.push", **{"githost.remote": remote}):
+                    push_info = repo.remotes[remote].push(refspec=f":refs/heads/{branch_name}")
             except git.GitCommandError as e:
                 # A *rejected* delete lands here rather than in evaluate_push, and
                 # that is a GitPython parsing limitation, not a choice. Git's
@@ -678,6 +789,7 @@ def register(mcp) -> None:
                     "summary": reason,
                 }
 
+            ac.effect(remote=remote, ref=branch_name, old_sha=deleted_sha, action="delete")
             ac.finish("ok")
             # deleted_sha is what the remote ref pointed at immediately before the
             # delete — the only handle left for recovering the branch, since the
@@ -704,7 +816,10 @@ def register(mcp) -> None:
         try:
             repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
-            repo.git.checkout(ref)
+            old_head = _head_sha(repo)
+            with ac.child("git.checkout"):
+                repo.git.checkout(ref)
+            ac.effect(ref=ref, old_head=old_head, new_head=_head_sha(repo))
             ac.finish("ok")
             return {"checked_out": ref, "detached": repo.head.is_detached}
         except Exception as e:
@@ -766,6 +881,7 @@ def register(mcp) -> None:
                 if name in [r.name for r in repo.remotes]:
                     raise ValueError(f"Remote '{name}' already exists")
                 remote = repo.create_remote(name, url)
+                ac.effect(name=name, action="add", host=url_host(url))
                 ac.finish("ok")
                 return {"added": remote.name, "url": redact_url_credentials(url)}
 
@@ -774,6 +890,7 @@ def register(mcp) -> None:
                 if name not in [r.name for r in repo.remotes]:
                     raise NoSuchRemote(f"No such remote: '{name}'")
                 repo.delete_remote(name)
+                ac.effect(name=name, action="remove")
                 ac.finish("ok")
                 return {"removed": name}
 
@@ -800,10 +917,13 @@ def register(mcp) -> None:
             repo = _open_repo(repo_path)
             # Use git binary to stage files; repo.index.add(["."])  would recurse
             # into .git/ internals. The git binary skips .git/ by design. (GHOST-1)
-            repo.git.add("--", *paths)
+            with ac.child("git.add"):
+                repo.git.add("--", *paths)
             staged = (
                 [item.a_path for item in repo.index.diff("HEAD")] if repo.head.is_valid() else paths
             )
+            # A count, never the names: file names stay out of the effect record.
+            ac.effect(paths_staged=len(staged))
             ac.finish("ok")
             return {"staged": staged}
         except WriteGlobDenied as e:
@@ -866,18 +986,20 @@ def register(mcp) -> None:
             log.info("commit_identity_resolved", repo=repo_path, mode=mode, reason=reason)
 
             signing_key = config.git_signing_key
-            if signing_key:
-                # gitpython uses -S with GPG key ID (not the key value)
-                cmd = []
-                if actor:
-                    cmd += ["-c", f"user.name={actor.name}", "-c", f"user.email={actor.email}"]
-                cmd += ["-S", f"--gpg-sign={signing_key}", "-m", full_message]
-                repo.git.commit(*cmd)
-                commit = repo.head.commit
-            else:
-                kwargs = {"author": actor, "committer": actor} if actor else {}
-                commit = repo.index.commit(full_message, **kwargs)
+            with ac.child("git.commit"):
+                if signing_key:
+                    # gitpython uses -S with GPG key ID (not the key value)
+                    cmd = []
+                    if actor:
+                        cmd += ["-c", f"user.name={actor.name}", "-c", f"user.email={actor.email}"]
+                    cmd += ["-S", f"--gpg-sign={signing_key}", "-m", full_message]
+                    repo.git.commit(*cmd)
+                    commit = repo.head.commit
+                else:
+                    kwargs = {"author": actor, "committer": actor} if actor else {}
+                    commit = repo.index.commit(full_message, **kwargs)
 
+            ac.effect(**commit_effect_fields(commit))
             ac.finish("ok")
             return {
                 "sha": commit.hexsha[:12],
@@ -925,7 +1047,8 @@ def register(mcp) -> None:
                 pushed_sha = repo.heads[branch_name].commit.hexsha
             except (IndexError, KeyError):
                 pushed_sha = None
-            push_info = repo.remotes[remote].push(branch_name)
+            with ac.child("git.push", **{"githost.remote": remote}):
+                push_info = repo.remotes[remote].push(branch_name)
 
             outcome = evaluate_push(push_info)
             decoded = outcome.flags
@@ -959,6 +1082,14 @@ def register(mcp) -> None:
             except Exception as e:  # never fail a good push over upstream bookkeeping
                 log.warning("push_upstream_not_set", branch=branch_name, error=str(e))
 
+            ac.effect(
+                remote=remote,
+                ref=branch_name,
+                new_sha=pushed_sha,
+                lease=False,
+                flags=decoded,
+                **push_effect_fields(repo, push_info, pushed_sha, ref=branch_name),
+            )
             ac.finish("ok")
             # pushed_sha is the full sha of the ref that was pushed. A push can
             # genuinely succeed while carrying a branch that does not contain the
@@ -987,7 +1118,9 @@ def register(mcp) -> None:
         try:
             repo_path = validate_write_path(repo_path)
             repo = _open_repo(repo_path)
-            outcome = evaluate_fetch(repo.remotes[remote].pull())
+            old_head = _head_sha(repo)
+            with ac.child("git.pull", **{"githost.remote": remote}):
+                outcome = evaluate_fetch(repo.remotes[remote].pull())
 
             if outcome.failed:
                 # FetchInfo.note is the remote's text and can carry a
@@ -1004,6 +1137,7 @@ def register(mcp) -> None:
                     "note": reason,
                 }
 
+            ac.effect(ref=_head_ref(repo), old_head=old_head, new_head=_head_sha(repo))
             ac.finish("ok")
             result = {"remote": remote, "flags": outcome.flags}
             if outcome.summary:
@@ -1039,7 +1173,8 @@ def register(mcp) -> None:
             tag = repo.create_tag(tag_name, message=tag_msg)
             result = {"tag": tag_name, "sha": tag.commit.hexsha[:12]}
             if push:
-                outcome = evaluate_push(repo.remotes[remote].push(tag_name))
+                with ac.child("git.push", **{"githost.remote": remote}):
+                    outcome = evaluate_push(repo.remotes[remote].push(tag_name))
                 if outcome.failed:
                     reason = outcome.summary or "tag push rejected by remote"
                     log.warning(
@@ -1067,6 +1202,11 @@ def register(mcp) -> None:
                     }
                 result["pushed"] = True
                 result["flags"] = outcome.flags
+            ac.effect(
+                name=tag_name,
+                target_sha=tag.commit.hexsha,
+                action="create_and_push" if push else "create",
+            )
             ac.finish("ok")
             return result
         except Exception as e:
@@ -1153,13 +1293,16 @@ def register(mcp) -> None:
                     # It came from the remote: a name starting with '-' would reach
                     # `git fetch` as an option.
                     validate_branch_name(default)
-                    repo.git.fetch("origin", default)
+                    with ac.child("git.fetch", **{"githost.remote": "origin"}):
+                        repo.git.fetch("origin", default)
                     base_ref = f"origin/{default}"
                 else:
                     base_ref = validate_ref_arg("base", base)
                 os.makedirs(root, exist_ok=True)
-                repo.git.worktree("add", "-b", branch, dest, base_ref)
+                with ac.child("git.worktree", **{"githost.op": "add"}):
+                    repo.git.worktree("add", "-b", branch, dest, base_ref)
                 head_sha = _open_repo(dest).head.commit.hexsha
+                ac.effect(path=dest, ref=branch, head_sha=head_sha, action="add")
                 ac.finish("ok")
                 return {
                     "path": dest,
@@ -1180,8 +1323,10 @@ def register(mcp) -> None:
                 )
             # No --force: git refuses a worktree with modified or untracked files, and
             # its own message says so. A scratch tree is not ours to discard silently.
-            repo.git.worktree("remove", dest)
-            repo.git.worktree("prune")
+            with ac.child("git.worktree", **{"githost.op": "remove"}):
+                repo.git.worktree("remove", dest)
+                repo.git.worktree("prune")
+            ac.effect(path=dest, action="remove")
             ac.finish("ok")
             return {"removed": dest, "note": "The worktree's branch was kept."}
         except Exception as e:
@@ -1245,10 +1390,11 @@ def register(mcp) -> None:
                 raise ProtectedBranch(reason)
 
             try:
-                push_info = repo.remotes[remote].push(
-                    refspec=f"refs/heads/{branch}:refs/heads/{branch}",
-                    force_with_lease=f"refs/heads/{branch}:{sha}",
-                )
+                with ac.child("git.push", **{"githost.remote": remote}):
+                    push_info = repo.remotes[remote].push(
+                        refspec=f"refs/heads/{branch}:refs/heads/{branch}",
+                        force_with_lease=f"refs/heads/{branch}:{sha}",
+                    )
             except git.GitCommandError as e:
                 reason = scrub(str(e))
                 ac.finish("error:PushRejected", reason)
@@ -1279,6 +1425,16 @@ def register(mcp) -> None:
             # the push result for one.)
             with contextlib.suppress(IndexError, KeyError, AttributeError):
                 pushed_sha = repo.remotes[remote].refs[branch].commit.hexsha
+            # The lease guarantees the remote was at `sha` when the push landed.
+            ac.effect(
+                remote=remote,
+                ref=branch,
+                old_sha=sha,
+                new_sha=pushed_sha,
+                forced=push_effect_fields(repo, push_info, pushed_sha, ref=branch)["forced"],
+                lease=True,
+                flags=outcome.flags,
+            )
             ac.finish("ok")
             return {
                 "pushed": branch,
@@ -1396,7 +1552,8 @@ def register(mcp) -> None:
             # Everything up to reading the result back counts as the clone: if any of it
             # fails, the tree is removed, so a retry is not refused as "already exists".
             try:
-                run_clone(url, dest, clone_args(depth, branch))
+                with ac.child("git.clone"):
+                    run_clone(url, dest, clone_args(depth, branch))
                 cloned = _open_repo(dest)
                 # A clone writes every path of the tree, so a deny-scoped grant
                 # (developer's manifests/**) is checked against all of them (audit F-03).
@@ -1421,6 +1578,13 @@ def register(mcp) -> None:
                 shutil.rmtree(dest, ignore_errors=True)
                 raise
 
+            # The remote host only, never the URL.
+            fields: dict = {"path": dest, "host": url_host(url)}
+            if empty:
+                fields["empty"] = True
+            else:
+                fields |= {"ref": branch_name or "HEAD", "head_sha": head_sha}
+            ac.effect(**fields)
             ac.finish("ok")
             return {
                 "path": dest,

@@ -15,6 +15,7 @@ from ..audit import (
     verify_entry_integrity,
 )
 from ..config import get_config
+from ..correlation import valid_trace_id, valid_uuid
 
 log = structlog.get_logger(__name__)
 
@@ -66,6 +67,9 @@ def register(mcp) -> None:
         repo: str | None = None,
         since: str | None = None,
         limit: int = 50,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        trace_id: str | None = None,
     ) -> dict:
         """Query the structured JSONL audit log.
 
@@ -92,7 +96,30 @@ def register(mcp) -> None:
             repo: Filter by repo path (substring match).
             since: ISO date string (e.g. '2026-05-20') — return entries on or after this date.
             limit: Max entries to return (default 50, newest first).
+            run_id: Dispatcher run id (UUID, exact match). Entries carry one when scoped-mcp
+                forwarded it (0.19.0+, `forward_identity` on the manifest's githost block).
+            task_id: Task-queue task id (UUID, exact match).
+            trace_id: OTel trace id (32 hex, exact match): joins an entry to its SigNoz
+                trace, also for an interactive session with no run id.
+
+        Still reads the calling agent's own audit file only.
         """
+        # Validated like the headers they came from: an id that cannot match anything is
+        # refused rather than silently returning nothing.
+        wanted: dict[str, str] = {}
+        for name, value, check in (
+            ("run_id", run_id, valid_uuid),
+            ("task_id", task_id, valid_uuid),
+            ("trace_id", trace_id, valid_trace_id),
+        ):
+            if value is None:
+                continue
+            valid = check(value)
+            if valid is None:
+                kind = "a 32-character hex trace id" if name == "trace_id" else "a UUID"
+                return {"error": f"Invalid {name!r}: must be {kind}."}
+            wanted[name] = valid
+
         config = get_config()
         audit_path = config.audit_log_file
 
@@ -141,6 +168,8 @@ def register(mcp) -> None:
                     if tool and entry.get("tool") != tool:
                         continue
                     if repo and repo not in entry.get("repo", ""):
+                        continue
+                    if any(entry.get(k) != v for k, v in wanted.items()):
                         continue
                     if since_dt:
                         try:

@@ -8,6 +8,7 @@ import httpx
 import structlog
 
 from ..config import get_config
+from ..httptrace import async_client, sync_client
 from ..logview import aread_capped, decode_capped, decoded_headers
 
 log = structlog.get_logger(__name__)
@@ -29,7 +30,7 @@ def _gitea_base() -> str:
 
 async def gitea_get(path: str) -> Any:
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with async_client("gitea", timeout=15.0) as client:
             resp = await client.get(f"{_gitea_base()}{path}", headers=_get_gitea_headers())
             _check_gitea_response(resp)
             return resp.json()
@@ -46,7 +47,7 @@ async def gitea_get_optional(path: str) -> Any | None:
     absent one, so None means "not visible to us", which is what callers act on.
     """
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with async_client("gitea", timeout=15.0) as client:
             resp = await client.get(f"{_gitea_base()}{path}", headers=_get_gitea_headers())
             if resp.status_code == 404:
                 return None
@@ -66,7 +67,7 @@ def gitea_org_exists_sync(org: str) -> bool:
     into the path, and httpx resolves dot segments.
     """
     try:
-        with httpx.Client(timeout=15.0) as client:
+        with sync_client("gitea", timeout=15.0) as client:
             resp = client.get(f"{_gitea_base()}/orgs/{org}", headers=_get_gitea_headers())
             if resp.status_code == 404:
                 return False
@@ -80,7 +81,7 @@ def gitea_org_exists_sync(org: str) -> bool:
 
 async def gitea_post(path: str, data: dict) -> Any:
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with async_client("gitea", timeout=15.0) as client:
             resp = await client.post(
                 f"{_gitea_base()}{path}",
                 headers=_get_gitea_headers(),
@@ -101,7 +102,7 @@ async def gitea_get_text(path: str) -> str:
     PR review tools to fetch unified diffs.
     """
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with async_client("gitea", timeout=15.0) as client:
             resp = await client.get(f"{_gitea_base()}{path}", headers=_get_gitea_headers())
             _check_gitea_response(resp)
             return resp.text
@@ -118,7 +119,7 @@ async def gitea_get_text_capped(path: str) -> tuple[str, bool]:
     the read stops at the cap instead of draining the body (KB IV-72).
     """
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with async_client("gitea", timeout=30.0) as client:
             async with client.stream(
                 "GET", f"{_gitea_base()}{path}", headers=_get_gitea_headers()
             ) as resp:
@@ -137,7 +138,7 @@ async def gitea_get_text_capped(path: str) -> tuple[str, bool]:
 
 async def gitea_patch(path: str, data: dict) -> Any:
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with async_client("gitea", timeout=15.0) as client:
             resp = await client.patch(
                 f"{_gitea_base()}{path}",
                 headers=_get_gitea_headers(),
@@ -154,7 +155,7 @@ async def gitea_patch(path: str, data: dict) -> Any:
 async def gitea_delete(path: str) -> None:
     """DELETE a Gitea resource. Accepts any 2xx as success; discards the body."""
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with async_client("gitea", timeout=15.0) as client:
             resp = await client.delete(f"{_gitea_base()}{path}", headers=_get_gitea_headers())
             _check_gitea_response(resp)
     except ValueError:
@@ -171,7 +172,7 @@ async def gitea_post_void(path: str, data: dict) -> None:
     Callers cannot distinguish 200 vs 204. Revisit if Gitea merge semantics change.
     """
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with async_client("gitea", timeout=15.0) as client:
             resp = await client.post(
                 f"{_gitea_base()}{path}",
                 headers=_get_gitea_headers(),

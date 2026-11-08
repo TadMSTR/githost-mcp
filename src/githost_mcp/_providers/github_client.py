@@ -9,7 +9,9 @@ from typing import Any
 import httpx
 import structlog
 
+from ..audit import current_child
 from ..config import get_config
+from ..httptrace import sync_client
 from ..logview import DOWNLOAD_MAX, decode_capped, read_capped
 
 log = structlog.get_logger(__name__)
@@ -36,10 +38,26 @@ def get_github():
         raise ValueError(f"GitHub client init failed: {type(e).__name__}") from None
 
 
+def api_call_name(fn) -> str:
+    """The PyGithub/python-gitlab method name, for a child-span attribute. A method name
+    is a code identifier; anything else (a lambda, a partial) is reported as `call`."""
+    name = getattr(fn, "__name__", "")
+    return name if _API_NAME_RE.fullmatch(name) else "call"
+
+
+_API_NAME_RE = re.compile(r"[a-z_][a-z0-9_]{0,63}")
+
+
 def github_call(fn, *args, **kwargs):
-    """Execute a PyGithub call, masking credentials from any exception."""
+    """Execute a PyGithub call, masking credentials from any exception.
+
+    Each call is a child span `http.github` of the current tool span, named by method
+    (githost.api.call), so a slow GitHub round trip shows in SigNoz. PyGithub can make
+    more than one request per call, or none for a cached object; the span covers the call.
+    """
     try:
-        return fn(*args, **kwargs)
+        with current_child("http.github", **{"githost.api.call": api_call_name(fn)}):
+            return fn(*args, **kwargs)
     except Exception as e:
         msg = str(e)
         config = get_config()
@@ -160,7 +178,7 @@ def fetch_job_log(repo: str, job_id: int) -> tuple[str, bool]:
     }
     # No client-level headers or auth: the only request that carries the token is the
     # one with api_headers passed explicitly.
-    with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+    with sync_client("github", timeout=30.0, follow_redirects=False) as client:
         resp = client.get(
             f"{GITHUB_API}/repos/{repo}/actions/jobs/{job_id}/logs", headers=api_headers
         )

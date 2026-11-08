@@ -308,7 +308,8 @@ Gitea read covers it. With `annotations=True`, the GitHub read returns up to 50 
 from failed check runs, which is where GitHub puts readable failure text.
 
 ### Audit (1)
-`audit_log_query` — query the JSONL audit log by agent, tool, repo, or time range
+`audit_log_query` — query the JSONL audit log by agent, tool, repo, time range, or (0.19.0+)
+`run_id`, `task_id` or `trace_id`
 
 ## Audit Architecture
 
@@ -321,12 +322,109 @@ Every tool call writes a JSONL entry before returning:
   "tool": "git_push",
   "provider": "local",
   "repo": "/home/user/repos/personal/example-repo",
-  "params": {"remote": "origin", "branch": "main"},
+  "params": {"repo_path": "/home/user/repos/personal/example-repo", "remote": "origin", "branch": null},
   "result": "ok",
   "duration_ms": 312,
+  "run_id": "0b6c1f4e-6a8e-4d3e-9b1e-3f2a7c5d9e10",
+  "task_id": "eb9be435-48bc-4ded-b05b-1296bcb1cc57",
+  "session_id": "6f1d0c2a-7b3e-5c4d-8e9f-0a1b2c3d4e5f",
+  "trace_id": "9113fefe1e69c4185a50818bcdaddc17",
+  "effect": {
+    "remote": "origin",
+    "ref": "main",
+    "old_sha": "1f0e…",
+    "new_sha": "d5ae…",
+    "forced": false,
+    "lease": false,
+    "flags": ["FAST_FORWARD"]
+  },
   "hmac": "a3f8..."
 }
 ```
+
+### What a call changed: `effect` (0.19.0+)
+
+A successful write call records what it changed in `effect`: SHAs, the resolved ref, a PR,
+issue, review, comment, release, run or pipeline number, and counts. Before 0.19.0 the entry
+said only that the call succeeded — `git_commit` recorded `{repo_path, identity}` and
+`git_push` recorded `branch: null` whenever the branch defaulted.
+
+| Tool | `effect` |
+|---|---|
+| `git_commit` | `sha` (full), `parent_sha` (or `root: true`), `files_changed` (count) |
+| `git_push`, `git_push_force_with_lease` | `remote`, `ref`, `old_sha` (or `created: true`), `new_sha`, `forced`, `lease`, `flags` |
+| `git_pull`, `git_checkout` | `ref`, `old_head`, `new_head` |
+| `git_tag`, `git_branch` | `name`, `target_sha`, `action` |
+| `git_branch_delete_remote` | `remote`, `ref`, `old_sha`, `action` |
+| `git_clone`, `git_worktree` | `path`, `ref`, `head_sha` (clone: the remote `host`, never the URL) |
+| `git_add` | `paths_staged` (count) |
+| `git_remote` | `name`, `action` (add: the URL's `host`) |
+| `*_pr_create` / `gitlab_mr_create` | `pr_number`, `head_sha`, `base` |
+| `*_pr_merge` / `gitlab_mr_merge` | `pr_number`, `merge_sha`, `method` |
+| `*_pr_review`, `gitea_pr_comment`, `gitlab_mr_review` | `pr_number`, `review_id` or `comment_id`, `state` |
+| `github_pr_update` | `pr_number`, `updated_fields` (names), `marked_ready` |
+| `*_issue_write` | `issue_number`, `action` (and `comment_id`) |
+| `*_create_release`, `*_release_update`, `*_release_delete` | `tag`, `release_id`, `action` |
+| `release` | `tag`, `tag_sha`, `targets` (per-target `ok`/`error`) |
+| `pypi_publish`, `npm_publish` | `target`, `package`, `version` |
+| `woodpecker_trigger`, `woodpecker_restart` | `pipeline_id` (the per-repo number) |
+| `woodpecker_pipeline_cancel`, Actions/pipeline write methods | the run or pipeline id, `action` |
+| `*_repo_create`, `github_fork` | `repo`/`fork`, `repo_id`, `visibility` |
+
+Rules:
+
+- **Counts and ids only.** No commit message, PR or issue body, file name, URL or log text
+  goes into `effect`. Strings are scrubbed (configured tokens, then URL userinfo by shape)
+  and then bounded: 256 characters, 16 list items, 16 fields, one level of nesting.
+- A field that could not be determined is `null` and named in `effect_incomplete`. The call
+  still succeeds — telemetry never fails a tool call.
+- Every tool is classified in `effects.py` as `EFFECT_TOOLS` or `READ_TOOLS`, and a test
+  fails on an unclassified one. A multi-method tool (`gitea_actions`, `github_pr_review`, …)
+  records an effect only for its write methods. A successful write call that recorded no
+  effect logs `effect_not_recorded` and is marked `effect_incomplete: ["effect_not_recorded"]`.
+- `effect` is a plain dict. New fields extend it.
+
+### Which run, task and trace a call belonged to (0.19.0+)
+
+Every entry carries `run_id`, `task_id`, `session_id` and `trace_id`, `null` when absent:
+
+- `run_id` and `task_id` are the dispatcher run and task-queue task, and `session_id` is
+  scoped-mcp's per-client session. scoped-mcp ≥ 1.20.0 forwards them as `X-Forge-Run-Id`,
+  `X-Forge-Task-Id` and `X-Forge-Session-Id` when the manifest's githost block sets
+  `forward_identity: true`. Run and task ids must be UUIDs and the session id must match
+  `[A-Za-z0-9._:-]{1,128}`; anything else is dropped and named in `correlation_invalid`,
+  never recorded. githost-mcp's own MCP session id is useless here: scoped-mcp opens a new
+  HTTP connection per call.
+- `trace_id` is the OTel trace of the `githost.<tool>` span. It joins an entry to SigNoz even
+  for an interactive session that has no run id.
+
+These ids are attribution, not authorization — see
+[Forwarded correlation ids](#forwarded-correlation-ids).
+
+```python
+audit_log_query(task_id="eb9be435-48bc-4ded-b05b-1296bcb1cc57")
+```
+
+`effect` and the correlation fields sit inside the HMAC'd entry: altering either makes the
+entry verify as `tampered`.
+
+### Spans
+
+The `githost.<tool>` span opens when the call's `AuditCtx` is created and ends when the
+entry is written, so its own duration is the call's duration (`githost.duration_ms` is kept
+as an attribute). Before 0.19.0 it was opened after the work, 23 µs long. Inside it:
+
+- `git.push`, `git.fetch`, `git.pull`, `git.clone`, `git.commit`, `git.add`, `git.checkout`,
+  `git.worktree` and `git.ls_remote` child spans around the git operations;
+- `http.gitea`, `http.woodpecker` and `http.github` child spans per request, and
+  `http.github` / `http.gitlab` per PyGithub / python-gitlab call.
+
+Child-span attributes are a fixed set: method, host, status code, the remote's name, the API
+call's method name, and a **path template** built from a fixed vocabulary of API words
+(`/api/v1/repos/{}/{}/pulls`). No URL, query string, token, body or exception message goes on
+a span; a failed child records only the exception type. The span also carries `forge.run_id`,
+`forge.task_id` and `forge.session_id`. W3C trace propagation is FastMCP's: the tool span is a
+child of FastMCP's server span, which continues scoped-mcp's trace.
 
 A call that did not succeed also carries a `reason` — the exception message, scrubbed
 through `security.scrub()`:
@@ -344,7 +442,7 @@ through `security.scrub()`:
 allowlist rejection, bad repo format and missing remote were all indistinguishable inside
 one `error:ValueError` bucket. It is an audit-record field and deliberately **never** a
 metric label — messages contain repo paths and branch names, which is unbounded
-cardinality. The bounded counterpart is `reason_class` on `githost_tool_denied_total`,
+cardinality. The bounded counterpart is `reason_class` on the `githost.tool.denied` counter,
 drawn from a closed vocabulary in `errors.py` and derived from the exception type rather
 than from a regex over its message.
 
@@ -600,6 +698,14 @@ absence of an `hmac` is a property of the entry, not of the current config. Refu
 without a key is a deployment policy choice and is deliberately not made here; it would take an
 agent offline for a missing secret rather than degrade visibly.
 
+### Forwarded correlation ids
+
+`run_id`, `task_id` and `session_id` are **attribution, not authorization**. githost-mcp trusts
+any caller that holds its bearer token, and anyone holding the token can send any value in
+the `X-Forge-*` headers. In forge's deployment only scoped-mcp holds it, but a process running
+as the same user that reads the token could forge a run id. Nothing in githost-mcp gates on
+these ids, and nothing should: they are validated for shape, recorded, and that is all.
+
 ### HTTP transport surface
 
 `TRANSPORT=http` (see [Deploy](#deploy)) opens a local network listener where stdio mode has
@@ -748,26 +854,17 @@ OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 # Per-process, or every agent collapses into one service in the backend.
 OTEL_SERVICE_NAME=githost-mcp-<agent>
 
-# Loki
-LOKI_URL=http://localhost:3100
-LOKI_LABELS=app=githost-mcp      # extra static labels, k=v comma-separated
-
-# Prometheus scrape endpoint
-METRICS_PORT=9185
-
-# NATS
-NATS_URL=nats://localhost:4222
-NATS_SUBJECT_PREFIX=githost      # default
 ```
 
-> **`METRICS_PORT` binds loopback only (0.9.0+).**
-> `start_http_server()` in `observability.py` now binds `addr=127.0.0.1` explicitly, via
-> a hardcoded `observability.METRICS_BIND_ADDR` (not itself configurable — no deployment
-> wants a LAN-reachable metrics endpoint, and an env knob is how the previous `0.0.0.0`
-> bind regressed). The shipped `ecosystem.config.js` gives each agent its own metrics
-> port, from a contiguous block that parallels the per-agent HTTP port block (see its
-> `AGENTS` map; pick ranges that are free on your host). Verify with `ss -tlnp` showing `127.0.0.1` — a successful
-> `curl` to localhost alone doesn't distinguish a loopback bind from a `0.0.0.0` one.
+OTel is the only telemetry export: traces (see [Spans](#spans)) and the `githost.tool.calls`,
+`githost.tool.denied`, `githost.tool.duration` and `githost.release.targets` metrics. The audit
+JSONL is the durable record.
+
+> **Removed in 0.19.0: `LOKI_URL`, `LOKI_LABELS`, `METRICS_PORT`, `NATS_URL`,
+> `NATS_SUBJECT_PREFIX`.** The Loki push and NATS publisher had no caller and the Prometheus
+> endpoint had no scraper. A set variable is ignored and logged once, by name, as
+> `config_ignored_removed_backend`. The `loki`, `prometheus` and `nats` extras are gone too;
+> `observability` remains, as `otel`.
 
 > **`OTEL_EXPORTER_OTLP_PROTOCOL` must agree with the port in the endpoint.** It defaults
 > to `grpc`, so setting only `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318` points
@@ -800,7 +897,7 @@ githost-mcp is not published to PyPI. Install from a checkout of a release tag, 
 the committed `uv.lock`, so the dependency set is the one CI tested and audited.
 
 ```bash
-VERSION=0.17.0
+VERSION=0.19.0
 VENV=/opt/venvs/githost-mcp
 
 # 1. The checkout is clean and is exactly the release tag on the remote. A local tag
@@ -847,8 +944,8 @@ exec /opt/venvs/githost-mcp/bin/githost-mcp
 ```
 
 This is `TRANSPORT=stdio` (the default): scoped-mcp spawns a fresh subprocess per call and
-tears it down afterward. Simple, but Prometheus counters, OTEL spans, and Loki pushes rarely
-survive that short a lifetime — they reset or drop every call.
+tears it down afterward. Simple, but OTel metrics and batched spans rarely survive that short
+a lifetime — they reset or drop every call.
 
 ## Deploy
 
@@ -858,7 +955,7 @@ by the same codebase — no fork, no rewrite to move between them.
 | | `stdio` (default) | `http` |
 |---|---|---|
 | Process lifetime | One per scoped-mcp call, recycled every turn | Long-lived, one PM2 service per agent |
-| Observability | Rotating file log + audit JSONL only — Prometheus/OTEL/Loki/NATS rarely survive teardown | All of it actually works — metrics accumulate, spans flush, NATS stays connected |
+| Observability | Rotating file log + audit JSONL only — OTel metrics and spans rarely survive teardown | All of it works — metrics accumulate, spans flush |
 | Restart | N/A — recycled automatically | `pm2 restart githost-mcp-<agent>`, independent of scoped-mcp |
 | Network surface | None | Local HTTP listener — must be loopback-bound + token-authed (see [Security Model](#http-transport-surface)) |
 
@@ -870,8 +967,8 @@ deliberately deferred.
 
 ### Running as PM2 services
 
-`ecosystem.config.js` in this repo builds one app per agent from a single `AGENT_ID -> {httpPort,
-metricsPort}` map, reading a per-agent env file (`githost-mcp-<agent>.env`) and a shared env file
+`ecosystem.config.js` in this repo builds one app per agent from a single `AGENT_ID -> {httpPort}`
+map, reading a per-agent env file (`githost-mcp-<agent>.env`) and a shared env file
 of tokens — the same files the stdio launchers read, so there is no separate secret plumbing to
 maintain. Both paths are set near the top of the file; adjust them for your host.
 
@@ -880,8 +977,7 @@ pm2 start ecosystem.config.js
 pm2 save
 ```
 
-Each service comes up with `TRANSPORT=http`, `HTTP_HOST=127.0.0.1`, its own `HTTP_PORT` /
-`METRICS_PORT`, and `GITHOST_MCP_AUTH_TOKEN` sourced from the shared env file. Point
+Each service comes up with `TRANSPORT=http`, `HTTP_HOST=127.0.0.1`, its own `HTTP_PORT`, and `GITHOST_MCP_AUTH_TOKEN` sourced from the shared env file. Point
 scoped-mcp's manifest at the corresponding `http://127.0.0.1:<port>/mcp/` URL with the token in
 an `Authorization: Bearer` header (requires `type: http` on the manifest block — a bare
 `{url, headers}` entry is silently skipped).

@@ -22,6 +22,7 @@ from .. import logview
 from ..audit import AuditCtx, audit_rejection
 from ..config import get_config
 from ..errors import InvalidArgument
+from ..httptrace import async_client
 from ..security import scrub
 
 # `\Z`, not `$`: `$` also matches before a trailing newline, so `re.match` accepted
@@ -356,7 +357,7 @@ def register(mcp) -> None:
                 payload["branch"] = branch
             base = _woodpecker_base()
             headers = _woodpecker_headers()
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with async_client("woodpecker", timeout=15.0) as client:
                 repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 resp = await client.post(
                     f"{base}/repos/{repo_id}/pipelines",
@@ -365,6 +366,8 @@ def register(mcp) -> None:
                 )
                 _check_response(resp)
                 data = resp.json()
+            # The per-repo number: the handle every other woodpecker tool takes (p1).
+            ac.effect(pipeline_id=data.get("number"), branch=data.get("branch"))
             ac.finish("ok")
             return {
                 # Woodpecker resolves the {pipeline} path segment in status/logs/cancel
@@ -457,7 +460,7 @@ def register(mcp) -> None:
             owner, name = repo.split("/", 1)
             base = _woodpecker_base()
             headers = _woodpecker_headers()
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with async_client("woodpecker", timeout=15.0) as client:
                 repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 resp = await client.get(
                     f"{base}/repos/{repo_id}/pipelines",
@@ -546,7 +549,7 @@ def register(mcp) -> None:
             owner, name = repo.split("/", 1)
             base = _woodpecker_base()
             headers = _woodpecker_headers()
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with async_client("woodpecker", timeout=30.0) as client:
                 repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 # /repos/{id}/pipelines/{n}/steps also matches no Woodpecker route
                 # (confirmed live 2026-08-25 — 200 with the SPA's HTML index). Steps live
@@ -630,7 +633,7 @@ def register(mcp) -> None:
             owner, name = repo.split("/", 1)
             base = _woodpecker_base()
             headers = _woodpecker_headers()
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with async_client("woodpecker", timeout=15.0) as client:
                 repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 resp = await client.delete(
                     f"{base}/repos/{repo_id}/pipelines/{pipeline_id}",
@@ -643,6 +646,7 @@ def register(mcp) -> None:
                     )
                     return {"error": "Pipeline is already finished and cannot be cancelled"}
                 _check_response(resp)
+            ac.effect(pipeline_id=pipeline_id, action="cancel")
             ac.finish("ok")
             return {"cancelled": True, "id": pipeline_id}
         except Exception as e:
@@ -675,7 +679,7 @@ def register(mcp) -> None:
             owner, name = repo.split("/", 1)
             base = _woodpecker_base()
             headers = _woodpecker_headers()
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with async_client("woodpecker", timeout=15.0) as client:
                 repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 resp = await client.get(
                     f"{base}/repos/{repo_id}/pipelines/{pipeline_id}",
@@ -689,7 +693,7 @@ def register(mcp) -> None:
             return {
                 # The number, not data["id"]: status used to return the global id here,
                 # and agents fed it back into get_logs/cancel and got 404s or a different
-                # pipeline (#1425 (id 1508)).
+                # pipeline (vikunja#1425).
                 "pipeline_id": data.get("number"),
                 "internal_id": data.get("id"),
                 "status": data.get("status"),
@@ -751,7 +755,7 @@ def register(mcp) -> None:
             owner, name = repo.split("/", 1)
             base = _woodpecker_base()
             headers = _woodpecker_headers()
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with async_client("woodpecker", timeout=15.0) as client:
                 repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 # No params, no body: the endpoint's `event` and `deploy_to` overrides
                 # are deliberately never sent.
@@ -761,6 +765,7 @@ def register(mcp) -> None:
                 )
                 _check_response(resp)
                 data = resp.json()
+            ac.effect(pipeline_id=data.get("number"), restarted_from=pipeline_id)
             ac.finish("ok")
             return {
                 "pipeline_id": data.get("number"),
@@ -830,7 +835,7 @@ def register(mcp) -> None:
             owner, name = repo.split("/", 1)
             base = _woodpecker_base()
             headers = _woodpecker_headers()
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with async_client("woodpecker", timeout=15.0) as client:
                 repo_id = await _woodpecker_repo_id(client, base, headers, owner, name)
                 data = await _get_json_capped(
                     client, f"{base}/repos/{repo_id}/pipelines/{pipeline_id}/config", headers
@@ -897,7 +902,7 @@ def register(mcp) -> None:
         try:
             base = _woodpecker_base()
             headers = _woodpecker_headers()
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with async_client("woodpecker", timeout=15.0) as client:
                 repo_id = None
                 if repo is not None:
                     owner, name = repo.split("/", 1)

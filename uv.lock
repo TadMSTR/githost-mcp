@@ -812,7 +812,7 @@ wheels = [
 
 [[package]]
 name = "githost-mcp"
-version = "0.18.0"
+version = "0.19.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
@@ -839,7 +839,6 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "pip-audit" },
-    { name = "prometheus-client" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -847,29 +846,17 @@ dev = [
     { name = "ruff" },
     { name = "twine" },
 ]
-loki = [
-    { name = "httpx" },
-]
-nats = [
-    { name = "nats-py" },
-]
 observability = [
-    { name = "httpx" },
-    { name = "nats-py" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
-    { name = "prometheus-client" },
 ]
 otel = [
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
-]
-prometheus = [
-    { name = "prometheus-client" },
 ]
 
 [package.metadata]
@@ -878,22 +865,18 @@ requires-dist = [
     { name = "authlib", specifier = ">=1.7.1" },
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "fastmcp", specifier = ">=3.4.10,<4" },
-    { name = "githost-mcp", extras = ["otel", "loki", "prometheus", "nats"], marker = "extra == 'observability'" },
+    { name = "githost-mcp", extras = ["otel"], marker = "extra == 'observability'" },
     { name = "gitpython", specifier = ">=3.2.1" },
     { name = "h11", specifier = ">=0.16.0" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "httpx", marker = "extra == 'loki'", specifier = ">=0.27" },
     { name = "idna", specifier = ">=3.15" },
     { name = "joserfc", specifier = ">=1.6.8" },
     { name = "mcp", specifier = ">=1.30,<2" },
-    { name = "nats-py", marker = "extra == 'nats'", specifier = ">=2.7" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.45.1" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otel'", specifier = ">=1.25" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.25" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.25" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7" },
-    { name = "prometheus-client", marker = "extra == 'dev'", specifier = ">=0.20" },
-    { name = "prometheus-client", marker = "extra == 'prometheus'", specifier = ">=0.20" },
     { name = "pygithub", specifier = ">=2.6.0" },
     { name = "pyjwt", specifier = ">=2.15.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -910,7 +893,7 @@ requires-dist = [
     { name = "twine", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "urllib3", specifier = ">=2.8.0" },
 ]
-provides-extras = ["otel", "loki", "prometheus", "nats", "observability", "dev"]
+provides-extras = ["otel", "observability", "dev"]
 
 [[package]]
 name = "gitpython"
@@ -1376,15 +1359,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nats-py"
-version = "2.16.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2c/c8/739b72c9201081e48000884d476231873ac82f7247c43b33823eaf3c0bfb/nats_py-2.16.0.tar.gz", hash = "sha256:1d137ed7afc9b59033b3199324c6237df2016a5091935871344a787eba6b72fc", size = 79731, upload-time = "2026-09-16T07:47:21.843Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/a3/16cec37172144d3362d7551bb823a098b2b2903281fc095dfe4480b8c2fd/nats_py-2.16.0-py3-none-any.whl", hash = "sha256:aeb1ff123966c05833d26c7df7e1d54c1c6d32b612428b21677a2e921f1fecae", size = 93578, upload-time = "2026-09-16T07:47:20.799Z" },
-]
-
-[[package]]
 name = "nh3"
 version = "0.3.7"
 source = { registry = "https://pypi.org/simple" }
@@ -1659,15 +1633,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/bf/db/7fc19e6f2dc92a966727031389fc2e08b558f0f25eb7403c1119ad4713cd/pluggy-1.7.0.tar.gz", hash = "sha256:d1eaa46ebb595891b860ab086b4d09c8588af65ebd4361b8e8f4bb8920b90ba8", size = 123304, upload-time = "2026-10-15T09:50:58.343Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/40/9e/2b38731e0fc536806f16490e1a12d7f0dc2a1235aa8cc07bcc75416a7daa/pluggy-1.7.0-py3-none-any.whl", hash = "sha256:7dd7b0d8832ba3cb632c306926ded123429211b83641b35dc5c41ad2d34f9bec", size = 27082, upload-time = "2026-10-15T09:50:56.808Z" },
-]
-
-[[package]]
-name = "prometheus-client"
-version = "0.26.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/52/73/f1334c29c2af4cd9dba6c7817e61b611bd0215e2eb5565c6064a4de18802/prometheus_client-0.26.0.tar.gz", hash = "sha256:04a91bcf94e2cf74a44a1a874d651a2e853ed354b6e822f3b7487751465d5c2b", size = 92910, upload-time = "2026-07-24T19:36:41.893Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/eb/a3/b69efbf4143b5b9859b977770bbbabcc2796b702fa69dc40271e45cd5a56/prometheus_client-0.26.0-py3-none-any.whl", hash = "sha256:fa93d06737aa02bacd05794768508bb97d2fbee28cb3bca04eaae92f0ca953d6", size = 64494, upload-time = "2026-07-24T19:36:40.854Z" },
 ]
 
 [[package]]

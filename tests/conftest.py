@@ -35,3 +35,24 @@ def reset_config(monkeypatch):
     reset_config()
     yield
     reset_config()
+
+
+@pytest.fixture(autouse=True)
+def fail_on_missing_effect(monkeypatch):
+    """Every successful write call in the suite must record an effect.
+
+    AuditCtx.finish() reports an effect-classified tool (effects.EFFECT_TOOLS) that
+    succeeded without calling effect(). In production that is a warning and an
+    `effect_incomplete: ["effect_not_recorded"]` entry; under test it fails the test, so
+    the suite's existing success-path tests double as the "must call effect()" check for
+    every verb they drive (githost-scoped-2026-11 p2).
+    """
+    missing: list[str] = []
+    monkeypatch.setattr(
+        "githost_mcp.audit._report_missing_effect",
+        lambda tool, params: missing.append(
+            f"{tool} {params.get('method') or params.get('action') or ''}"
+        ),
+    )
+    yield
+    assert not missing, f"successful write call(s) recorded no effect: {missing}"

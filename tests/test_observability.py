@@ -1,18 +1,18 @@
-"""Tests for observability emit/init paths.
+"""Tests for observability init and emit paths.
 
-All telemetry is opt-in; these tests exercise the disabled no-op paths, the Loki
-config/push flow (respx), the missing-optional-dependency fallbacks, and the emit
-functions with mocked backends. The OTEL-endpoint init path is intentionally not
-driven here — it sets global providers and background threads that would leak
-across tests; it is covered by the `[otel]` extra's own suite.
+All telemetry is opt-in; these tests exercise the disabled no-op paths, the metric
+emitters with mocked instruments, and the child-span attribute bounding. The
+OTEL-endpoint init path is intentionally not driven here — it sets global providers and
+background threads that would leak across tests. Span behaviour is driven against an
+in-memory exporter in test_spans.py.
+
+The Loki push, Prometheus endpoint and NATS publisher were removed in 0.19.0
+(githost-scoped-2026-11 p2); test_removed_backends_are_gone pins that.
 """
 
-import sys
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
-import httpx
 import pytest
-import respx
 
 import githost_mcp.observability as obs
 from githost_mcp.config import reset_config
@@ -21,15 +21,9 @@ _GLOBALS = [
     "_tracer",
     "_meter",
     "_tool_calls_counter",
+    "_tool_denied_counter",
     "_tool_duration_histogram",
     "_release_targets_counter",
-    "_prom_tool_calls",
-    "_prom_tool_duration",
-    "_prom_release_targets",
-    "_loki_url",
-    "_loki_static_labels",
-    "_nats_client",
-    "_nats_prefix",
 ]
 
 
@@ -48,69 +42,7 @@ def _isolate_globals(monkeypatch):
 def test_init_sync_all_disabled_is_noop():
     obs.init_sync()
     assert obs._tracer is None
-    assert obs._prom_tool_calls is None
-    assert obs._loki_url == ""
-
-
-def test_init_loki_parses_url_and_labels(monkeypatch):
-    monkeypatch.setenv("LOKI_URL", "http://loki:3100/")
-    monkeypatch.setenv("LOKI_LABELS", "env=prod, team=forge, malformed")
-    reset_config()
-    obs._init_loki()
-    assert obs._loki_url == "http://loki:3100"
-    assert obs._loki_static_labels["app"] == "githost-mcp"
-    assert obs._loki_static_labels["env"] == "prod"
-    assert obs._loki_static_labels["team"] == "forge"
-    assert "malformed" not in obs._loki_static_labels
-
-
-def test_init_prometheus_missing_dep_is_swallowed(monkeypatch):
-    """prometheus_client is an optional extra; a deployment without it must still start.
-
-    This used to assert the behaviour by relying on the package being absent from the
-    test environment, which meant it proved nothing once it was installed — and it
-    bound a real port when it was. Absence is now simulated: a None entry in
-    sys.modules makes `import prometheus_client` raise ImportError.
-    """
-    monkeypatch.setenv("METRICS_PORT", "9185")
-    monkeypatch.setitem(sys.modules, "prometheus_client", None)
-    monkeypatch.setattr(obs, "_prom_tool_calls", None)
-    reset_config()
-    obs._init_prometheus()  # import fails -> except path, no port bound
-    assert obs._prom_tool_calls is None
-
-
-def test_init_prometheus_binds_loopback_only(monkeypatch):
-    """prometheus_client defaults to 0.0.0.0 when addr is omitted, which is how the
-    LAN-reachable metrics endpoint shipped (vikunja #272, id 283). This pins the
-    call; `ss -tlnp` on a running process is the real acceptance test, since a mock
-    cannot prove what interface was actually bound.
-    """
-    import sys
-    import types
-
-    calls = []
-
-    stub = types.ModuleType("prometheus_client")
-    stub.Counter = lambda *a, **kw: MagicMock()
-    stub.Histogram = lambda *a, **kw: MagicMock()
-    stub.start_http_server = lambda port, addr=None, **kw: calls.append((port, addr))
-    monkeypatch.setitem(sys.modules, "prometheus_client", stub)
-
-    monkeypatch.setenv("METRICS_PORT", "9620")
-    reset_config()
-    obs._init_prometheus()
-
-    assert calls == [(9620, "127.0.0.1")], f"expected a loopback bind, got {calls}"
-    assert obs.METRICS_BIND_ADDR == "127.0.0.1"
-
-
-@pytest.mark.asyncio
-async def test_init_nats_missing_dep_is_swallowed(monkeypatch):
-    monkeypatch.setenv("NATS_URL", "nats://localhost:4222")
-    reset_config()
-    await obs._init_nats()  # nats absent -> except path
-    assert obs._nats_client is None
+    assert obs._tool_calls_counter is None
 
 
 def test_init_otel_no_endpoint_returns_early():
@@ -118,98 +50,101 @@ def test_init_otel_no_endpoint_returns_early():
     assert obs._tracer is None
 
 
-@pytest.mark.asyncio
-async def test_push_loki_disabled_noop():
-    obs._loki_url = ""
-    await obs._push_loki({"tool": "x"}, "msg")  # returns without HTTP
+def test_removed_backends_are_gone():
+    """No Prometheus listener, Loki push or NATS publisher remains to be started."""
+    for name in (
+        "_init_prometheus",
+        "_init_loki",
+        "_push_loki",
+        "_init_nats",
+        "_publish_nats",
+        "emit_tool_event",
+        "init_async",
+        "loki_or_nats_configured",
+        "METRICS_BIND_ADDR",
+    ):
+        assert not hasattr(obs, name), f"{name} should have been removed"
 
 
-@pytest.mark.asyncio
-async def test_push_loki_posts_to_endpoint():
-    obs._loki_url = "http://loki:3100"
-    obs._loki_static_labels = {"app": "githost-mcp"}
-    with respx.mock:
-        route = respx.post("http://loki:3100/loki/api/v1/push").mock(
-            return_value=httpx.Response(204)
-        )
-        await obs._push_loki({"tool": "git_push"}, "hello")
-    assert route.called
+def test_emit_tool_event_all_disabled():
+    obs.emit_tool_event_sync("git_push", "local", "repo", "ok", 10)  # no instruments -> no-op
 
 
-@pytest.mark.asyncio
-async def test_push_loki_swallows_transport_error():
-    obs._loki_url = "http://loki:3100"
-    with respx.mock:
-        respx.post("http://loki:3100/loki/api/v1/push").mock(side_effect=httpx.ConnectError("down"))
-        await obs._push_loki({}, "hello")  # must not raise
-
-
-@pytest.mark.asyncio
-async def test_publish_nats_disabled_noop():
-    obs._nats_client = None
-    await obs._publish_nats("tool.git_push", {"a": 1})  # returns without publish
-
-
-@pytest.mark.asyncio
-async def test_publish_nats_publishes_with_prefix():
-    client = AsyncMock()
-    obs._nats_client = client
-    obs._nats_prefix = "githost"
-    await obs._publish_nats("tool.git_push", {"a": 1})
-    client.publish.assert_awaited_once()
-    subject = client.publish.await_args.args[0]
-    assert subject == "githost.tool.git_push"
-
-
-@pytest.mark.asyncio
-async def test_emit_tool_event_all_disabled():
-    await obs.emit_tool_event("git_push", "local", "repo", "ok", 10)  # no backends -> no-op
-
-
-@pytest.mark.asyncio
-async def test_emit_tool_event_drives_all_backends():
-    obs._tracer = MagicMock()
+def test_emit_tool_event_drives_the_otel_instruments():
     obs._tool_calls_counter = MagicMock()
     obs._tool_duration_histogram = MagicMock()
-    obs._prom_tool_calls = MagicMock()
-    obs._prom_tool_duration = MagicMock()
-    obs._nats_client = AsyncMock()
-    obs._loki_url = "http://loki:3100"
-    obs._loki_static_labels = {"app": "githost-mcp"}
-    with respx.mock:
-        respx.post("http://loki:3100/loki/api/v1/push").mock(return_value=httpx.Response(204))
-        await obs.emit_tool_event("git_push", "local", "repo", "ok", 25)
+    obs._tool_denied_counter = MagicMock()
+    obs.emit_tool_event_sync("git_push", "local", "repo", "ok", 25)
     obs._tool_calls_counter.add.assert_called_once()
-    obs._prom_tool_calls.labels.assert_called_once()
-    obs._nats_client.publish.assert_awaited_once()
+    obs._tool_duration_histogram.record.assert_called_once_with(
+        25, {"tool": "git_push", "provider": "local"}
+    )
+    obs._tool_denied_counter.add.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_emit_tool_event_swallows_backend_errors():
-    obs._tracer = MagicMock()
-    obs._tracer.start_as_current_span.side_effect = RuntimeError("otel down")
+def test_emit_tool_event_swallows_instrument_errors():
     obs._tool_calls_counter = MagicMock()
     obs._tool_calls_counter.add.side_effect = RuntimeError("metric down")
-    obs._prom_tool_calls = MagicMock()
-    obs._prom_tool_calls.labels.side_effect = RuntimeError("prom down")
-    await obs.emit_tool_event("git_push", "local", "repo", "ok", 25)  # must not raise
+    obs._tool_denied_counter = MagicMock()
+    obs._tool_denied_counter.add.side_effect = RuntimeError("metric down")
+    obs.emit_tool_event_sync("git_push", "local", "repo", "error:X", 25, "other")  # no raise
 
 
 def test_emit_release_target_disabled_noop():
     obs.emit_release_target("pypi", "ok")  # no counters -> no-op
 
 
-def test_emit_release_target_drives_counters():
+def test_emit_release_target_drives_counter():
     obs._release_targets_counter = MagicMock()
-    obs._prom_release_targets = MagicMock()
     obs.emit_release_target("pypi", "ok")
-    obs._release_targets_counter.add.assert_called_once()
-    obs._prom_release_targets.labels.assert_called_once_with(target="pypi", result="ok")
+    obs._release_targets_counter.add.assert_called_once_with(1, {"target": "pypi", "result": "ok"})
 
 
 def test_emit_release_target_swallows_errors():
     obs._release_targets_counter = MagicMock()
     obs._release_targets_counter.add.side_effect = RuntimeError("boom")
-    obs._prom_release_targets = MagicMock()
-    obs._prom_release_targets.labels.side_effect = RuntimeError("boom")
     obs.emit_release_target("pypi", "error")  # must not raise
+
+
+# --- child-span attribute bounding ------------------------------------------
+
+
+def test_child_attrs_keep_only_known_keys():
+    attrs = obs.bounded_child_attrs(
+        {
+            "http.request.method": "POST",
+            "url.template": "/api/v1/repos/{}/{}/pulls",
+            "url.full": "https://gitea/api/v1/repos/o/r/pulls?token=abc",
+            "http.request.body": "{}",
+        }
+    )
+    assert attrs == {"http.request.method": "POST", "url.template": "/api/v1/repos/{}/{}/pulls"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://user:pass@host/x",  # userinfo and scheme punctuation
+        "/repos/x?token=abc",  # query string
+        "a" * 129,  # over the length bound
+        "has space",
+        "line\nbreak",
+    ],
+)
+def test_child_attr_values_that_are_not_plain_are_dropped(value):
+    assert obs.bounded_child_attrs({"server.address": value}) == {}
+
+
+def test_child_attr_ints_and_bools_are_kept():
+    assert obs.bounded_child_attrs({"http.response.status_code": 404}) == {
+        "http.response.status_code": 404
+    }
+
+
+def test_span_helpers_are_noops_without_a_tracer():
+    assert obs._tracer is None
+    assert obs.start_tool_span("git_push") is None
+    obs.end_tool_span(None, {"a": 1}, error=True)  # no raise
+    with obs.child_span(None, "git.push", {}) as span:
+        assert span is None
+    obs.set_child_attrs(None, {"http.response.status_code": 200})
