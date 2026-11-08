@@ -285,8 +285,9 @@ Both run their tools (`python -m build`, `twine`, `npm`) with an allowlisted env
   registry competes with an explicit `registry` argument, when the URL's host is
   ambiguous, or when the lookup fails.
 - The effect's `package`/`version` are null (and incomplete) when `dist/` holds more than
-  one package or version, and when `package.json` is not a regular file, is over 1 MiB,
-  or is not a JSON object.
+  one package or version, when it holds a file whose name cannot be read as a
+  distribution, and when `package.json` is not a regular file, is over 1 MiB, or is not a
+  JSON object.
 
 ### Woodpecker CI (8)
 `woodpecker_trigger`, `woodpecker_restart`, `woodpecker_list_pipelines`, `woodpecker_status`, `woodpecker_get_logs`, `woodpecker_pipeline_config`, `woodpecker_queue_info`, `woodpecker_pipeline_cancel`
@@ -807,7 +808,12 @@ than guess. A URL in free text ends at whitespace or the next URL, not at a quot
 Residuals: a dotted credential (a JWT), or a `name:<1-5 digits>` pair (the shape of
 `host:port`), in front of `/…@host` reads as a host and is not redacted; and an `@` that
 sits only after the first `/` behind a single-label head (`https://verdaccio/@scope/pkg`)
-is read as part of the path.
+is read as part of the path. Redaction can also remove text that is not a credential: in
+output with no whitespace (compact JSON in an error body), a URL with no `/` followed later
+by any `@` makes everything between them userinfo, so
+`{"url":"https://github.com","email":"dev@example.com"}` comes back as
+`{"url":"https://***@example.com"}`. That is the 0.20.0 pattern's behaviour, kept so the
+redactor never removes less than it did.
 
 Subprocess output (`twine`, `npm`, `python -m build`) is scrubbed before it is cut to 500
 characters, not after: cutting first could split a token past recognition.
