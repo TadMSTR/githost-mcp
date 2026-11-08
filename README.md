@@ -787,11 +787,20 @@ holds are git stderr: a curl trace, and a failing hook printing its environment.
 credential with none of these shapes, held nowhere in this process's config, still passes.
 
 URL userinfo is found with one authority parser (`security.split_authority`), shared by
-the remote-URL validator, the redactor, `url_host` and the npm registry target. The
-userinfo runs to the last `@` of the authority, and a credential in front of `/`, `?` or
-`#` before an `@` (`https://<token>/x@host/...`) counts as userinfo when the part before
-the first `/` is not host-shaped. A dotted credential (a JWT), or a `name:<1-5 digits>`
-pair (it has the shape of `host:port`), in that position still reads as a host.
+the remote-URL validator, the redactor, `url_host` and the npm registry target. Any `@`
+before the first `/` makes everything up to the last such `@` userinfo, even with a `?`,
+`#` or quote in front of it, so the redactor never removes less than the 0.20.0 pattern
+did. A credential in front of a `/` (`https://<token>/x@host/...`) also counts as userinfo
+when the part before the first `/`, `?` or `#` is not host-shaped and the part after the
+last `@` is a host (a dotted name, an IP literal, `localhost`, `name:port`, or a bare name
+when the head could not be a host). Userinfo that holds a `/`, `?` or `#` is ambiguous: the
+validator refuses the URL, the redactor removes it, and `url_host` returns no host rather
+than guess. A URL in free text ends at whitespace or the next URL, not at a quote.
+
+Residuals: a dotted credential (a JWT), or a `name:<1-5 digits>` pair (the shape of
+`host:port`), in front of `/…@host` reads as a host and is not redacted; and an `@` that
+sits only after the first `/` behind a single-label head (`https://verdaccio/@scope/pkg`)
+is read as part of the path.
 
 Subprocess output (`twine`, `npm`, `python -m build`) is scrubbed before it is cut to 500
 characters, not after: cutting first could split a token past recognition.

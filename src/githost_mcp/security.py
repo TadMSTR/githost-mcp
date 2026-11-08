@@ -48,13 +48,18 @@ __all__ = [
 # URL authority parsing: one rule for validate_remote_url, redact_url_credentials,
 # url_host and the npm registry target (#1434 F-02).
 #
-# The userinfo runs to the LAST `@` of the authority. A credential can also sit in front of
-# a `/`, `?` or `#`, as in `https://<token>/x@host/o/r.git`: a first-`/` parser saw no `@`
-# in the authority, so the validator accepted it, the redactor kept it, and url_host
-# returned the token as the host. That shape is read as userinfo when the part before the
-# first `/`, `?` or `#` is not host-shaped and the part after the last `@` is. A host-shaped
-# head (a dotted name, an IP, `localhost`, or `label:port`) keeps ordinary URLs with an `@`
-# in the path intact: npm's `https://registry.npmjs.org/@scope%2fpkg`.
+# Userinfo is found two ways:
+# - An `@` before the first `/`: everything up to the LAST such `@` is userinfo, even when
+#   a `?` or `#` sits in front of it (`https://bot:4821#x@host`). Reading `?`/`#` as the end
+#   of the authority there would turn the credential into host plus fragment, so this rule
+#   never finds less than 0.20.0's `[^/@\s]+@` did.
+# - A credential in front of a `/` before an `@`, as in `https://<token>/x@host/o/r.git`:
+#   read as userinfo when the part before the first `/`, `?` or `#` is not host-shaped and
+#   the part after the last `@` is a dotted name, an IP literal, `localhost` or `name:port`.
+#   A single-label name after the `@` counts only when the head could not be a host itself
+#   (`user:pw`), so `https://verdaccio/@scope/pkg` keeps its host and path.
+# Userinfo that holds `/`, `?` or `#` is ambiguous: the validator refuses it, the redactor
+# removes it, and url_host answers None rather than guess which part is the host.
 #
 # Residual, stated: a dotted credential (a JWT), or a `name:<1-5 digits>` pair, in front of
 # `/…@host` reads as a host.
@@ -66,39 +71,56 @@ _HOSTLIKE_RE = re.compile(
     r"|[A-Za-z0-9-]{1,63}:\d{1,5})(?::\d{1,5})?"
 )
 _HOST_AFTER_AT_RE = re.compile(
-    r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})*)(?::\d{1,5})?"
+    r"(?:localhost|\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+"
+    r"|[A-Za-z0-9-]{1,63}(?=:))(?::\d{1,5})?"
 )
+_LABEL_HOST_RE = re.compile(r"[A-Za-z0-9-]{1,63}(?::\d{1,5})?")
+_LABEL_RE = re.compile(r"[A-Za-z0-9-]{1,63}")
 _PATH_START_RE = re.compile(r"[/?#]")
 
 
 def split_authority(after_scheme: str) -> tuple[str | None, str, str]:
     """Split the text after `scheme://` into (userinfo or None, host[:port], rest)."""
+    slash = after_scheme.find("/")
+    at = after_scheme.rfind("@", 0, slash if slash >= 0 else len(after_scheme))
+    if at >= 0:
+        tail = after_scheme[at + 1 :]
+        m = _PATH_START_RE.search(tail)
+        end = m.start() if m else len(tail)
+        return after_scheme[:at], tail[:end], tail[end:]
     m = _PATH_START_RE.search(after_scheme)
     first = m.start() if m else len(after_scheme)
     head = after_scheme[:first]
-    if "@" in head:
-        userinfo, hostport = head.rsplit("@", 1)
-        return userinfo, hostport, after_scheme[first:]
     at = after_scheme.rfind("@")
     if head and at > first and not _HOSTLIKE_RE.fullmatch(head):
         tail = after_scheme[at + 1 :]
         m = _PATH_START_RE.search(tail)
         end = m.start() if m else len(tail)
-        if _HOST_AFTER_AT_RE.fullmatch(tail[:end]):
-            return after_scheme[:at], tail[:end], tail[end:]
+        host = tail[:end]
+        # A head that is itself a bare label (`verdaccio`) needs more than a bare label after
+        # the `@` to count as a credential; a head no host could be (`user:pw`) does not.
+        if _HOST_AFTER_AT_RE.fullmatch(host) or (
+            not _LABEL_RE.fullmatch(head) and _LABEL_HOST_RE.fullmatch(host)
+        ):
+            return after_scheme[:at], host, tail[end:]
     return None, head, after_scheme[first:]
+
+
+def _ambiguous(userinfo: str | None) -> bool:
+    return userinfo is not None and any(c in userinfo for c in "/?#")
 
 
 # The start of a scheme-qualified URL in free text. Linear (audit F-02,
 # agent-build-workflow-2026-09 p4): the lookbehind lets an attempt start only at the
 # beginning of a run of scheme characters, and every quantifier is possessive, so a long
 # run is scanned once. `pre` keeps leading digits/`+.-` so `1https://tok@h` is still found.
-# Each URL runs to whitespace, a quote, or the next URL's start, whichever comes first, so
-# a URL nested in another's query or joined to it by a comma is redacted on its own.
+# Each URL runs to whitespace or the next URL's start, whichever comes first, so a URL
+# nested in another's query or joined to it by a comma is redacted on its own. A quote does
+# not end it: `'` is valid in a password, and ending there let the `@` fall outside the URL.
 _URL_START_RE = re.compile(
     r"(?<![a-zA-Z0-9+.\-])(?P<pre>[0-9+.\-]*+)(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*+://)"
 )
-_URL_END_RE = re.compile(r"[\s'\"<>]")
+_URL_END_RE = re.compile(r"\s")
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 
 
@@ -110,7 +132,9 @@ def url_host(url: str) -> str | None:
     """
     try:
         if _SCHEME_RE.match(url):
-            _userinfo, hostport, _rest = split_authority(url.split("://", 1)[1])
+            userinfo, hostport, _rest = split_authority(url.split("://", 1)[1])
+            if _ambiguous(userinfo):
+                return None
             host = hostport
             if host.startswith("["):
                 host = host[1 : host.find("]")] if "]" in host else ""
@@ -474,7 +498,7 @@ def validate_remote_url(url: str) -> None:
             )
         userinfo, _hostport, _rest = split_authority(url.split("://", 1)[1])
         if userinfo is not None:
-            if not url.startswith(_LOGIN_USERINFO_SCHEMES) or any(c in userinfo for c in "/?#"):
+            if not url.startswith(_LOGIN_USERINFO_SCHEMES) or _ambiguous(userinfo):
                 raise RemoteUrlRejected(
                     "Remote URL embeds credentials in its userinfo component. Refused rather "
                     "than redacted: it would persist in .git/config. Use an scp-style SSH "

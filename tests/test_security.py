@@ -725,10 +725,18 @@ def test_f02_redactor_removes_userinfo_before_a_path_character(url, host):
 
 
 @pytest.mark.parametrize(("url", "host"), _F02_PROBES)
-def test_f02_url_host_names_the_real_host(url, host):
+def test_f02_url_host_does_not_guess_past_an_ambiguous_authority(url, host):
+    # git and npm read the authority up to the first `/`, so the name after the `@` is not
+    # where they connect. Naming it recorded a host the client never reached (audit F-04);
+    # an ambiguous authority has no host to record.
     from githost_mcp.security import url_host
 
-    assert url_host(url) == host
+    userinfo = url.split("://", 1)[1].rsplit("@", 1)[0]
+    if any(c in userinfo for c in "/?#"):
+        assert url_host(url) is None
+    else:  # every `@` sits before the first `/`: the host is not in doubt
+        assert url_host(url) == host
+    assert url_host(f"https://{host}/o/r.git") == host
 
 
 @pytest.mark.parametrize(
@@ -815,3 +823,47 @@ def test_redaction_is_linear_on_many_nested_schemes():
         t0 = time.perf_counter()
         redact_url_credentials(value)
         assert time.perf_counter() - t0 < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "fatal: https://user:pa'ss@h.example/x failed",  # a quote in the password
+        'https://user:pa"ss@h.example/x',
+        "https://bot:4821#SECRET@h.example/",  # host-shaped head, then # before the @
+        "https://a.b?SECRET@h.example/",  # dotted head, then ? before the @
+        "https://u:SECRET<x@h.example/",
+    ],
+)
+def test_redaction_never_less_than_the_old_pattern_for_url_terminators(text):
+    # Audit F-01: each of these was redacted by 0.20.0's `[^/@\s]+@` and came back whole.
+    from githost_mcp.security import redact_url_credentials
+
+    out = redact_url_credentials(text)
+    assert "SECRET" not in out and "pa'ss" not in out and 'pa"ss' not in out
+    assert "***@h.example/" in out
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://bot:4821#x@h.example/",
+        "https://tok/x@github.com/o/r",
+        "https://2130706433/x@e.org/",
+    ],
+)
+def test_url_host_is_none_when_the_userinfo_is_ambiguous(url):
+    # Audit F-01/F-04: guessing a host here recorded one npm never connected to.
+    from githost_mcp.security import url_host
+
+    assert url_host(url) is None
+
+
+def test_single_label_host_with_an_at_in_the_path_keeps_its_host():
+    # CR-15: `https://verdaccio/@scope/pkg` is a registry URL, not a credential.
+    from githost_mcp.security import redact_url_credentials, url_host, validate_remote_url
+
+    url = "https://verdaccio/@scope/pkg"
+    assert redact_url_credentials(url) == url
+    assert url_host(url) == "verdaccio"
+    validate_remote_url("https://gitea/@org/repo.git")

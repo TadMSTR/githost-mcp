@@ -293,16 +293,21 @@ def test_scrub_output_matches_the_old_pattern():
 
     def intended_difference(s):
         for m in url.finditer(s):
-            userinfo, _host, _rest = split_authority(m.group("rest").split("'")[0])
+            userinfo, _host, _rest = split_authority(m.group("rest"))
             if userinfo and ("@" in userinfo or any(c in userinfo for c in "/?#")):
                 return True
         return False
 
     rng = random.Random(4)
-    alphabet = "ab1+.-:/@ x"
+    # Every character that can end, or seem to end, a URL or its authority (audit F-01:
+    # without `' " < > ? #` here the "never less" assertion could not fail).
+    alphabet = "ab1+.-:/@ x'\"<>?#"
     differed = 0
-    for _ in range(20_000):
+    for _ in range(40_000):
         s = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 18)))
+        if rng.random() < 0.8:  # most strings need a scheme to exercise anything
+            cut = rng.randint(0, len(s))
+            s = s[:cut] + rng.choice(("https://", " a://", "git://")) + s[cut:]
         expected = old.sub(lambda m: f"{m.group('scheme')}***@", s)
         got = redact_url_credentials(s)
         if got != expected:
