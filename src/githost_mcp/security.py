@@ -7,7 +7,7 @@ import re
 from fnmatch import fnmatch
 from pathlib import Path
 
-from .config import get_config
+from .config import get_config, root_as_written
 from .errors import (
     BranchNameInvalid,
     InvalidArgument,
@@ -196,16 +196,26 @@ def _validate_path(
         )
     resolved = canonical_path(repo_path)
 
+    # Each root is matched as written, and only the requested path is resolved
+    # (vikunja#996): resolving the root here let a root swapped for a symlink carry the
+    # grant to the link's target. A root that is a symlink now (swapped after load, when
+    # config refused any that already were) is refused.
+    refused: list[str] = []
     for root in roots:
+        written = root_as_written(root)
+        if os.path.islink(written):
+            refused.append(written)
+            continue
         try:
-            resolved.relative_to(Path(root).expanduser().resolve())
+            resolved.relative_to(written)
             return str(resolved)
         except ValueError:
             continue
 
+    note = f"; refused because each is a symlink: {refused}" if refused else ""
     raise PathNotAllowed(
         f"Path '{repo_path}' is not under any allowed root ({list_name}, source: {source}). "
-        f"Allowed: {roots}"
+        f"Allowed: {roots}{note}"
     )
 
 

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import errno
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -185,6 +188,45 @@ def push_effect_fields(
     if unmatched:
         fields["ref_matched"] = None
     return fields
+
+
+_RENAME_NOREPLACE = 1
+_AT_FDCWD = -100
+
+
+def rename_noreplace(src: str, dst: str) -> None:
+    """rename(2) that refuses an existing `dst`, even an empty directory or a symlink.
+
+    Plain os.rename replaces an empty directory silently, so a `dest` created between the
+    existence check and the rename would be overwritten. renameat2(RENAME_NOREPLACE) is
+    atomic. Where the kernel or filesystem does not offer it, the fallback checks and
+    renames, which leaves a window, and logs that it did.
+    """
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = libc.renameat2
+    except (OSError, AttributeError):
+        renameat2 = None
+    if renameat2 is not None:
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rc = renameat2(_AT_FDCWD, os.fsencode(src), _AT_FDCWD, os.fsencode(dst), _RENAME_NOREPLACE)
+        if rc == 0:
+            return
+        err = ctypes.get_errno()
+        if err == errno.EEXIST:
+            raise AlreadyExists(f"{dst} already exists")
+        if err not in (errno.ENOSYS, errno.EINVAL):
+            raise OSError(err, os.strerror(err), dst)
+    log.warning("rename_noreplace_unavailable", dst=dst)
+    if os.path.lexists(dst):
+        raise AlreadyExists(f"{dst} already exists")
+    os.rename(src, dst)
 
 
 def sent_sha(repo: git.Repo, remote: str, branch: str, captured: str) -> str:
@@ -1646,26 +1688,20 @@ def register(mcp) -> None:
             url = clone_url(provider, owner, repo, gitea_host)
             validate_remote_url(url)
 
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            # mkdir, not a later git-side create: it fails if anything appeared since the
-            # lexists() check, and it is what makes the cleanup below safe — this call
-            # removes only a directory it created itself.
-            # SECURITY[deferred]: between this mkdir and git starting, a same-uid process
-            # could swap the empty directory for a symlink, and git would clone through it.
-            # Nothing to gain while every agent shares one uid; revisit with per-agent uids
-            # (clone into a mkdtemp sibling, then rename). Ticket vikunja#1228.
-            # Target: agent-isolation-2026-10 p4.
-            # Audit: 2026-10-25/agent-build-workflow-2026-09-p4b-githost-bootstrap F-07.
-            try:
-                os.mkdir(dest)
-            except FileExistsError:
-                raise AlreadyExists(f"{dest} already exists") from None
+            parent = os.path.dirname(dest)
+            os.makedirs(parent, exist_ok=True)
+            # Cloned into a fresh mkdtemp sibling, then renamed into place with
+            # RENAME_NOREPLACE (vikunja#1228). mkdtemp creates the directory atomically
+            # with a name nothing else knows, so there is no empty `dest` for a same-uid
+            # process to swap for a symlink while git runs; and the rename refuses a `dest`
+            # that appeared in the meantime. A failed clone removes only the temp directory.
+            tmp = tempfile.mkdtemp(prefix=f".{os.path.basename(dest)}.clone-", dir=parent)
             # Everything up to reading the result back counts as the clone: if any of it
-            # fails, the tree is removed, so a retry is not refused as "already exists".
+            # fails, the temp tree is removed, so a retry is not refused as "already exists".
             try:
                 with ac.child("git.clone"):
-                    run_clone(url, dest, clone_args(depth, branch))
-                cloned = _open_repo(dest)
+                    run_clone(url, tmp, clone_args(depth, branch))
+                cloned = _open_repo(tmp)
                 # A clone writes every path of the tree, so a deny-scoped grant
                 # (developer's manifests/**) is checked against all of them (audit F-03).
                 listing = cloned.git.ls_files("-s", "-z")
@@ -1678,15 +1714,19 @@ def register(mcp) -> None:
                         sorted({check[p] for p in denied.denied_paths}),
                         config.allowlist_source,
                     ) from None
-                if above := symlinks_above_denied(listing, config.write_globs_deny, dest):
+                if above := symlinks_above_denied(listing, config.write_globs_deny, tmp):
                     raise WriteGlobDenied(dest, above, config.allowlist_source)
                 empty = not cloned.head.is_valid()
                 # `branch` may name a tag, which git checks out detached.
                 on_branch = not empty and not cloned.head.is_detached
                 branch_name = cloned.active_branch.name if on_branch else None
                 head_sha = None if empty else cloned.head.commit.hexsha
+                cloned.close()
+                # mkdtemp makes it 0700; a checkout is an ordinary directory.
+                os.chmod(tmp, 0o755)
+                rename_noreplace(tmp, dest)
             except BaseException:
-                shutil.rmtree(dest, ignore_errors=True)
+                shutil.rmtree(tmp, ignore_errors=True)
                 raise
 
             # The remote host only, never the URL.
