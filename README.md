@@ -181,6 +181,12 @@ the refspec as one argv element, so this is not a shell boundary — but a refsp
 `src:dst`, and an embedded colon would silently retarget the deletion at a ref the caller
 never named.
 
+The same check covers every caller-supplied name that reaches a push (as of 0.20.0):
+`git_push`'s `branch` (and `remote`), `git_tag`'s `tag_name` and `release`'s tag. A name
+with a leading `+`, `:` or `-`, or a `:` anywhere, is refused before anything is pushed.
+Without it, the ungated `git_push` was a route to both gated effects: `:x` deleted a
+remote branch and `+x` force-updated one, with no lease and no protected-branch check.
+
 `git_remote` refuses a URL that embeds credentials rather than redacting it — unlike text
 on its way out to a caller, a remote URL is written to `.git/config`, where a token would
 outlive the call and be reused by every later fetch and push. Only `http(s)://`, `ssh://`,
@@ -323,6 +329,12 @@ ship without a HITL gate. Three pieces make that checkable by a machine:
   `release`, `npm_publish`, `pypi_publish` and the two `*_repo_create` (14 tools). A
   closed-world test fails on a registered tool that is unclassified, and on a HITL tool
   that is not an effect tool. A new effect verb's author decides on `HITL_TOOLS` too.
+  The rest, `UNGATED_EFFECT_TOOLS`, is pinned by a test as well, so taking a verb out of
+  the class is a reviewed edit. Ungated is not the same as harmless: `git_tag` and the
+  release create/update tools can trigger an irreversible registry publish in repos that
+  publish on a `v*` tag, and `github_actions`/`gitlab_pipeline` can cancel a pipeline.
+  `effects.py` gives the reason for each, and their gating is an open decision
+  (vikunja#1440).
 - **`githost-mcp --list-tools [--json]`** prints every registered tool with its `kind`
   (`read` | `effect`) and `hitl` flag, then exits. It starts no server, needs no env var,
   and writes neither the audit log nor the app log, so it runs against a freshly built
