@@ -189,3 +189,55 @@ def test_no_otel_path_still_works_and_child_is_a_noop(tmp_path, monkeypatch):
         assert span is None
     ac.finish("ok")
     assert (tmp_path / "audit.jsonl").read_text().strip()
+
+
+def test_an_unwritable_audit_dir_does_not_leak_the_span(exporter, tmp_path, monkeypatch):
+    """CR-04: os.makedirs sat outside the write's try. Its OSError escaped finish() after
+    `finished` was set and before the span ended, so the span never closed."""
+    import githost_mcp.audit as audit_mod
+
+    monkeypatch.setattr(audit_mod, "_audit_log_path", str(tmp_path / "nodir" / "audit.jsonl"))
+
+    def refuse(*a, **k):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(audit_mod.os, "makedirs", refuse)
+    ac = AuditCtx("git_status", "local", "/repo", {})
+    ac.finish("ok")  # must not raise
+    (span,) = _by_name(exporter, "githost.git_status")
+    assert span.end_time is not None
+    assert audit_mod._current_ctx.get() is not ac
+
+
+def test_client_private_transport_attrs_exist():
+    """CR-07: httptrace wraps httpx's private _transport and _mounts."""
+    import httpx
+
+    for client in (httpx.Client(), httpx.AsyncClient()):
+        assert hasattr(client, "_transport") and isinstance(client._mounts, dict)
+
+
+@pytest.mark.parametrize("factory", ["sync_client", "async_client"])
+def test_traced_clients_keep_env_proxies(monkeypatch, factory):
+    """CR-07: passing transport= made httpx drop HTTP(S)_PROXY / NO_PROXY."""
+    from githost_mcp import httptrace
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("NO_PROXY", "gitea.internal")
+    client = getattr(httptrace, factory)("gitea", timeout=5)
+    wrapper = (httptrace.TracingTransport, httptrace.TracingAsyncTransport)
+    proxied = [t for t in client._mounts.values() if t is not None]
+    assert proxied, "env proxy mount missing"
+    assert all(isinstance(t, wrapper) for t in proxied)
+    assert isinstance(client._transport, wrapper)
+    assert None in client._mounts.values(), "NO_PROXY entry missing"
+
+
+def test_traced_client_without_proxy_env_still_traces(monkeypatch):
+    from githost_mcp import httptrace
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.delenv(name.lower(), raising=False)
+        monkeypatch.delenv(name, raising=False)
+    client = httptrace.sync_client("gitea")
+    assert isinstance(client._transport, httptrace.TracingTransport)

@@ -196,9 +196,14 @@ def register(mcp) -> None:
                 raise ValueError(f"npm publish failed: {result.stderr[:500]}")
 
             package, version = npm_identity(repo_path)
-            # The registry is recorded as its host only (a URL may carry userinfo).
+            # SECURITY[deferred]: with no `registry` argument the target is assumed to be
+            # registry.npmjs.org even when .npmrc points elsewhere (CR-14). Ticket
+            # vikunja#1435. Target: programme part 4. Audit: 2026-11-08/githost-scoped-2026-11-p2.
+            # The registry is recorded as its host only (a URL may carry userinfo). A
+            # lambda, because urlsplit can raise after the publish happened; a raising
+            # lambda becomes null plus effect_incomplete instead of failing the call.
             ac.effect(
-                target=urlsplit(registry).hostname if registry else "registry.npmjs.org",
+                target=lambda: urlsplit(registry).hostname if registry else "registry.npmjs.org",
                 package=package,
                 version=version,
             )

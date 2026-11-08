@@ -431,12 +431,13 @@ def write_audit_entry(
     if _signing_key:
         entry["hmac"] = _compute_hmac(entry)
 
-    audit_dir = os.path.dirname(_audit_log_path)
-    if audit_dir:
-        os.makedirs(audit_dir, exist_ok=True)
-
     line = json.dumps(entry) + "\n"
     try:
+        # makedirs sits inside the try: an OSError escaping here would propagate out of
+        # finish() after `finished` is set and before the span ends, leaking the span.
+        audit_dir = os.path.dirname(_audit_log_path)
+        if audit_dir:
+            os.makedirs(audit_dir, exist_ok=True)
         # One lock for check-and-rotate plus write. Under the HTTP transport this
         # runs on a threadpool, so an unguarded rotate would race a concurrent
         # append and lose entries.

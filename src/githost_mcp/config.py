@@ -376,7 +376,7 @@ def load_config() -> Config:
         otel_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         otel_protocol=os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
         otel_service_name=os.getenv("OTEL_SERVICE_NAME", "githost-mcp"),
-        removed_backend_env=[name for name in REMOVED_BACKEND_ENV if os.getenv(name)],
+        removed_backend_env=[name for name in REMOVED_BACKEND_ENV if os.getenv(name) is not None],
         github_token=os.getenv("GITHUB_TOKEN", ""),
         github_owner=os.getenv("GITHUB_OWNER", ""),
         gitea_url=os.getenv("GITEA_URL", ""),

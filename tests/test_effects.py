@@ -521,3 +521,128 @@ def test_audit_log_query_refuses_a_malformed_id(audit_env, argument, value):
     (audit_env / "audit.jsonl").write_text("")
     result = _register(audit_query)["audit_log_query"](**{argument: value})
     assert "error" in result and argument in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Round-1 audit fixes: telemetry after a side effect never fails or misreports the call
+# ---------------------------------------------------------------------------
+
+# validate_remote_url accepts these; urlsplit refuses them (F-01 / CR-09 probe input).
+_URLSPLIT_REFUSED = ["https://[::1/x", "https://[gitea.example/o/r.git", "ssh://[::1/r.git"]
+
+
+@pytest.mark.parametrize("url", _URLSPLIT_REFUSED)
+def test_url_host_is_total(url):
+    from githost_mcp.tools.git_local import url_host
+
+    assert url_host(url) is None
+
+
+@pytest.mark.parametrize("url", _URLSPLIT_REFUSED)
+def test_git_remote_add_with_an_unsplittable_url_reports_success(pushed, audit_env, url):
+    """F-01: the remote is created first; the host read must not turn that into an error."""
+    from githost_mcp.security import validate_remote_url
+    from githost_mcp.tools import git_local
+
+    try:
+        validate_remote_url(url)
+    except Exception:
+        pytest.skip("validator refuses this shape; nothing to probe")
+    repo, *_ = pushed
+    result = _register(git_local)["git_remote"](repo.working_dir, "add", "probe", url)
+    assert "error" not in result, result
+    entry = _entries(audit_env)[-1]
+    assert entry["result"] == "ok"
+    assert entry["effect"]["host"] is None
+    assert "probe" in [r.name for r in repo.remotes]
+
+
+def test_git_show_reports_an_error_when_the_stats_read_fails(pushed, audit_env, monkeypatch):
+    """CR-03: finish("ok") used to run before commit.stats; the except path's second
+    finish() was then ignored, so the audit said ok while the caller got an error."""
+    from githost_mcp.tools import git_local
+
+    repo, *_ = pushed
+
+    def boom(self):
+        raise git.GitCommandError("diff", 128)
+
+    monkeypatch.setattr(git.Commit, "stats", property(boom))
+    result = _register(git_local)["git_show"](repo.working_dir, "HEAD")
+    assert "error" in result
+    entries = _entries(audit_env)
+    assert entries[-1]["tool"] == "git_show"
+    assert entries[-1]["result"].startswith("error:")
+
+
+def test_push_effect_ignores_a_followed_tag(pushed, audit_env):
+    """CR-08: push.followTags sends a NEW_TAG PushInfo beside the branch's; it used to mark
+    the branch created and drop old_sha."""
+    from githost_mcp.tools import git_local
+
+    repo, bare, _branch, first = pushed
+    repo.config_writer().set_value("push", "followTags", "true").release()
+    (audit_env / "repo" / "a.txt").write_text("3")
+    repo.index.add(["a.txt"])
+    second = repo.index.commit("three")
+    repo.create_tag("v9.9.9", ref=second, message="annotated, so followTags sends it")
+    result = _register(git_local)["git_push"](repo.working_dir)
+    assert "error" not in result, result
+    assert "v9.9.9" in [t.name for t in bare.tags], "precondition: the tag was followed"
+    effect = _entries(audit_env)[-1]["effect"]
+    assert "created" not in effect
+    assert effect["old_sha"] == first.hexsha
+
+
+def test_push_effect_without_a_matching_ref_uses_every_info(pushed):
+    from githost_mcp.tools.git_local import push_effect_fields
+
+    class Info:
+        flags = git.remote.PushInfo.NEW_HEAD
+        remote_ref_string = "refs/heads/other"
+        _old_commit_sha = None
+
+    assert push_effect_fields(pushed[0], [Info()], "a" * 40, ref="main")["created"] is True
+
+
+def test_pushinfo_private_old_sha_attr_exists(pushed):
+    """F-05: push_effect_fields reads GitPython's private PushInfo._old_commit_sha. If an
+    upgrade renames it, old_sha goes null on every push with no other signal."""
+    repo, _bare, branch, _first = pushed
+    infos = list(repo.remotes.origin.push(branch))
+    assert infos, "push returned no PushInfo"
+    assert all(hasattr(i, "_old_commit_sha") for i in infos)
+    assert all(hasattr(i, "remote_ref_string") for i in infos)
+
+
+def test_npm_target_host_read_cannot_fail_a_publish(audit_env, monkeypatch, tmp_path):
+    """Category D probe member: the npm effect's urlsplit ran after the publish."""
+    from githost_mcp.tools import registry
+
+    ac = AuditCtx("npm_publish", "npm", str(tmp_path), {})
+    bad = "https://[registry.example/"
+    ac.effect(target=lambda: registry.urlsplit(bad).hostname if bad else "x")
+    ac.finish("ok")
+    entry = _entries(audit_env)[-1]
+    assert entry["result"] == "ok"
+    assert entry["effect"]["target"] is None
+    assert "target" in entry["effect_incomplete"]
+
+
+def test_correlation_header_read_failure_is_logged_once(monkeypatch):
+    """F-04: a raising get_http_headers used to drop every id with no log line."""
+    import fastmcp.server.dependencies as deps
+
+    from githost_mcp import correlation
+
+    calls = []
+
+    def raising():
+        raise RuntimeError("api moved")
+
+    monkeypatch.setattr(deps, "get_http_headers", raising)
+    monkeypatch.setattr(correlation, "_header_read_failed_logged", False)
+    monkeypatch.setattr(correlation.log, "warning", lambda event, **kw: calls.append((event, kw)))
+    assert correlation._read_headers() == {}
+    assert correlation._read_headers() == {}
+    assert calls == [("correlation_header_read_failed", {"error_class": "RuntimeError"})]

@@ -14,8 +14,9 @@ guarantee is that only `_PATH_WORDS` members can appear, not that no repo name e
 No token, userinfo or query string can reach a span attribute through it.
 The query string is dropped before templating, and so is the host's userinfo.
 
-Env proxies still work: httpx mounts proxy transports from the environment beside the
-one passed here. A proxied request is simply not traced.
+Env proxies still work: the client is built without a `transport=` argument, so httpx
+mounts its env-proxy transports as usual, and each of them is wrapped too. A proxied
+request is traced like any other.
 """
 
 from __future__ import annotations
@@ -110,11 +111,32 @@ class TracingTransport(httpx.BaseTransport):
         self._inner.close()
 
 
+def _wrap_transports(client: httpx.Client | httpx.AsyncClient, wrap: Any) -> None:
+    """Wrap the client's own transport and every env-proxy mount in a tracing transport.
+
+    Passing `transport=` to httpx turns env proxies off (`allow_env_proxies = trust_env and
+    transport is None`), so the client is built without one and its transports are wrapped
+    afterwards. That keeps HTTP(S)_PROXY / NO_PROXY, and every kwarg (`verify`, `cert`,
+    ...) applies to the inner transports exactly as it would without tracing. `_transport`
+    and `_mounts` are private to httpx (0.27 and 0.28 both have them);
+    test_httptrace.py::test_client_private_transport_attrs_exist fails if they move.
+    """
+    client._transport = wrap(client._transport)  # type: ignore[union-attr]
+    client._mounts = {  # type: ignore[union-attr]
+        pattern: (wrap(transport) if transport is not None else None)
+        for pattern, transport in client._mounts.items()  # type: ignore[union-attr]
+    }
+
+
 def async_client(provider: str, **kwargs: Any) -> httpx.AsyncClient:
     """httpx.AsyncClient(**kwargs) whose requests are traced as `http.<provider>`."""
-    return httpx.AsyncClient(transport=TracingAsyncTransport(provider), **kwargs)
+    client = httpx.AsyncClient(**kwargs)
+    _wrap_transports(client, lambda inner: TracingAsyncTransport(provider, inner))
+    return client
 
 
 def sync_client(provider: str, **kwargs: Any) -> httpx.Client:
     """httpx.Client(**kwargs) whose requests are traced as `http.<provider>`."""
-    return httpx.Client(transport=TracingTransport(provider), **kwargs)
+    client = httpx.Client(**kwargs)
+    _wrap_transports(client, lambda inner: TracingTransport(provider, inner))
+    return client

@@ -136,22 +136,37 @@ def _resolve_sha(repo: git.Repo, abbrev: str | None) -> str | None:
         return abbrev
 
 
-def push_effect_fields(repo: git.Repo, push_info, new_sha: str | None) -> dict:
+def push_effect_fields(
+    repo: git.Repo, push_info, new_sha: str | None, ref: str | None = None
+) -> dict:
     """`created`/`old_sha` and `forced` for a push effect, read from the PushInfo list.
 
     A new branch has no old sha (`created: true`); an up-to-date push did not move the ref
     (old == new). Otherwise the old sha comes from the porcelain line, which GitPython
     keeps abbreviated; it is expanded when the object exists locally.
+
+    With `ref`, only the PushInfo for `refs/heads/<ref>` counts: a tag pushed alongside
+    (push.followTags) would otherwise mark the branch `created` and drop its old sha. If
+    no PushInfo names the ref, every one is used, as before.
     """
+    infos = list(push_info)
+    if ref is not None:
+        wanted = f"refs/heads/{ref}"
+        matching = [i for i in infos if getattr(i, "remote_ref_string", None) == wanted]
+        if matching:
+            infos = matching
     created = forced = up_to_date = False
     old: str | None = None
-    for info in push_info:
+    for info in infos:
         flags = info.flags
         forced = forced or bool(flags & git.remote.PushInfo.FORCED_UPDATE)
         created = created or bool(
             flags & (git.remote.PushInfo.NEW_HEAD | git.remote.PushInfo.NEW_TAG)
         )
         up_to_date = up_to_date or bool(flags & git.remote.PushInfo.UP_TO_DATE)
+        # Private GitPython attribute (git/remote.py PushInfo.__init__): the public
+        # `old_commit` resolves a Commit object and raises when it is not local.
+        # test_effects.py::test_pushinfo_private_old_sha_attr_exists fails if it is renamed.
         old = old or _resolve_sha(repo, getattr(info, "_old_commit_sha", None))
     fields: dict = {"forced": forced}
     if created:
@@ -182,8 +197,15 @@ def commit_effect_fields(commit) -> dict:
 
 
 def url_host(url: str) -> str | None:
-    """The host of a remote URL, never the URL: `https://u:p@host/x` and `git@host:x` → host."""
-    host = urlsplit(url).hostname if "://" in url else url.split("@", 1)[-1].split(":", 1)[0]
+    """The host of a remote URL, never the URL: `https://u:p@host/x` and `git@host:x` → host.
+
+    Total: it runs after a side effect (git_remote add, git_clone), so it must never raise.
+    urlsplit refuses some URLs validate_remote_url accepts (an unbalanced `[`); those are None.
+    """
+    try:
+        host = urlsplit(url).hostname if "://" in url else url.split("@", 1)[-1].split(":", 1)[0]
+    except ValueError:
+        return None
     return host if host and _HOST_RE.fullmatch(host) else None
 
 
@@ -545,8 +567,9 @@ def register(mcp) -> None:
             repo_path = validate_read_path(repo_path)
             repo = _open_repo(repo_path)
             commit = repo.commit(ref)
-            ac.finish("ok")
-            return {
+            # Build the whole result before finish("ok"): commit.stats runs git and can
+            # raise, and a second finish() from the except path would be ignored.
+            result = {
                 "sha": commit.hexsha,
                 "author": f"{commit.author.name} <{commit.author.email}>",
                 "date": commit.authored_datetime.isoformat(),
@@ -557,6 +580,8 @@ def register(mcp) -> None:
                     "deletions": commit.stats.total["deletions"],
                 },
             }
+            ac.finish("ok")
+            return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)
             return {"error": scrub(str(e))}
@@ -1063,7 +1088,7 @@ def register(mcp) -> None:
                 new_sha=pushed_sha,
                 lease=False,
                 flags=decoded,
-                **push_effect_fields(repo, push_info, pushed_sha),
+                **push_effect_fields(repo, push_info, pushed_sha, ref=branch_name),
             )
             ac.finish("ok")
             # pushed_sha is the full sha of the ref that was pushed. A push can
@@ -1406,7 +1431,7 @@ def register(mcp) -> None:
                 ref=branch,
                 old_sha=sha,
                 new_sha=pushed_sha,
-                forced=push_effect_fields(repo, push_info, pushed_sha)["forced"],
+                forced=push_effect_fields(repo, push_info, pushed_sha, ref=branch)["forced"],
                 lease=True,
                 flags=outcome.flags,
             )

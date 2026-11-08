@@ -138,13 +138,23 @@ def register(ctx: Any) -> None:
         scope.open_ctxs.append(ctx)
 
 
+_header_read_failed_logged = False
+
+
 def _read_headers() -> dict[str, str]:
+    global _header_read_failed_logged
     try:
         from fastmcp.server.dependencies import get_http_headers
 
         # Lowercased keys; x-forge-* is not in its default exclude set (Phase 0).
         return {k.lower(): v for k, v in get_http_headers().items()}
-    except Exception:
+    except Exception as e:
+        # Outside a request get_http_headers() returns {} without raising, so this is a
+        # real fault (a FastMCP API change, say). Every entry would silently lose its ids,
+        # so say so, once per process.
+        if not _header_read_failed_logged:
+            _header_read_failed_logged = True
+            log.warning("correlation_header_read_failed", error_class=type(e).__name__)
         return {}
 
 

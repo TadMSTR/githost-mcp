@@ -835,3 +835,19 @@ def test_log_rotation_settings_are_independently_tunable(monkeypatch):
     assert config.audit_log_max_bytes == 2048
     assert config.log_max_bytes == 4096
     assert config.log_backup_count == 9
+
+
+def test_removed_backend_variables_include_set_but_empty_and_the_label_vars(monkeypatch):
+    """CR-05 / CR-16 (round 1): a removed variable set to "" is still named, and the two
+    secondary variables (LOKI_LABELS, NATS_SUBJECT_PREFIX) are recognised too."""
+    for name in ("LOKI_URL", "LOKI_LABELS", "METRICS_PORT", "NATS_URL", "NATS_SUBJECT_PREFIX"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LOKI_URL", "")
+    monkeypatch.setenv("LOKI_LABELS", "app=githost-mcp")
+    monkeypatch.setenv("NATS_SUBJECT_PREFIX", "githost")
+    reset_config()
+    assert sorted(load_config().removed_backend_env) == [
+        "LOKI_LABELS",
+        "LOKI_URL",
+        "NATS_SUBJECT_PREFIX",
+    ]

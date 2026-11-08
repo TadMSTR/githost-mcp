@@ -93,6 +93,25 @@ probe is in the build report.
   stay (part 4 removes them). A process started from the old file keeps `METRICS_PORT` in its
   PM2 env across a plain restart; 0.19.0 ignores it, so this needs no deploy step.
 
+### Fixed (security audit, round 1)
+
+- `git_remote add` no longer reports an error, after creating the remote, for a URL that
+  `urlsplit` refuses (an unbalanced `[`). `url_host` is total, which also covers
+  `git_clone`. The npm effect's registry host read is deferred the same way.
+- `git_show` builds its result before `finish("ok")`, so a failing `commit.stats` read is
+  audited as an error rather than ok.
+- An `OSError` creating the audit directory no longer escapes `finish()` and leaks the
+  tool span.
+- The traced httpx clients keep `HTTP(S)_PROXY` / `NO_PROXY`. Passing `transport=` had
+  turned env proxies off. The client's own transport and every proxy mount are wrapped
+  instead, so proxied requests are traced too, and `verify`/`cert` reach the inner
+  transports.
+- A followed tag (`push.followTags`) no longer marks the pushed branch `created: true`
+  and drops its `old_sha`.
+- A failing correlation-header read logs `correlation_header_read_failed` once, instead of
+  silently dropping every entry's ids.
+- A removed backend variable set to an empty string is still named in the startup warning.
+
 ## [0.18.0] — 2026-11-07
 
 CI diagnostics (githost-scoped-2026-11 part 1). An agent can now find out, with githost-mcp
