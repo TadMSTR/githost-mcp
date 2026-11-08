@@ -886,3 +886,22 @@ def test_push_effect_with_a_matching_ref_has_no_marker(pushed):
         _old_commit_sha = None
 
     assert "ref_matched" not in push_effect_fields(pushed[0], [Info()], "a" * 40, ref="main")
+
+
+def test_github_pr_merge_sends_an_explicitly_empty_body(audit_env):
+    # An empty body is a deliberate choice (it replaces GitHub's concatenated default), so
+    # it is sent and recorded as custom, never dropped by a truthiness check (CR-21).
+    from unittest.mock import MagicMock, patch
+
+    from githost_mcp.tools import github
+
+    pr = MagicMock()
+    pr.merge.return_value = MagicMock(merged=True, sha="e" * 40, message="merged")
+    gh = MagicMock()
+    gh.get_repo.return_value.get_pull.return_value = pr
+    with patch("githost_mcp.tools.github.get_github", return_value=gh):
+        _register(github)["github_pr_merge"]("o/r", 7, merge_method="squash", commit_message="")
+    assert pr.merge.call_args.kwargs["commit_message"] == ""
+    entry = _entries(audit_env)[-1]
+    assert entry["effect"]["custom_body"] is True
+    assert entry["params"]["custom_body"] is True

@@ -753,7 +753,7 @@ def test_ordinary_urls_with_an_at_in_the_path_are_untouched(text):
 @pytest.mark.parametrize(
     ("url", "host"),
     [
-        ("https://gitea.tadmstr.me/org/repo.git", "gitea.tadmstr.me"),
+        ("https://gitea.example.org/org/repo.git", "gitea.example.org"),
         ("ssh://git@github.com:22/o/r.git", "github.com"),
         ("git@github.com:o/r.git", "github.com"),
         ("https://registry.npmjs.org/", "registry.npmjs.org"),

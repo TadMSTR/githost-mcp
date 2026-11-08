@@ -195,10 +195,15 @@ def test_merge_head_shas_empty_without_a_merge(tmp_path):
     assert git_local.merge_head_shas(git.Repo.init(tmp_path / "r")) == []
 
 
+# Stated here, not read from git_local, so dropping a name from _MERGE_STATE_FILES fails
+# this test (CR-23). builtin/commit.c remove_merge_branch_state, plus AUTO_MERGE (2.42+).
+_EXPECTED_MERGE_STATE = ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "MERGE_RR", "AUTO_MERGE")
+
+
 def test_clear_merge_state_removes_every_merge_file(tmp_path):
     repo = git.Repo.init(tmp_path / "r")
-    for name in git_local._MERGE_STATE_FILES:
+    for name in _EXPECTED_MERGE_STATE:
         (tmp_path / "r" / ".git" / name).write_text("x")
     git_local.clear_merge_state(repo)
-    for name in git_local._MERGE_STATE_FILES:
+    for name in _EXPECTED_MERGE_STATE:
         assert not (tmp_path / "r" / ".git" / name).exists()

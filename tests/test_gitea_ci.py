@@ -389,3 +389,22 @@ async def test_commit_status_bounds_and_scrubs_target_url(tools):
         r = await tools["gitea_commit_status"]("testowner/repo", "main")
     url = r["statuses"][0]["target_url"]
     assert "pw88888" not in url and len(url) <= 301
+
+
+@pytest.mark.asyncio
+async def test_commit_status_pages_on_after_a_server_clamped_page(tools):
+    """A server whose page limit is below STATUS_PAGE_SIZE returns a short page while more
+    remain: paging follows X-Total-Count, not the page length (CR-22)."""
+    page1 = _status_page([(f"ci/{i}", "success") for i in range(20)], "success")
+    page2 = _status_page([("ci/late", "failure")], "failure")
+    with respx.mock:
+        route = respx.get(url__startswith=f"{API}/commits/main/status").mock(
+            side_effect=[
+                httpx.Response(200, json=page1, headers={"X-Total-Count": "21"}),
+                httpx.Response(200, json=page2, headers={"X-Total-Count": "21"}),
+            ]
+        )
+        r = await tools["gitea_commit_status"]("testowner/repo", "main")
+    assert r["state"] == "failure"
+    assert len(r["statuses"]) == 21
+    assert [c.request.url.params["page"] for c in route.calls] == ["1", "2"]

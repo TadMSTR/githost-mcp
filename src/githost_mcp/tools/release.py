@@ -305,7 +305,10 @@ async def _rollback(
             log.info("rollback_deleted_github_release", tag=tag)
         except Exception as exc:
             log.warning(
-                "rollback_github_release_failed", tag=tag, url=urls.get("github"), error=str(exc)
+                "rollback_github_release_failed",
+                tag=tag,
+                url=urls.get("github"),
+                error=scrub(str(exc)),
             )
 
     if "gitlab" in created and gitlab_project:
@@ -318,7 +321,10 @@ async def _rollback(
             log.info("rollback_deleted_gitlab_release", tag=tag)
         except Exception as exc:
             log.warning(
-                "rollback_gitlab_release_failed", tag=tag, url=urls.get("gitlab"), error=str(exc)
+                "rollback_gitlab_release_failed",
+                tag=tag,
+                url=urls.get("gitlab"),
+                error=scrub(str(exc)),
             )
 
     if "gitea" in created and gitea_repo:

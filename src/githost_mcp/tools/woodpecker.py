@@ -96,7 +96,7 @@ def _check_response(resp: httpx.Response) -> None:
         # made #269 expensive: woodpecker_trigger returned "API error 400" for its
         # entire life with no hint that the request form was wrong. Bounded and
         # scrubbed — the body can echo back a credential-bearing URL (SC-14).
-        detail = scrub(resp.text[:300]).strip()
+        detail = scrub(resp.text)[:300].strip()
         raise ValueError(
             f"Woodpecker API error {resp.status_code}" + (f": {detail}" if detail else "")
         )
@@ -108,7 +108,7 @@ def _check_response(resp: httpx.Response) -> None:
         # SPA fallback serves the frontend index. That HTML then fails json() with an
         # opaque JSONDecodeError that reads like a data problem, not a routing one
         # (vikunja #478). Name the actual cause here instead.
-        detail = scrub(resp.text[:300]).strip()
+        detail = scrub(resp.text)[:300].strip()
         raise ValueError(
             f"Woodpecker returned non-JSON content-type '{content_type or 'unknown'}' for "
             f"{resp.request.method} {resp.request.url} (status {resp.status_code})"

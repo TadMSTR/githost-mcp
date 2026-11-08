@@ -804,7 +804,12 @@ repository code received githost's whole environment, every forge token included
 credential its child needs (`TWINE_PASSWORD`, `NPM_TOKEN`). Tests run a real
 `python -m build` and a real `npm pack` with code that writes the environment it got.
 GitPython's own git children, and repository hooks, still get the full environment
-(vikunja#1446).
+(vikunja#1446). The allowlist keeps the environment out of a child's inherited variables;
+it does not isolate the child. Build code runs as githost's own user, so it can still read
+the parent process's environment from `/proc` and files under `HOME`. That residual closes
+only with per-agent users (vikunja#1193). The allowlist also drops proxy and CA variables
+(`HTTPS_PROXY`, `SSL_CERT_FILE` and similar); a host that needs them for publishing does
+not get them in the child.
 
 Each provider has its own env vars — a compromised GitHub token does not expose Gitea or GitLab credentials.
 

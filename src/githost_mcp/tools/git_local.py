@@ -395,7 +395,7 @@ def _lookup_visibility(full_names: list[str]) -> tuple[list[str], list[str]]:
                 gh = gh or get_github()
                 value = getattr(github_call(gh.get_repo, full_name), "private", None)
             except Exception as e:
-                log.warning("visibility_lookup_failed", repo=full_name, error=str(e))
+                log.warning("visibility_lookup_failed", repo=full_name, error=scrub(str(e)))
                 value = None
             _remember_visibility(full_name, value)
             private = value if isinstance(value, bool) else None
