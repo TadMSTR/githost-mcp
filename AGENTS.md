@@ -1,6 +1,6 @@
 # githost-mcp
 
-FastMCP server providing 74 tools across local git, GitHub, Gitea, GitLab, Woodpecker CI, release orchestration, registry publishing, and audit log queries. PR/MR review, CI control, and issues are exposed as method-dispatch tools (one tool, a `method` argument, per-operation audit).
+FastMCP server providing 79 tools across local git, GitHub, Gitea, GitLab, Woodpecker CI, release orchestration, registry publishing, and audit log queries. PR/MR review, CI control, and issues are exposed as method-dispatch tools (one tool, a `method` argument, per-operation audit).
 
 ## Structure
 
@@ -19,12 +19,13 @@ src/githost_mcp/
                              release CRUD, issues (method-dispatch)
     release.py               Coordinated release tool: tag + publish in one operation
     registry.py              npm_publish, pypi_publish via subprocess
-    woodpecker.py            Pipeline list/status/logs/trigger/cancel
+    woodpecker.py            Pipeline list/status/logs/config/queue/trigger/restart/cancel
     audit_query.py           Query the structured JSONL audit log
   _providers/
     github_client.py         PyGitHub wrapper
     gitea_client.py          httpx Gitea API client
     gitlab_client.py         httpx GitLab API client
+  logview.py                 Bounded, scrubbed CI log view (tail/head/range, literal grep)
   bootstrap.py               git_clone / *_repo_create guards: names, ownership,
                              computed clone URL and destination, timed clone
   audit.py                   JSONL audit logging — every tool call recorded
@@ -77,7 +78,7 @@ pyproject.toml
 
 - **`ALLOWED_REPO_ROOTS` is a security control** — write operations (commit, push, merge, publish) check the repo path against this allowlist before executing. Do not bypass this check or widen the matching logic. If unset (or empty), `config.py` falls back to reading `git_backed: true` entries from the agent's manifest at `AGENT_MANIFEST_PATH` — the explicit env var always wins when set.
 - **Every tool call is audit-logged** — `audit.py` writes a JSONL record with agent_id, tool name, args, and outcome for every invocation. `audit_query` lets agents review their own call history.
-- **`woodpecker_get_logs` content is excluded from audit** — log output can be large and may contain sensitive values. Only the call metadata (pipeline_id, step_name) is recorded; the log text itself is not.
+- **`woodpecker_get_logs` content is excluded from audit** — log output can be large and may contain sensitive values. Only the call metadata (repo, pipeline_id, step_name, workflow, mode, whether `grep` was given; `file` for `woodpecker_pipeline_config`) is recorded; the log text and the grep string are not. The same holds for `gitea_actions`/`github_actions` `get_job_log`.
 - **Registry publishing uses subprocess** — `npm_publish` and `pypi_publish` shell out rather than using library APIs. This keeps credentials out of the server process and delegates to the standard toolchains.
 - **Per-agent processes, not a shared process (Option A)** — `TRANSPORT=http` runs one PM2
   service per agent (`ecosystem.config.js`), each with its own `AGENT_ID`, tokens, and

@@ -644,3 +644,12 @@ def test_gitlab_issue_write_create_requires_title(tools):
         result = tools["gitlab_issue_write"]("owner/project", "create")
     assert "error" in result
     assert "title is required" in result["error"]
+
+
+def test_project_with_trailing_newline_refused():
+    """KB IV-70: `$` under re.match let "group/proj\\n" through."""
+    from githost_mcp.tools.gitlab import _bad_project
+
+    assert _bad_project("group/proj") is None
+    assert _bad_project("group/proj\n") is not None
+    assert _bad_project("12\n") is not None

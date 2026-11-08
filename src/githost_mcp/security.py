@@ -34,6 +34,7 @@ __all__ = [
     "scrub",
     "validate_branch_name",
     "validate_read_path",
+    "validate_ref",
     "validate_remote_name",
     "validate_remote_url",
     "validate_write_globs",
@@ -234,11 +235,11 @@ _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 # from git's remote-helper syntax: `ext::sh -c '…'` is otherwise shaped exactly like
 # host:path, and would match here and be stored as a remote that runs a shell
 # command on the next fetch.
-_SCP_RE = re.compile(r"^(?P<userinfo>[^/@]+@)?[^/@:]+:(?![/:]).+$")
+_SCP_RE = re.compile(r"\A(?P<userinfo>[^/@]+@)?[^/@:]+:(?![/:]).+\Z")
 _WHITESPACE_RE = re.compile(r"\s")
 # A leading '-' makes git parse the value as an option rather than a name/URL.
 _LEADING_DASH_ERR = "must not start with '-'"
-_REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+_REMOTE_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 
 
 def validate_remote_name(name: str) -> None:
@@ -295,6 +296,29 @@ def validate_branch_name(name: str) -> None:
     if name.startswith("/") or "//" in name:
         raise BranchNameInvalid(
             f"Invalid branch name '{name}': must not start with '/' or contain '//'"
+        )
+
+
+# A commit ref for the CI status reads: a SHA, or a branch/tag name. It lands in a URL path
+# (Gitea, via httpx, which resolves dot segments) or in PyGithub's, so `..`, a leading `-`
+# and anything outside the characters forge's branch and tag names use are refused.
+# SECURITY[deferred]: stricter than git (refuses a leading `_` and `#`); fails closed.
+# Widening tracked in vikunja#1429.
+# Audit: 2026-11-08/githost-scoped-2026-11-p1-ci-diagnostics (CR-11).
+_REF_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/+-]*\Z")
+_REF_MAX = 255
+
+
+def validate_ref(ref: str) -> None:
+    """Raise InvalidArgument unless `ref` is a SHA or a plain branch/tag name."""
+    if not ref or len(ref) > _REF_MAX:
+        raise InvalidArgument(f"ref must be 1-{_REF_MAX} characters")
+    if ref.startswith("-"):
+        raise InvalidArgument(f"ref {_LEADING_DASH_ERR}")
+    if ".." in ref or not _REF_RE.match(ref) or ref.endswith("/") or "//" in ref:
+        raise InvalidArgument(
+            "ref must be a SHA or a branch/tag name (letters, digits, '.', '_', '/', '+', "
+            "'-'; no '..', no leading '-', no empty path segment)"
         )
 
 

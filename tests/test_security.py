@@ -574,3 +574,16 @@ def test_validate_branch_name_rejects_leading_dash():
 def test_validate_branch_name_rejects_unsafe_shapes(name):
     with pytest.raises(ValueError):
         validate_branch_name(name)
+
+
+def test_validators_refuse_a_trailing_newline():
+    """`$` matches before a final newline under re.match (KB IV-70); every validator uses \\Z."""
+    from githost_mcp.errors import InvalidArgument, RemoteNameInvalid
+    from githost_mcp.security import validate_ref
+
+    with pytest.raises(RemoteNameInvalid):
+        validate_remote_name("origin\n")
+    with pytest.raises(InvalidArgument):
+        validate_ref("main\n")
+    with pytest.raises(RemoteUrlRejected):
+        validate_remote_url("git@github.com:o/r.git\n")

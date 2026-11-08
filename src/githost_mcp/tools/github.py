@@ -7,7 +7,8 @@ from itertools import islice
 
 import structlog
 
-from .._providers.github_client import get_github, github_call
+from .. import logview
+from .._providers.github_client import fetch_job_log, get_github, github_call
 from ..audit import AuditCtx, audit_rejection, reject_enum
 from ..bootstrap import (
     VISIBILITIES,
@@ -17,7 +18,7 @@ from ..bootstrap import (
     validate_description,
 )
 from ..errors import AlreadyExists, InvalidArgument, MissingArgument
-from ..security import mask_credentials, scrub, validate_branch_name
+from ..security import mask_credentials, scrub, validate_branch_name, validate_ref
 
 log = structlog.get_logger(__name__)
 
@@ -28,17 +29,40 @@ log = structlog.get_logger(__name__)
 # so it is safe on an empty list, and unlike totalCount it costs no extra API call.
 
 # GitHub full names are always exactly 'owner/repo' (one slash, no numeric-ID form).
-_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+# `\Z`, not `$`: `$` also matches before a trailing newline, so `re.match` accepted
+# "owner/repo\n" (KB IV-70). The lookaheads refuse a `.` or `..` segment: the segments go
+# into URL paths, and httpx resolves dot segments, so "../.." retargeted the request
+# (KB IV-23; githost-scoped-2026-11 p1 pre-audit).
+_REPO_RE = re.compile(r"\A(?!\.\.?/)[a-zA-Z0-9_.-]+/(?!\.\.?\Z)[a-zA-Z0-9_.-]+\Z")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
 
 # A single owner/org segment — github_fork takes owner and repo separately, and the
 # org it forks into is a bare name with no slash.
-_OWNER_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
+_OWNER_RE = re.compile(r"\A(?!\.\.?\Z)[a-zA-Z0-9_.-]+\Z")
 _OWNER_FMT_ERR = "org must be a single name (alphanumeric, hyphens, underscores, dots)"
 
 
 def _err(e: Exception) -> dict:
     return {"error": scrub(str(e))}
+
+
+_TEXT_MAX = 300
+# Annotations are GitHub's readable failure text (one line per failed assertion when the
+# test step emits them). Bounded per call, per the p1 plan's Configuration caps.
+_MAX_ANNOTATIONS = 50
+_MAX_CHECK_RUNS = 100
+_FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required", "startup_failure"})
+
+
+def _bounded_text(text) -> str | None:
+    if text is None:
+        return None
+    shown = scrub(str(text))
+    return shown if len(shown) <= _TEXT_MAX else shown[:_TEXT_MAX] + "…"
+
+
+def _iso(dt) -> str | None:
+    return dt.isoformat() if dt is not None else None
 
 
 def _bad_repo(repo: str) -> dict | None:
@@ -753,8 +777,15 @@ def register(mcp) -> None:
         ref: str | None = None,
         run_id: int | None = None,
         inputs: dict | None = None,
+        job_id: int | None = None,
+        mode: str = "tail",
+        offset: int = 0,
+        log_limit: int = logview.MAX_LINES,
+        grep: str | None = None,
+        ignore_case: bool = False,
+        context: int = 0,
     ) -> dict:
-        """Control GitHub Actions workflow runs (method-dispatch).
+        """Control and read GitHub Actions workflow runs (method-dispatch).
 
         Methods:
           - run_workflow: trigger a workflow_dispatch. Requires `workflow` (id or file
@@ -763,8 +794,14 @@ def register(mcp) -> None:
           - rerun_failed_jobs: re-run only the failed jobs of a run. Requires `run_id`.
           - cancel_run: cancel an in-progress run. Requires `run_id`.
           - get_run_logs: return the job breakdown for a run (name/status/conclusion/url).
-            GitHub's raw logs are a downloadable zip archive, not inline text — this
-            returns the per-job status view instead. Requires `run_id`.
+            A whole run's logs only come as a zip archive; for the text of one job, use
+            get_job_log. Requires `run_id`.
+          - list_jobs: jobs of a run with their steps (number, name, status,
+            conclusion). Requires `run_id`.
+          - get_job_log: a bounded, scrubbed view of one job's plain-text log (at most
+            500 lines and about 64 KB). Requires `job_id` (from list_jobs). Default
+            `mode` is `tail`, where a failure is; page with `mode='range'`. Scrubbed of
+            githost-mcp's own tokens and URL userinfo only; other secrets may remain.
 
         Read-only workflow listing/status stays in github_workflow_list /
         github_workflow_status. DESTRUCTIVE methods (run_workflow, rerun_workflow,
@@ -774,12 +811,19 @@ def register(mcp) -> None:
         Args:
             repo: Repository in 'owner/repo' format.
             method: run_workflow | rerun_workflow | rerun_failed_jobs | cancel_run |
-                get_run_logs.
+                get_run_logs | list_jobs | get_job_log.
             workflow: Workflow id or file name (run_workflow).
             ref: Branch or tag to run against (run_workflow).
             run_id: Workflow run ID (rerun_workflow, rerun_failed_jobs, cancel_run,
-                get_run_logs).
+                get_run_logs, list_jobs).
             inputs: Optional workflow_dispatch inputs mapping (run_workflow).
+            job_id: Job ID (get_job_log).
+            mode: get_job_log view — tail | head | range (default tail).
+            offset: get_job_log first line for `range` (0-based).
+            log_limit: get_job_log max lines (and `range` window). Capped at 500.
+            grep: get_job_log literal substring (not a regex), at most 200 characters.
+            ignore_case: get_job_log case-insensitive `grep`.
+            context: get_job_log lines of context either side of a `grep` hit (0-20).
         """
         if err := _bad_repo(repo):
             return audit_rejection("github_actions", "github", repo, "bad_repo_format", err)
@@ -789,6 +833,8 @@ def register(mcp) -> None:
             "rerun_failed_jobs",
             "cancel_run",
             "get_run_logs",
+            "list_jobs",
+            "get_job_log",
         }
         if method not in valid:
             return reject_enum(
@@ -800,8 +846,38 @@ def register(mcp) -> None:
                 valid,
                 hint=_HINT_GITHUB_ACTIONS,
             )
-        ac = AuditCtx("github_actions", "github", repo, {"repo": repo, "method": method})
+        params: dict = {"repo": repo, "method": method}
+        if method == "get_job_log":
+            try:
+                logview.validate_view(mode, offset, log_limit, grep, context)
+                if job_id is not None and job_id < 1:
+                    raise InvalidArgument("job_id must be >= 1")
+            except InvalidArgument as e:
+                return audit_rejection("github_actions", "github", repo, "invalid_argument", str(e))
+            # Log text and the grep string never reach the audit trail; only the view shape.
+            params |= {"job_id": job_id, "mode": mode, "grep": grep is not None}
+        ac = AuditCtx("github_actions", "github", repo, params)
         try:
+            if method == "get_job_log":
+                # Plain httpx, not PyGithub: the redirect to the blob host must be checked
+                # and fetched without the token (github_client.fetch_job_log).
+                if job_id is None:
+                    raise MissingArgument("job_id is required for get_job_log")
+                text, cut = fetch_job_log(repo, job_id)
+                result = logview.view(
+                    logview.split_text(text),
+                    mode=mode,
+                    offset=offset,
+                    limit=log_limit,
+                    grep=grep,
+                    ignore_case=ignore_case,
+                    context=context,
+                )
+                if cut:
+                    result["download_cut"] = True
+                ac.finish("ok")
+                return {"repo": repo, "job_id": job_id} | result
+
             gh = get_github()
             gh_repo = github_call(gh.get_repo, repo)
 
@@ -833,6 +909,31 @@ def register(mcp) -> None:
                 ac.finish("ok")
                 return {"repo": repo, "run_id": run_id, "cancelled": True}
 
+            if method == "list_jobs":
+                jobs = [
+                    {
+                        "id": j.id,
+                        "name": j.name,
+                        "status": j.status,
+                        "conclusion": j.conclusion,
+                        "started_at": _iso(j.started_at),
+                        "completed_at": _iso(j.completed_at),
+                        "url": j.html_url,
+                        "steps": [
+                            {
+                                "number": st.number,
+                                "name": st.name,
+                                "status": st.status,
+                                "conclusion": st.conclusion,
+                            }
+                            for st in (j.steps or [])
+                        ],
+                    }
+                    for j in github_call(run.jobs)
+                ]
+                ac.finish("ok")
+                return {"repo": repo, "run_id": run_id, "jobs": jobs}
+
             # get_run_logs
             jobs = [
                 {
@@ -849,8 +950,115 @@ def register(mcp) -> None:
                 "repo": repo,
                 "run_id": run_id,
                 "jobs": jobs,
-                "note": "GitHub Actions raw logs are a zip archive; use each job's url to view.",
+                "note": "A run's logs are a zip archive; read one job's text with get_job_log.",
             }
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return _err(e)
+
+    @mcp.tool
+    def github_commit_checks(repo: str, ref: str, annotations: bool = False) -> dict:
+        """Did CI pass on this commit? Combined status plus check runs for a SHA or branch.
+
+        GitHub Actions reports through check runs; other CI may report a commit status.
+        Both are returned. A combined `state` of `pending` with no `statuses` only means
+        no commit status was posted, not that anything is running.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            ref: Commit SHA, branch or tag.
+            annotations: Also return up to 50 annotations from failed check runs (path,
+                line, level, message) — on GitHub these are the readable failure text.
+        """
+        if err := _bad_repo(repo):
+            return audit_rejection("github_commit_checks", "github", repo, "bad_repo_format", err)
+        try:
+            validate_ref(ref)
+        except InvalidArgument as e:
+            return audit_rejection(
+                "github_commit_checks", "github", repo, "invalid_argument", str(e)
+            )
+        ac = AuditCtx(
+            "github_commit_checks",
+            "github",
+            repo,
+            {"repo": repo, "ref": ref, "annotations": annotations},
+        )
+        try:
+            gh = get_github()
+            gh_repo = github_call(gh.get_repo, repo)
+            commit = github_call(gh_repo.get_commit, ref)
+            combined = github_call(commit.get_combined_status)
+            statuses = [
+                {
+                    "context": st.context,
+                    "state": st.state,
+                    "description": _bounded_text(st.description),
+                    "target_url": st.target_url,
+                    "updated_at": _iso(st.updated_at),
+                }
+                for st in (combined.statuses or [])
+            ]
+            runs = list(islice(github_call(commit.get_check_runs), _MAX_CHECK_RUNS + 1))
+            runs_cut = len(runs) > _MAX_CHECK_RUNS
+            runs = runs[:_MAX_CHECK_RUNS]
+            check_runs = [
+                {
+                    "id": cr.id,
+                    "name": cr.name,
+                    "status": cr.status,
+                    "conclusion": cr.conclusion,
+                    "started_at": _iso(cr.started_at),
+                    "completed_at": _iso(cr.completed_at),
+                    "url": cr.html_url,
+                }
+                for cr in runs
+            ]
+            result: dict = {
+                "repo": repo,
+                "ref": ref,
+                "sha": commit.sha,
+                "state": combined.state,
+                "statuses": statuses,
+                # `statuses` is GitHub's first page only; `state` covers every context
+                # (CodeRabbit CR-13, PR #34).
+                "statuses_truncated": (combined.total_count or 0) > len(statuses),
+                "check_runs": check_runs,
+                "check_runs_truncated": runs_cut,
+            }
+            if annotations:
+                found: list[dict] = []
+                more = False
+                # PyGithub fetches later annotation pages lazily, outside github_call, so a
+                # rate limit here must not discard the status answer already built
+                # (audit F-06).
+                try:
+                    for cr in runs:
+                        if cr.conclusion not in _FAILED_CONCLUSIONS:
+                            continue
+                        for a in github_call(cr.get_annotations):
+                            if len(found) >= _MAX_ANNOTATIONS:
+                                more = True
+                                break
+                            found.append(
+                                {
+                                    "check_run": cr.name,
+                                    "path": a.path,
+                                    "start_line": a.start_line,
+                                    "level": a.annotation_level,
+                                    "message": _bounded_text(a.message),
+                                }
+                            )
+                        if more:
+                            break
+                except Exception as e:
+                    result["annotations_error"] = _err(e)["error"]
+                result["annotations"] = found
+                # Check runs past _MAX_CHECK_RUNS were never inspected, so their
+                # annotations are missing too (CodeRabbit CR-14, PR #34).
+                result["annotations_truncated"] = more or runs_cut
+            ac.finish("ok")
+            return result
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)

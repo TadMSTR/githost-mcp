@@ -8,6 +8,7 @@ import httpx
 import structlog
 
 from ..config import get_config
+from ..logview import aread_capped, decode_capped, decoded_headers
 
 log = structlog.get_logger(__name__)
 
@@ -104,6 +105,30 @@ async def gitea_get_text(path: str) -> str:
             resp = await client.get(f"{_gitea_base()}{path}", headers=_get_gitea_headers())
             _check_gitea_response(resp)
             return resp.text
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Gitea request failed: {type(e).__name__}") from None
+
+
+async def gitea_get_text_capped(path: str) -> tuple[str, bool]:
+    """GET a text/plain endpoint, reading at most logview.DOWNLOAD_MAX bytes.
+
+    Returns (text, cut). For CI job logs, which have no size bound of their own (KB IV-14);
+    the read stops at the cap instead of draining the body (KB IV-72).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async with client.stream(
+                "GET", f"{_gitea_base()}{path}", headers=_get_gitea_headers()
+            ) as resp:
+                data, cut = await aread_capped(resp.aiter_bytes())
+            _check_gitea_response(
+                httpx.Response(
+                    resp.status_code, headers=decoded_headers(resp.headers), content=data[:4096]
+                )
+            )
+            return decode_capped(data, cut), cut
     except ValueError:
         raise
     except Exception as e:

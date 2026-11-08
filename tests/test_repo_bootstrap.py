@@ -716,7 +716,9 @@ def test_github_repo_get_refuses_dot_segments_before_any_call(gh_tools, repo):
         result = gh_tools["github_repo_get"](repo)
     assert "error" in result
     gh.get_repo.assert_not_called()
-    assert _entries()[-1]["result"] == "denied:invalid_argument"
+    # Since 0.18.0 the shared repo-format check refuses a dot segment itself (KB IV-23), one
+    # step before bootstrap's segment check, so the record says bad_repo_format.
+    assert _entries()[-1]["result"] == "denied:bad_repo_format"
 
 
 def _checkout_with_origin(path, url):

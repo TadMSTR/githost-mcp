@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
 
 import structlog
 
+from .. import logview
 from .._providers.gitea_client import (
     gitea_delete,
     gitea_get,
     gitea_get_optional,
     gitea_get_text,
+    gitea_get_text_capped,
     gitea_patch,
     gitea_post,
     gitea_post_void,
@@ -25,7 +28,7 @@ from ..bootstrap import (
 )
 from ..config import get_config
 from ..errors import AlreadyExists, InvalidArgument, MissingArgument
-from ..security import scrub
+from ..security import scrub, validate_ref
 
 
 def _err(e: Exception) -> dict:
@@ -38,7 +41,11 @@ def _err(e: Exception) -> dict:
     return {"error": scrub(str(e))}
 
 
-_REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+# `\Z`, not `$`: `$` also matches before a trailing newline, so `re.match` accepted
+# "owner/repo\n" (KB IV-70). The lookaheads refuse a `.` or `..` segment: the segments go
+# into URL paths, and httpx resolves dot segments, so "../.." retargeted the request
+# (KB IV-23; githost-scoped-2026-11 p1 pre-audit).
+_REPO_RE = re.compile(r"\A(?!\.\.?/)[a-zA-Z0-9_.-]+/(?!\.\.?\Z)[a-zA-Z0-9_.-]+\Z")
 _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, underscores, dots)"
 
 # String path segments (tag names, workflow file names) are interpolated into Gitea API
@@ -46,8 +53,8 @@ _REPO_FMT_ERR = "repo must be in 'owner/repo' format (alphanumeric, hyphens, und
 # python-gitlab (those URL-encode segments). Validate before use so an unvalidated value
 # can't traverse the path or inject a query string (IV-01). Tags may contain slashes;
 # workflow file names may not. `..` is rejected outright.
-_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
-_WORKFLOW_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_TAG_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+_WORKFLOW_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 def _bad_tag(tag: str) -> dict | None:
@@ -57,6 +64,15 @@ def _bad_tag(tag: str) -> dict | None:
 
 
 log = structlog.get_logger(__name__)
+
+_TEXT_MAX = 300
+
+
+def _bounded_text(text: str | None) -> str | None:
+    if text is None:
+        return None
+    shown = scrub(str(text))
+    return shown if len(shown) <= _TEXT_MAX else shown[:_TEXT_MAX] + "…"
 
 
 # Where a read-shaped request lands on a write-dispatch tool, the rejection names the
@@ -531,6 +547,12 @@ def register(mcp) -> None:
         inputs: dict | None = None,
         job_id: int | None = None,
         limit: int = 20,
+        mode: str = "tail",
+        offset: int = 0,
+        log_limit: int = logview.MAX_LINES,
+        grep: str | None = None,
+        ignore_case: bool = False,
+        context: int = 0,
     ) -> dict:
         """Control Gitea Actions workflow runs (method-dispatch).
 
@@ -538,7 +560,10 @@ def register(mcp) -> None:
           - list_runs: list recent action runs (id, status, conclusion, event, branch).
           - get_run: get a single run by id. Requires `run_id`.
           - list_jobs: list jobs for a run (id, name, status, conclusion). Requires `run_id`.
-          - get_job_log: return the raw text log for a job. Requires `job_id`.
+          - get_job_log: a bounded, scrubbed view of a job's log (at most 500 lines and
+            about 64 KB). Requires `job_id`. Default `mode` is `tail`, where a failure is;
+            page with `mode='range'` using `returned_to`. Scrubbed of githost-mcp's own
+            tokens and URL userinfo only; other secrets in the log may remain.
           - dispatch_workflow: trigger a workflow_dispatch. Requires `workflow` (file name,
             e.g. 'ci.yml') and `ref`; optional `inputs` dict.
           - rerun_run: re-run all jobs of a run. Requires `run_id`.
@@ -559,6 +584,12 @@ def register(mcp) -> None:
             inputs: Optional workflow_dispatch inputs mapping (dispatch_workflow).
             job_id: Action job ID (get_job_log).
             limit: Max runs to return for list_runs (default 20, max 100).
+            mode: get_job_log view — tail | head | range (default tail).
+            offset: get_job_log first line for `range` (0-based).
+            log_limit: get_job_log max lines (and `range` window). Capped at 500.
+            grep: get_job_log literal substring (not a regex), at most 200 characters.
+            ignore_case: get_job_log case-insensitive `grep`.
+            context: get_job_log lines of context either side of a `grep` hit (0-20).
         """
         if not _REPO_RE.match(repo):
             return audit_rejection("gitea_actions", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR)
@@ -584,7 +615,15 @@ def register(mcp) -> None:
         owner = repo.split("/")[0] if "/" in repo else config.gitea_owner
         repo_name = repo.split("/")[-1]
         base = f"/repos/{owner}/{repo_name}/actions"
-        ac = AuditCtx("gitea_actions", "gitea", repo, {"repo": repo, "method": method})
+        params: dict = {"repo": repo, "method": method}
+        if method == "get_job_log":
+            try:
+                logview.validate_view(mode, offset, log_limit, grep, context)
+            except InvalidArgument as e:
+                return audit_rejection("gitea_actions", "gitea", repo, "invalid_argument", str(e))
+            # Log text and the grep string never reach the audit trail; only the view shape.
+            params |= {"job_id": job_id, "mode": mode, "grep": grep is not None}
+        ac = AuditCtx("gitea_actions", "gitea", repo, params)
         try:
             if method == "list_runs":
                 limit = min(limit, 100)
@@ -646,9 +685,20 @@ def register(mcp) -> None:
             if method == "get_job_log":
                 if job_id is None:
                     raise MissingArgument("job_id is required for get_job_log")
-                text = await gitea_get_text(f"{base}/jobs/{job_id}/logs")
+                text, cut = await gitea_get_text_capped(f"{base}/jobs/{job_id}/logs")
+                result = logview.view(
+                    logview.split_text(text),
+                    mode=mode,
+                    offset=offset,
+                    limit=log_limit,
+                    grep=grep,
+                    ignore_case=ignore_case,
+                    context=context,
+                )
+                if cut:
+                    result["download_cut"] = True
                 ac.finish("ok")
-                return {"repo": repo, "job_id": job_id, "log": text}
+                return {"repo": repo, "job_id": job_id} | result
 
             if method == "dispatch_workflow":
                 if not workflow or not ref:
@@ -669,6 +719,62 @@ def register(mcp) -> None:
             await gitea_post_void(f"{base}/runs/{run_id}/{suffix}", {})
             ac.finish("ok")
             return {"repo": repo, "run_id": run_id, method: True}
+        except Exception as e:
+            ac.finish(f"error:{type(e).__name__}", e)
+            return _err(e)
+
+    @mcp.tool
+    async def gitea_commit_status(repo: str, ref: str) -> dict:
+        """Did CI pass on this commit? Gitea's combined commit status for a SHA or branch.
+
+        Woodpecker posts its result to Gitea as a commit status, so this is the
+        host-neutral answer for any Gitea repo, whichever CI ran.
+
+        Args:
+            repo: Repository in 'owner/repo' format.
+            ref: Commit SHA, branch or tag.
+        """
+        if not _REPO_RE.match(repo):
+            return audit_rejection(
+                "gitea_commit_status", "gitea", repo, "bad_repo_format", _REPO_FMT_ERR
+            )
+        try:
+            validate_ref(ref)
+        except InvalidArgument as e:
+            return audit_rejection("gitea_commit_status", "gitea", repo, "invalid_argument", str(e))
+        ac = AuditCtx("gitea_commit_status", "gitea", repo, {"repo": repo, "ref": ref})
+        try:
+            owner, name = repo.split("/", 1)
+            # Encoded as one segment: a branch like feature/x is accepted either way
+            # (checked live), and an encoded slash cannot add a path segment.
+            # SECURITY[deferred]: whether Gitea computes `state` over every context or one
+            # page is unverified (vikunja#1430).
+            # Audit: 2026-11-08/githost-scoped-2026-11-p1-ci-diagnostics (CR-12).
+            data = await gitea_get(f"/repos/{owner}/{name}/commits/{quote(ref, safe='')}/status")
+            if not isinstance(data, dict):
+                raise ValueError("Unexpected Gitea commit status response shape")
+            statuses = data.get("statuses") or []
+            ac.finish("ok")
+            return {
+                "repo": repo,
+                "ref": ref,
+                "sha": data.get("sha"),
+                "state": data.get("state"),
+                "total_count": data.get("total_count"),
+                "statuses": [
+                    {
+                        "context": st.get("context"),
+                        # Gitea names the per-context field `status`; `state` is accepted
+                        # for the GitHub-compatible shape.
+                        "state": st.get("status") or st.get("state"),
+                        "description": _bounded_text(st.get("description")),
+                        "target_url": st.get("target_url"),
+                        "updated_at": st.get("updated_at"),
+                    }
+                    for st in statuses
+                    if isinstance(st, dict)
+                ],
+            }
         except Exception as e:
             ac.finish(f"error:{type(e).__name__}", e)
             return _err(e)

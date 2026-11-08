@@ -1,5 +1,95 @@
 # Changelog
 
+## [0.18.0] — 2026-11-07
+
+CI diagnostics (githost-scoped-2026-11 part 1). An agent can now find out, with githost-mcp
+tools alone, why a CI run failed or stalled on Woodpecker, Gitea Actions or GitHub Actions.
+Before this, `woodpecker_get_logs` kept the **first** 500 lines of a step, so the failure at
+the end was never reached, and `woodpecker_status` returned the wrong pipeline handle.
+Closes #1425 (id 1508); the githost half of #1389 (id 1472).
+
+### Added
+
+- **`logview.py`: one bounded, scrubbed log reader** for every CI log tool. `tail`/`head`/
+  `range` modes, a literal-substring `grep` (never a regex; at most 200 characters, no
+  control characters) with `ignore_case` and 0–20 lines of `context`. At most 500 lines
+  and about 64 KB per response, with `total_lines`, `returned_from`, `returned_to` and
+  `truncated` for paging. Carriage-return progress redraws collapse to the last one. Every
+  line goes through `scrub()` (githost-mcp's own tokens and URL userinfo only; other
+  credentials in a log pass through), and grep matches on the scrubbed text. Log text and the grep string
+  never reach the audit trail or the app log.
+- **`woodpecker_restart`** (write): re-runs a pipeline with its original event, so a
+  push-only failure reproduces. `woodpecker_trigger` makes a `manual` run. No event or
+  deploy-target override is exposed.
+- **`woodpecker_pipeline_config`**: the compiled config files a run used, through the reader.
+- **`woodpecker_queue_info`**: running and pending queue items (repo id, pipeline number,
+  workflow, agent, age; never labels or environment). Needs an admin Woodpecker token.
+- **`github_actions` `list_jobs` and `get_job_log`**. `get_job_log` reads one job's
+  plain-text log. The redirect to GitHub's signed blob URL is not followed automatically:
+  its host must match an allowlist of Actions log hosts, and the second request carries no
+  `Authorization` header. The download is capped at 32 MB. httpx's own request log line
+  (which reaches the app log and Loki) has the blob URL's signed query replaced.
+- **`gitea_commit_status`** and **`github_commit_checks`**: "did CI pass on this SHA".
+  Woodpecker reports to Gitea as a commit status. `github_commit_checks` returns check runs
+  and, with `annotations=True`, up to 50 annotations from failed runs.
+
+### Changed
+
+- **`woodpecker_status`** returns the per-repo number as `pipeline_id` and the global id as
+  `internal_id`. It used to return the global id as `id`, and agents fed that into
+  `get_logs`/`cancel` and got 404s. It also adds `event`, `ref`, `commit`, a bounded
+  `message`, `errors[]`, `cancel_info`, `steps[]` (state, exit code, error, times, uuid)
+  and a `stalled_hint`.
+- **`woodpecker_list_pipelines`** sends `perPage` (it sent `limit`, which Woodpecker
+  ignores, so `limit=2` returned 50), and sends `status`, `branch`, `event`, `ref`,
+  `before` and `after` to the server instead of filtering one page locally. Rows are now
+  `pipeline_id` (the number) and `internal_id` instead of `number` and `id`, and carry
+  `ref`, `commit` and a bounded `message`.
+- **`woodpecker_get_logs`** reads through the reader. With no `step_name` it picks the first
+  failed step, else the first running one, else the first, and says which in
+  `selected_by` (it always took `clone`). A failed step defaults to `tail`. A step name in
+  two workflows needs `workflow` instead of silently taking the first. A step that has not
+  started returns its `state` and `lines: null`, not an empty list. The `notice` field is
+  gone; `truncated` is always present.
+- **`gitea_actions get_job_log`** returns a bounded, scrubbed view (`lines`, or `segments`
+  with `grep`) instead of the whole raw log under `log`. New view parameters: `mode`,
+  `offset`, `log_limit`, `grep`, `ignore_case`, `context`.
+- The `github_actions get_run_logs` docstring no longer says job logs are only a zip.
+
+### Security
+
+- **Path-segment and anchor hardening in the argument validators.** The `owner/repo` check
+  used by the Woodpecker, Gitea and GitHub tools now refuses `.` and `..` as a segment (both
+  segments go into request paths), and every `^…$` validator is anchored with `\Z`, so a
+  trailing newline no longer passes. This covers repo, owner, tag, workflow, ref, remote-name,
+  scp-remote and GitLab project checks.
+- **CI log bodies are byte-capped before parsing** (32 MiB), and the read stops at the cap:
+  Woodpecker log and config responses (refused at or past the cap), and Gitea job logs (cut, and
+  flagged `download_cut`).
+- **A cut log drops its partial last line.** The cap can fall inside a token, which the
+  scrubber can't recognise by halves; `tail` returned exactly that line. Everything after
+  the last newline of a cut body is now dropped (GitHub and Gitea job logs).
+- **The signed Actions log URL no longer reaches the DEBUG log** when GitHub sends it, as
+  a lowercase `https://` Location. httpcore's trace line for the 302 carried the `Location`
+  header; its query is now redacted, as the httpx INFO line's already was. A Location with
+  an upper- or mixed-case scheme, or `http://`, is not redacted in that trace line
+  (DEBUG only; deferred).
+
+### Fixed (review of this release, before merge)
+
+- `grep` matched only the first 2,000 characters of a line (the display cut), so a later
+  hit read as `match_count: 0`. It now matches the whole scrubbed line.
+- With `context`, `grep` spent the line budget on the context before a hit; each hit is now
+  taken first. A `range` grep with no hit returns `returned_to` at the end of the scanned
+  range, so paging advances.
+- A body that ends exactly on the cap no longer waits for one more chunk.
+- Log and config reads from a server that compresses responses (`content-encoding: gzip`)
+  failed while rebuilding the response; the body-framing headers are now dropped.
+- `github_commit_checks`: an error while reading annotations keeps the status answer and
+  sets `annotations_error`; `statuses_truncated` flags a partial first page;
+  `annotations_truncated` is also true when check runs past 100 were never inspected.
+- `woodpecker_pipeline_cancel` validates `pipeline_id` like the other pipeline tools.
+
 ## [0.17.0] — 2026-10-26
 
 Dependencies are locked. No tool or behaviour changes.
