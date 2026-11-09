@@ -5,11 +5,13 @@
 
 Unified local + multi-provider git MCP server with a per-agent audit trail as a first-class feature.
 
-Every tool call is tagged with the caller agent (`AGENT_ID`), written to a structured JSONL audit log, and write operations emit agent-bus events. Local git operations run entirely through gitpython — no subprocess, no injection risk.
+## Overview
+
+Every tool call is tagged with the caller agent (`AGENT_ID`) and written to a structured JSONL audit log; a successful write call also records what it changed (see [What a call changed](#what-a-call-changed-effect-0190)). Local git operations run entirely through gitpython — no subprocess, no injection risk.
 
 ## Architecture
 
-Every tool call dispatches to one provider and writes a signed audit entry before returning; write operations additionally emit an agent-bus event.
+Every tool call dispatches to one provider and writes an audit entry before returning, HMAC-signed when `AUDIT_SIGNING_KEY` is set. With an OTLP endpoint configured, the call also exports a span and metrics.
 
 ```mermaid
 flowchart LR
@@ -26,7 +28,7 @@ flowchart LR
     glab --> audit
     wp --> audit
     audit -->|HMAC-signed JSONL| logfile[(audit log)]
-    tool -.->|write ops| bus[[agent-bus event]]
+    audit -.->|spans + metrics, opt-in| otel[[OTLP exporter]]
 ```
 
 Path-taking tools resolve separate read and write allowlists before touching the
@@ -66,7 +68,7 @@ flowchart TD
 | Official Gitea MCP | Gitea only | No local git, no GitHub/GitLab |
 | `j04n-f/woodpecker-mcp` | Woodpecker (6 read-only tools) | No trigger/cancel — githost already exceeds it |
 
-**githost-mcp fills the gap:** local git + multi-provider remote via native APIs + per-agent structured audit trail. As of the Tier-1 parity release it matches the single-provider servers on PR/MR review + diff, CI trigger/rerun/cancel, full release CRUD, and issues — across all three providers behind one audited server.
+**githost-mcp fills the gap:** local git + multi-provider remote via native APIs + per-agent structured audit trail. It matches the single-provider servers on PR/MR review + diff, CI trigger/rerun/cancel, full release CRUD, and issues — across all three providers behind one audited server.
 
 ## Tools (79 total)
 
@@ -103,8 +105,11 @@ computes the path:
 `~` is the broker's own home. The path is validated against the write roots. An existing
 path is refused, never merged into, and a symlink at the destination is refused, never
 followed. Submodules are not cloned, since `.gitmodules` URLs are content the cloned repo
-controls. The clone is killed after 120 s, and a failed clone removes only the directory
-the call created.
+controls. As of 0.21.0 the clone goes into a fresh temporary directory beside the
+destination and is renamed into place with a rename that refuses an existing destination,
+so a path that appears while git runs is refused too. On a system without `renameat2`
+it falls back to a check followed by a plain rename and logs `rename_noreplace_unavailable`.
+The clone is killed after 120 s, and a failed clone removes only its temporary directory.
 
 Glob-scoped grants (see [Write glob scoping](#write-glob-scoping)) are handled strictly:
 
@@ -183,7 +188,15 @@ never named.
 
 The same check covers every caller-supplied name that reaches a push (as of 0.20.0):
 `git_push`'s `branch` (and `remote`), `git_tag`'s `tag_name` and `release`'s tag. Anything
-that is not a plain name is refused before anything is pushed.
+that is not a plain name is refused before anything is pushed. The ref namespace is pinned
+as well: `git_push` pushes one existing local branch to the same-named remote branch
+(`refs/heads/<name>:refs/heads/<name>`), never a tag or another ref, and `git_tag` and
+`release` push under `refs/tags/` only.
+
+The `ref` of `gitea_commit_status` and `github_commit_checks`, and the `branch`/`ref`
+filters of `woodpecker_list_pipelines`, go through `validate_ref`: a SHA or a plain
+branch/tag name. As of 0.21.0 it accepts a leading `_` and `#`, which are valid branch names, and
+refuses a path component that starts with `.` and a `.lock` suffix.
 
 `git_remote` refuses a URL that embeds credentials rather than redacting it — unlike text
 on its way out to a caller, a remote URL is written to `.git/config`, where a token would
@@ -203,7 +216,7 @@ credential-scrubbed (see Credential isolation below). On success, a missing upst
 set automatically and reported as `upstream_set: true`.
 
 ### GitHub (21)
-`github_repo_get`, `github_repo_create`, `github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run/rerun/rerun_failed/cancel/logs/list_jobs/get_job_log)*, `github_commit_checks`, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_update`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
+`github_repo_get`, `github_repo_create`, `github_create_release`, `github_get_release`, `github_list_releases`, `github_release_update`, `github_release_delete`, `github_workflow_list`, `github_workflow_status`, `github_actions` *(run_workflow/rerun_workflow/rerun_failed_jobs/cancel_run/get_run_logs/list_jobs/get_job_log)*, `github_commit_checks`, `github_fork`, `github_pr_list`, `github_pr_comments`, `github_pr_create`, `github_pr_get`, `github_pr_update`, `github_pr_merge`, `github_pr_review` *(get_diff/get_files/get_reviews/submit_review/dismiss_review)*, `github_issue_read` *(get/list/comments)*, `github_issue_write` *(create/update/add_comment/close/reopen)*
 
 `github_pr_update(repo, pr_number, title=None, body=None, base=None,
 ready_for_review=False)` (as of 0.15.0) edits title, body or base, and with
@@ -319,7 +332,8 @@ id comes back separately as `internal_id`, for reference only; no tool accepts i
 `woodpecker_get_logs`, `woodpecker_pipeline_config`, `gitea_actions get_job_log` and
 `github_actions get_job_log` share one bounded, scrubbed reader (`logview.py`, 0.18.0):
 
-- `mode`: `tail`, `head` or `range` (`offset`, `limit`). Line numbers are 0-based;
+- `mode`: `tail`, `head` or `range` (`offset`, and `limit` on the Woodpecker tools or
+  `log_limit` on `gitea_actions`/`github_actions`). Line numbers are 0-based;
   `returned_to` is exclusive, so the next page starts at `offset=returned_to`. A `range`
   page that returns nothing (a grep with no hit) still sets `returned_to` to the end of
   the scanned range, so paging advances.
@@ -374,7 +388,8 @@ ship without a HITL gate. Three pieces make that checkable by a machine:
   irreversible registry publish in a repo that publishes on a tag, a release or a
   dispatch, `github_actions`/`gitlab_pipeline` can cancel a pipeline, and `git_push` can
   fast-forward a default branch (the effect the merge gate exists for), with server-side
-  branch protection as the only control. githost puts no control on those today. `effects.py` gives the reason for each, and their gating is
+  branch protection as the only control. `woodpecker_trigger` and `woodpecker_restart`
+  start or re-run whatever pipeline the repo defines. githost puts no control on those today. `effects.py` gives the reason for each, and their gating is
   an open decision (vikunja#1440).
 - **`githost-mcp --list-tools [--json]`** prints every registered tool with its `kind`
   (`read` | `effect`) and `hitl` flag, then exits. It starts no server, needs no env var,
@@ -383,13 +398,13 @@ ship without a HITL gate. Three pieces make that checkable by a machine:
 
   ```bash
   $ githost-mcp --list-tools --json
-  {"server": "githost-mcp", "version": "0.20.0",
+  {"server": "githost-mcp", "version": "0.21.0",
    "tools": [{"name": "audit_log_query", "kind": "read", "hitl": false}, ...]}
   ```
-- **The consumer is in forge's host-forge/scripts:** `grant-lint.py --tools
-  githost-mcp=-` reads that JSON. It refuses a manifest that grants a `hitl: true` tool not
-  listed in its `hitl.approval_required`, and names allowlist entries the server no longer
-  serves. `githost-grant-gate.sh <venv>` runs it before githost-mcp restarts on a new wheel.
+- **A deploy-time grant linter consumes that JSON.** The one this project is deployed
+  with refuses a manifest that grants a `hitl: true` tool not listed in its
+  `hitl.approval_required`, and names allowlist entries the server no longer serves. It
+  runs against the new venv before githost-mcp restarts on a new wheel.
 
 ## Audit Architecture
 
@@ -467,7 +482,8 @@ said only that the call succeeded — `git_commit` recorded `{repo_path, identit
 Rules:
 
 - **Counts and ids only.** No commit message, PR or issue body, file name, URL or log text
-  goes into `effect`. Strings are scrubbed (configured tokens, then URL userinfo by shape)
+  goes into `effect`. Strings are scrubbed through `security.scrub()` (configured tokens,
+  URL userinfo and credential shapes; see [Credential isolation](#credential-isolation))
   and then bounded: 256 characters, 16 list items, 16 fields, one level of nesting.
 - A field that could not be determined is `null` and named in `effect_incomplete`. The call
   still succeeds — telemetry never fails a tool call.
@@ -488,8 +504,8 @@ Every entry carries `run_id`, `task_id`, `session_id` and `trace_id`, `null` whe
   `[A-Za-z0-9._:-]{1,128}`; anything else is dropped and named in `correlation_invalid`,
   never recorded. githost-mcp's own MCP session id is useless here: scoped-mcp opens a new
   HTTP connection per call.
-- `trace_id` is the OTel trace of the `githost.<tool>` span. It joins an entry to SigNoz even
-  for an interactive session that has no run id.
+- `trace_id` is the OTel trace of the `githost.<tool>` span. It joins an entry to its trace
+  in your tracing backend even for an interactive session that has no run id.
 
 These ids are attribution, not authorization — see
 [Forwarded correlation ids](#forwarded-correlation-ids).
@@ -628,11 +644,9 @@ granted **no access at all**). `access: readwrite` continues to populate both re
 write lists.
 
 **Roots are matched as written (0.21.0).** A root is expanded (`~`) and normalised, never
-resolved, and only the requested path is resolved. Before, the root was resolved at check
-time, so replacing a root directory with a symlink moved the grant to the link's target. A
-root that is itself a symlink is refused: at load (logged as
-`allowlist_root_refused_symlink` with its path) and at check time (named in the refusal).
-host-forge/scripts' `workspace_policy.py` applies the same rule.
+resolved, and only the requested path is resolved. A root that is itself a symlink is
+refused: at load (logged as `allowlist_root_refused_symlink` with its path) and at check
+time (named in the refusal).
 
 **When no source yields a root for the requested operation, it is denied** — fail closed,
 not open. A malformed or unreadable manifest or policy file resolves to zero roots rather
@@ -819,9 +833,8 @@ Subprocess output (`twine`, `npm`, `python -m build`) is scrubbed before it is c
 characters, not after: cutting first could split a token past recognition.
 
 **Publish child environment (0.21.0, vikunja#610).** `python -m build` runs the
-repository's own build backend, and `npm publish` its lifecycle scripts, so before 0.21.0
-repository code received githost's whole environment, every forge token included.
-`clean_env()` is now an allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`,
+repository's own build backend, and `npm publish` its lifecycle scripts, so publish
+children run repository code. `clean_env()` gives them an allowlisted environment (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`,
 `LANG`, `TZ`, `TMPDIR` and the seven POSIX `LC_*` names), and each call site adds the one
 credential its child needs (`TWINE_PASSWORD`, `NPM_TOKEN`). Tests run a real
 `python -m build` and a real `npm pack` with code that writes the environment it got.
@@ -860,7 +873,7 @@ these ids, and nothing should: they are validated for shape, recorded, and that 
 
 ### HTTP transport surface
 
-`TRANSPORT=http` (see [Deploy](#deploy)) opens a local network listener where stdio mode has
+`TRANSPORT=http` (see [Deployment](#deployment)) opens a local network listener where stdio mode has
 none. Two controls are mandatory together, not either/or:
 
 - **Loopback-only bind, fail closed.** `main()` refuses to start if `HTTP_HOST` resolves to
@@ -880,6 +893,39 @@ a token under 16 characters — both are config errors, not a supported deploy s
 
 ## Environment Variables
 
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `AGENT_ID` | yes | `unknown` | Agent attribution on every audit entry and log line |
+| `AUDIT_SIGNING_KEY` | recommended (not enforced at startup) | unset: entries are unsigned | HMAC-SHA256 key for audit entries |
+| `ALLOWED_REPO_ROOTS` | one root source must yield a root | unset | Break-glass roots, same list for read and write |
+| `WORKSPACE_POLICY_PATH` | no | `/etc/forge/workspace-policy.yml` | Central grant file, checked before the manifest |
+| `AGENT_MANIFEST_PATH` | no | `~/.claude/manifests/{AGENT_ID}-agent.yml` | Manifest allowlist fallback |
+| `GIT_AGENT_NAME` / `GIT_AGENT_EMAIL` | no | `{AGENT_ID}-agent` / `{AGENT_ID}@forge` | Committer identity on repos you control |
+| `GIT_PUBLIC_NAME` / `GIT_PUBLIC_EMAIL` | no | the repo's `user.name` / `user.email` | Committer identity on public and third-party repos |
+| `FORGE_OWNED_OWNERS` | no | `TadMSTR` | Accounts/orgs you control; also the `git_clone` GitHub owner allowlist |
+| `GIT_SIGNING_KEY` | no | unset: unsigned commits | GPG key for commit signing |
+| `GITHOST_WORKTREE_ROOT` | no | `~/repos/personal/_worktrees` | Where `git_worktree add` creates worktrees |
+| `GITHUB_TOKEN`, `GITHUB_OWNER` | for GitHub tools | unset | GitHub API access |
+| `GITEA_URL`, `GITEA_TOKEN`, `GITEA_OWNER` | for Gitea tools | unset | Gitea API access |
+| `GITLAB_URL`, `GITLAB_TOKEN` | for GitLab tools | `https://gitlab.com`, unset | GitLab API access |
+| `WOODPECKER_URL`, `WOODPECKER_TOKEN` | for Woodpecker tools | unset | Woodpecker API access (`woodpecker_queue_info` needs an admin token) |
+| `PYPI_TOKEN`, `PYPI_TEST_TOKEN`, `NPM_TOKEN` | for publishing | unset | Registry credentials; each publish call adds the one its child needs to the allowlisted environment |
+| `LOG_LEVEL` | no | `INFO` | File log level (stderr is WARNING+ regardless) |
+| `LOG_FILE` | no | `/opt/appdata/githost-mcp/logs/githost-mcp.log` | Application log |
+| `AUDIT_LOG_FILE` | no | `/opt/appdata/githost-mcp/audit/githost.jsonl` | Audit JSONL |
+| `AUDIT_LOG_MAX_BYTES`, `AUDIT_LOG_BACKUP_COUNT` | no | `10485760`, `5` | Audit log rotation |
+| `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT` | no | the `AUDIT_LOG_*` values | Application log rotation |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | unset: no export | OTLP traces and metrics |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | no | `grpc` | Must match the endpoint's port |
+| `OTEL_SERVICE_NAME` | no | `githost-mcp` | Set per agent process |
+| `TRANSPORT` | no | `stdio` | `stdio` or `http` |
+| `HTTP_HOST`, `HTTP_PORT` | no (http mode only) | `127.0.0.1`, unset | HTTP listener; loopback only unless overridden; one port per agent |
+| `GITHOST_MCP_ALLOW_NONLOOPBACK` | no | unset | `1` permits a non-loopback `HTTP_HOST` |
+| `GITHOST_MCP_AUTH_TOKEN` | in http mode (startup fails without it) | unset | Bearer token, at least 16 characters |
+| `LOKI_URL`, `LOKI_LABELS`, `METRICS_PORT`, `NATS_URL`, `NATS_SUBJECT_PREFIX` | **removed in 0.19.0** | — | Ignored; a set one is logged once, by name, as `config_ignored_removed_backend` |
+
+The sections below give each group with notes.
+
 ### Required
 
 ```env
@@ -896,7 +942,7 @@ of the two must yield at least one root, or every path-taking tool is denied.
 AGENT_MANIFEST_PATH=/home/user/.claude/manifests/dev-agent.yml  # optional — allowlist fallback
 # Default: ~/.claude/manifests/{AGENT_ID}-agent.yml (only when AGENT_ID is set to a real identity)
 # The shipped ecosystem.config.js overrides this per-process to
-# /etc/forge/manifests/<agent>-agent.yml — see Deploy > Manifest allowlist path.
+# /etc/forge/manifests/<agent>-agent.yml — see Deployment > Manifest allowlist path.
 
 WORKSPACE_POLICY_PATH=/etc/forge/workspace-policy.yml  # optional — checked ahead of the manifest
 # Default: /etc/forge/workspace-policy.yml. See Security Model > Repo path allowlist for
@@ -999,7 +1045,8 @@ its `sources_searched` field reports which files a given result actually covered
 The audit directory is created `0700` when githost creates it (0.21.0); an existing
 directory keeps its mode.
 
-stderr carries WARNING and above only. As of 0.21.0 the HTTP server starts with no FastMCP
+stderr carries WARNING and above only, whatever `LOG_LEVEL` says (0.19.0); the file log
+keeps `LOG_LEVEL`. As of 0.21.0 the HTTP server starts with no FastMCP
 banner, no "Update available" notice (the update check is off in-process) and no uvicorn
 INFO lines, so PM2's `githost-mcp-<agent>-error.log` holds only what needs reading.
 
@@ -1043,7 +1090,7 @@ JSONL is the durable record.
 ### Transport (optional — default stdio)
 
 ```env
-TRANSPORT=stdio          # or "http" — see Deploy below
+TRANSPORT=stdio          # or "http" — see Deployment below
 HTTP_HOST=127.0.0.1      # http mode only; must be loopback unless overridden below
 HTTP_PORT=<port>         # http mode only; one free loopback port per agent
 GITHOST_MCP_ALLOW_NONLOOPBACK=   # set to "1" to bind a non-loopback HTTP_HOST (not recommended)
@@ -1056,7 +1103,7 @@ githost-mcp is not published to PyPI. Install from a checkout of a release tag, 
 the committed `uv.lock`, so the dependency set is the one CI tested and audited.
 
 ```bash
-VERSION=0.20.0
+VERSION=0.21.0
 VENV=/opt/venvs/githost-mcp
 
 # 1. The checkout is clean and is exactly the release tag on the remote. A local tag
@@ -1106,7 +1153,7 @@ This is `TRANSPORT=stdio` (the default): scoped-mcp spawns a fresh subprocess pe
 tears it down afterward. Simple, but OTel metrics and batched spans rarely survive that short
 a lifetime — they reset or drop every call.
 
-## Deploy
+## Deployment
 
 Transport is selected by `TRANSPORT` (`stdio` default, or `http`) so both models are supported
 by the same codebase — no fork, no rewrite to move between them.
