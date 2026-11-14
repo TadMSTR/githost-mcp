@@ -68,6 +68,9 @@ const AGENTS = {
   writer: { httpPort: 8623 },
   research: { httpPort: 8624 },
   fleet: { httpPort: 8628 },
+  // memory-sync: one repo (its distilled-notes repo), five verbs, granted by its manifest
+  // and the workspace policy. Next free port after fleet; 8625/8627 stay reserved.
+  "memory-sync": { httpPort: 8629 },
 };
 function buildApp(agentId, ports) {
   const env = parseEnvFile(path.join(HOME, ".secrets", `githost-mcp-${agentId}.env`));

@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `ecosystem.config.js`: a `githost-mcp-memory-sync` process on port 8629, for the
+  memory-sync agent's weekly commit of distilled notes. Its manifest grants five verbs
+  (`git_status`, `git_add`, `git_commit`, `git_push`, `git_log`) and the workspace policy
+  one repo. No code change.
+
 ## [0.21.0] — 2026-11-08
 
 Correctness sweep (githost-scoped-2026-11 part 4). Every tool does what it says and records
