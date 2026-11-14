@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [0.21.1] — 2026-11-14
+
+### Security
+
+- `uv.lock`: dnspython 2.9.0 → 2.9.2 (CVE-2026-128089) and opentelemetry-api 1.45.1 →
+  1.45.2 (CVE-2026-126360), with opentelemetry-sdk 1.45.2 and
+  opentelemetry-semantic-conventions 0.66b2 moving alongside. The Dependency audit job
+  failed on both once the advisories were published. No code change.
 
 ### Added
 
