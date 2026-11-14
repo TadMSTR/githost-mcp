@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.21.1] — 2026-11-14
+
+### Security
+
+- `uv.lock`: dnspython 2.9.0 → 2.9.2 (CVE-2026-128089) and opentelemetry-api 1.45.1 →
+  1.45.2 (CVE-2026-126360), with opentelemetry-sdk 1.45.2 and
+  opentelemetry-semantic-conventions 0.66b2 moving alongside. The Dependency audit job
+  failed on both once the advisories were published. No code change.
+- `pyproject.toml`: the `otel` extra's `opentelemetry-api` floor rises to 1.45.2, so a pip
+  install of `githost-mcp[otel]` can no longer keep 1.45.1.
+
+### Added
+
+- `ecosystem.config.js`: a `githost-mcp-memory-sync` process on port 8629, for the
+  memory-sync agent's weekly commit of distilled notes. Its manifest grants five verbs
+  (`git_status`, `git_add`, `git_commit`, `git_push`, `git_log`), and the workspace policy
+  gives it write on one repo. No code change.
+
 ## [0.21.0] — 2026-11-08
 
 Correctness sweep (githost-scoped-2026-11 part 4). Every tool does what it says and records

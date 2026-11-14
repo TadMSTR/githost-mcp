@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "githost-mcp"
-version = "0.21.0"
+version = "0.21.1"
 description = "Unified local + multi-provider git MCP server with per-agent audit trail"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -67,8 +67,9 @@ dependencies = [
 
 [project.optional-dependencies]
 otel = [
-    # opentelemetry-api 1.45.1: CVE-2026-114603. Transitive through the SDK.
-    "opentelemetry-api>=1.45.1",
+    # opentelemetry-api 1.45.2: CVE-2026-126360 (1.45.1 fixed CVE-2026-114603). Transitive
+    # through the SDK.
+    "opentelemetry-api>=1.45.2",
     "opentelemetry-sdk>=1.25",
     "opentelemetry-exporter-otlp-proto-grpc>=1.25",
     "opentelemetry-exporter-otlp-proto-http>=1.25",
