@@ -9,9 +9,9 @@
 // row here to onboard a new agent, no separate generator script needed since
 // PM2 ecosystem files are plain Node and this one builds its own `apps` array.
 //
-// Secrets are NOT hardcoded here: each app reuses the same two files the
-// stdio launchers already read — ~/.secrets/forge.env (shared GITHUB_TOKEN /
-// GITEA_TOKEN / GITLAB_TOKEN / GITHOST_MCP_AUTH_TOKEN) and
+// Secrets are NOT hardcoded here: each app reads two env files — a shared one,
+// SHARED_ENV_FILE below (GITHUB_TOKEN / GITEA_TOKEN / GITLAB_TOKEN /
+// GITHOST_MCP_AUTH_TOKEN), and
 // ~/.secrets/githost-mcp-<agent>.env (GITEA_URL / GITHUB_URL, GIT_AGENT_NAME /
 // GIT_AGENT_EMAIL, AUDIT_SIGNING_KEY, LOG_FILE / AUDIT_LOG_FILE /
 // AUDIT_LOG_MAX_BYTES / AUDIT_LOG_BACKUP_COUNT / LOG_LEVEL, WOODPECKER_URL;
@@ -19,7 +19,7 @@
 // allowlist).
 //
 // GITHOST_MCP_AUTH_TOKEN is fleet-wide, not per-agent: buildApp() below reads
-// it from the per-agent file first but then applies the shared forge.env value
+// it from the per-agent file first but then applies the shared file's value
 // unconditionally, overwriting anything set there. A per-agent value in
 // githost-mcp-<agent>.env is read and silently discarded — see vikunja #408
 // for the tracked fix (would need new per-agent secrets, `headers:` blocks in
@@ -53,7 +53,9 @@ function parseEnvFile(filePath) {
 
 const HOME = os.homedir();
 const SHARED_TOKEN_KEYS = ["GITHUB_TOKEN", "GITEA_TOKEN", "GITLAB_TOKEN"];
-const sharedEnv = parseEnvFile(path.join(HOME, ".secrets", "forge.env"));
+// The shared env file. Rename it here for your host; a missing file reads as empty.
+const SHARED_ENV_FILE = path.join(HOME, ".secrets", "forge.env");
+const sharedEnv = parseEnvFile(SHARED_ENV_FILE);
 
 // AGENT_ID -> per-agent HTTP port. Contiguous range per the build plan
 // (githost-mcp-http-pm2-migration-2026-07); keep in sync with

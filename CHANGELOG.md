@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.21.2] — 2026-11-15
+
+The tool surface is unchanged: no new tool, no new parameter.
+
+### Fixed
+
+- **`woodpecker_list_pipelines(ref=...)` is an exact match** (vikunja#1449). Woodpecker
+  v3.19.0 matches the `ref` filter as a substring (`GetPipelines` sets `RefContains`, and the
+  datastore applies a `LIKE`), so `ref="refs/pull/1"` also returned PR 12's and PR 123's
+  pipelines. The filter is still sent, to narrow the page, and the rows are then kept only
+  where `ref` is equal to the argument. With `ref` set, up to 100 rows are requested before
+  that filter, then cut to `limit`. **A caller that passed a partial ref, such as
+  `refs/pull/12`, now gets nothing back. Pass the full ref, e.g. `refs/pull/12/head`.**
+- **Three paginated reads now page inside the provider span** (vikunja#1451):
+  `github_pr_comments`, `github_actions` `list_jobs` and `get_run_logs`, and
+  `github_commit_checks(annotations=True)`. They iterated a PyGithub `PaginatedList` after
+  `github_call` had closed its span, so every page request missed the span and its
+  credential masking. They now go through `github_list()`. The 50-annotation cap,
+  `annotations_truncated` and `annotations_error` are unchanged, with one difference: a check
+  run whose annotation paging fails part-way now contributes none of its annotations, where it
+  used to keep the ones read before the failure. Annotations from the runs before it are kept.
+- **The `git_clone` branch refusal names the branch it refused** (vikunja#1230). For an agent
+  whose grant carries `write_globs_deny`, any explicit `branch=` is refused, the default
+  branch's own name included, but the message always said `(non-default branch)`. It now
+  says `(explicit branch 'main')` and to omit `branch`.
+
+### Changed
+
+- `LOG_FILE` and `AUDIT_LOG_FILE` default to `~/.local/state/githost-mcp/logs/githost-mcp.log`
+  and `~/.local/state/githost-mcp/audit/githost.jsonl`, replacing one host's `/opt/appdata`
+  paths (vikunja#1274). A leading `~` in a set value is now expanded too; an absolute path is
+  unchanged. A deployment that sets both variables, as the shipped `ecosystem.config.js` does
+  through each agent's env file, sees no change. `ecosystem.config.js` names its shared env
+  file once, as `SHARED_ENV_FILE`.
+
 ## [0.21.1] — 2026-11-14
 
 ### Security

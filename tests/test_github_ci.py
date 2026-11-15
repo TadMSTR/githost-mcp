@@ -330,21 +330,25 @@ def test_commit_checks_annotations_truncated_when_runs_capped(tools):
 
 
 def test_commit_checks_annotation_error_keeps_status_answer(tools):
-    # F-06: a failure while paging annotations keeps the runs and the state.
+    # F-06: a failure while paging annotations keeps the runs, the state, and the
+    # annotations of every run read before it. Since vikunja#1451 a run's annotations are
+    # read whole inside the provider span, so the failing run itself contributes none.
     class _Pages:
         def __iter__(self):
-            yield _annotation(1)
+            yield _annotation(2)
             raise RuntimeError("403 rate limit token ghp_" + "x" * 36)
 
+    good = _check_run("lint", "failure", [_annotation(1)])
     bad = _check_run("test", "failure")
     bad.get_annotations.return_value = _Pages()
-    gh, _ = _commit_gh([bad])
+    gh, _ = _commit_gh([good, bad])
     p1, p2 = _patch_gh(gh)
     with p1, p2:
         r = tools["github_commit_checks"]("owner/repo", "main", annotations=True)
     assert "error" not in r
-    assert r["state"] == "success" and r["check_runs"][0]["name"] == "test"
-    assert len(r["annotations"]) == 1
+    assert r["state"] == "success"
+    assert [c["name"] for c in r["check_runs"]] == ["lint", "test"]
+    assert [a["check_run"] for a in r["annotations"]] == ["lint"]
     assert "rate limit" in r["annotations_error"]
     # The planted token is unconfigured; since 0.21.0 scrub() masks it by shape (#913).
     # Before, this test planted it and never looked (#1431 R2-04).

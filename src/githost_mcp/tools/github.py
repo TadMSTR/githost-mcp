@@ -370,7 +370,7 @@ def register(mcp) -> None:
             gh_repo = github_call(gh.get_repo, repo)
             pr = github_call(gh_repo.get_pull, pr_number)
             comments = []
-            for c in github_call(pr.get_issue_comments):
+            for c in github_list(pr.get_issue_comments):
                 comments.append(
                     {
                         "id": c.id,
@@ -953,7 +953,7 @@ def register(mcp) -> None:
                             for st in (j.steps or [])
                         ],
                     }
-                    for j in github_call(run.jobs)
+                    for j in github_list(run.jobs)
                 ]
                 ac.finish("ok")
                 return {"repo": repo, "run_id": run_id, "jobs": jobs}
@@ -967,7 +967,7 @@ def register(mcp) -> None:
                     "conclusion": j.conclusion,
                     "url": j.html_url,
                 }
-                for j in github_call(run.jobs)
+                for j in github_list(run.jobs)
             ]
             ac.finish("ok")
             return {
@@ -1061,10 +1061,10 @@ def register(mcp) -> None:
                     for cr in runs:
                         if cr.conclusion not in _FAILED_CONCLUSIONS:
                             continue
-                        # SECURITY[deferred]: this read, PR comments and workflow jobs still
-                        # fetch pages outside their span. Ticket vikunja#1451. Target: open.
-                        # Audit: 2026-11-08/githost-scoped-2026-11-p4-githost-correctness (CR-18).
-                        for a in github_call(cr.get_annotations):
+                        # Read inside the provider span (vikunja#1451): one more than the
+                        # room left, so `more` is still detected without a further page.
+                        room = _MAX_ANNOTATIONS - len(found)
+                        for a in github_list(cr.get_annotations, limit=room + 1):
                             if len(found) >= _MAX_ANNOTATIONS:
                                 more = True
                                 break

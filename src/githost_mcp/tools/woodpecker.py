@@ -399,7 +399,12 @@ def register(mcp) -> None:
             event: Webhook event, or several comma-separated: push, pull_request,
                 pull_request_closed, pull_request_metadata, tag, release, deployment,
                 cron, manual.
-            ref: Only pipelines whose ref contains this string (e.g. 'refs/pull/12').
+            ref: Only pipelines whose ref is exactly this (e.g. 'refs/pull/12/head').
+                The server's own filter is a substring match, so `refs/pull/1` would also
+                return PR 12's pipelines. The filter is still sent, to narrow the page, and
+                the rows are then kept only on an exact match. With `ref`, up to 100 rows
+                are requested before that filter, so a page of near-misses can still return
+                fewer than `limit` rows.
             before: Only pipelines created before this RFC3339 time.
             after: Only pipelines created after this RFC3339 time.
         """
@@ -431,11 +436,13 @@ def register(mcp) -> None:
                 validate_ref(branch)
                 params["branch"] = branch
             if ref is not None:
-                # SECURITY[deferred]: whether Woodpecker's list filter matches `ref` exactly or
-                # as a substring is unverified. Ticket vikunja#1449. Target: open.
-                # Audit: 2026-11-08/githost-scoped-2026-11-p4-githost-correctness (CR-12).
+                # Woodpecker v3.19.0 matches `ref` as a substring (GetPipelines sets
+                # RefContains; the datastore applies a LIKE), so the rows are filtered to an
+                # exact match below (vikunja#1449). The full page is requested so that rows
+                # dropped there do not shrink the result below `limit` more than they must.
                 validate_ref(ref)
                 params["ref"] = ref
+                params["perPage"] = 100
             if before is not None:
                 _validate_rfc3339("before", before)
                 params["before"] = before
@@ -468,6 +475,8 @@ def register(mcp) -> None:
             # perPage is the server's own bound; the slice is a guard against a server
             # that ignores it (the bug this replaced sent `limit`, and got 50 back).
             pipelines = [_pipeline_row(p) for p in (data if isinstance(data, list) else [])]
+            if ref is not None:
+                pipelines = [p for p in pipelines if p["ref"] == ref]
             ac.finish("ok")
             return {"repo": repo, "pipelines": pipelines[:limit]}
         except Exception as e:

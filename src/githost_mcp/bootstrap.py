@@ -246,12 +246,16 @@ def ensure_no_branch_for_denied_paths(branch: str | None, write_globs_deny: list
     reviewed or not. For an agent that may not write, say, `manifests/**`, that would make
     an unmerged branch's denied files land on disk under its roots. The default branch is
     still cloneable, and its tree is then checked by ensure_no_denied_paths().
+
+    Any explicit `branch` is refused, the default branch's own name included: this check
+    runs before anything asks the remote which branch is its default. The message names
+    the branch it refused (vikunja#1230). git_clone validates `branch` before this runs.
     """
     if branch is not None and write_globs_deny:
         raise WriteGlobDenied(
             f"branch={branch!r}",
-            ["(non-default branch)"],
-            "this agent's grant carries write_globs_deny; clone the default branch",
+            [f"(explicit branch {branch!r})"],
+            "this agent's grant carries write_globs_deny; omit branch to clone the default branch",
         )
 
 
