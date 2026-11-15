@@ -913,6 +913,22 @@ def test_git_clone_deny_scoped_agent_cannot_pick_a_branch(local_tools, env):
     assert _entries()[-1]["result"] == "denied:write_glob"
 
 
+@pytest.mark.parametrize("branch", ["feature", "main"])
+def test_git_clone_deny_refusal_names_the_branch(local_tools, env, branch):
+    """vikunja#1230: the refusal named every branch "(non-default branch)", main included."""
+    scoped = _deny_scoped()
+    with (
+        patch("githost_mcp.tools.git_local.get_config", return_value=scoped),
+        patch("githost_mcp.security.get_config", return_value=scoped),
+        patch("githost_mcp.tools.git_local.run_clone") as run,
+    ):
+        result = local_tools["git_clone"]("github", "TadMSTR", "x", branch=branch)
+    run.assert_not_called()
+    assert f"(explicit branch '{branch}')" in result["error"]
+    assert "non-default" not in result["error"]
+    assert "omit branch to clone the default branch" in result["error"]
+
+
 def _origin_with(tmp_path, files):
     bare = git.Repo.init(tmp_path / "withfiles.git", bare=True, initial_branch="main")
     seed = git.Repo.clone_from(bare.git_dir, tmp_path / "seed-files")

@@ -176,6 +176,54 @@ async def test_list_forwards_every_filter_to_the_server(tools):
 
 
 @pytest.mark.asyncio
+async def test_list_ref_filter_is_an_exact_match(tools):
+    """vikunja#1449: Woodpecker's `ref` filter is a substring match server-side."""
+    rows = [
+        {"id": 3001, "number": 201, "status": "success", "ref": "refs/pull/12/head"},
+        {"id": 3002, "number": 202, "status": "success", "ref": "refs/pull/1/head"},
+        {"id": 3003, "number": 203, "status": "failure", "ref": "refs/pull/123/head"},
+        {"id": 3004, "number": 204, "status": "success", "ref": "refs/pull/1/head"},
+        {"id": 3005, "number": 205, "status": "success"},  # no ref at all
+    ]
+    with respx.mock:
+        _lookup()
+        route = respx.get(f"{REPO_URL}/pipelines").mock(return_value=httpx.Response(200, json=rows))
+        result = await tools["woodpecker_list_pipelines"](
+            "owner/repo", limit=5, ref="refs/pull/1/head"
+        )
+    assert [p["pipeline_id"] for p in result["pipelines"]] == [202, 204]
+    params = route.calls.last.request.url.params
+    assert params["ref"] == "refs/pull/1/head"  # still sent: it narrows the page
+    assert params["perPage"] == "100"
+
+
+@pytest.mark.asyncio
+async def test_list_ref_filter_still_honours_limit(tools):
+    rows = [{"id": 3000 + i, "number": 100 + i, "ref": "refs/pull/1/head"} for i in range(5)]
+    with respx.mock:
+        _lookup()
+        respx.get(f"{REPO_URL}/pipelines").mock(return_value=httpx.Response(200, json=rows))
+        result = await tools["woodpecker_list_pipelines"](
+            "owner/repo", limit=2, ref="refs/pull/1/head"
+        )
+    assert [p["pipeline_id"] for p in result["pipelines"]] == [100, 101]
+
+
+@pytest.mark.asyncio
+async def test_list_without_ref_keeps_every_row(tools):
+    rows = [
+        {"id": 3001, "number": 201, "ref": "refs/pull/12/head"},
+        {"id": 3002, "number": 202, "ref": "refs/heads/main"},
+    ]
+    with respx.mock:
+        _lookup()
+        route = respx.get(f"{REPO_URL}/pipelines").mock(return_value=httpx.Response(200, json=rows))
+        result = await tools["woodpecker_list_pipelines"]("owner/repo", limit=7)
+    assert [p["pipeline_id"] for p in result["pipelines"]] == [201, 202]
+    assert route.calls.last.request.url.params["perPage"] == "7"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("arg", "value"),
     [("branch", "a..b"), ("branch", "-x"), ("branch", "a b"), ("ref", "x\n"), ("ref", "a//b")],

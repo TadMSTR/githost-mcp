@@ -851,3 +851,32 @@ def test_removed_backend_variables_include_set_but_empty_and_the_label_vars(monk
         "LOKI_URL",
         "NATS_SUBJECT_PREFIX",
     ]
+
+
+def test_log_paths_default_under_the_users_state_dir(monkeypatch, tmp_path):
+    """vikunja#1274: no host-specific default; `~` follows the process's HOME."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LOG_FILE", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_FILE", raising=False)
+    reset_config()
+    config = load_config()
+    assert config.log_file == f"{tmp_path}/.local/state/githost-mcp/logs/githost-mcp.log"
+    assert config.audit_log_file == f"{tmp_path}/.local/state/githost-mcp/audit/githost.jsonl"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("~/logs/g.log", "{home}/logs/g.log"),
+        ("/srv/githost/g.log", "/srv/githost/g.log"),  # an absolute path is untouched
+        ("", ""),  # empty still means "no file", not the default
+    ],
+)
+def test_set_log_paths_expand_a_leading_tilde_only(monkeypatch, tmp_path, value, expected):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOG_FILE", value)
+    monkeypatch.setenv("AUDIT_LOG_FILE", value)
+    reset_config()
+    config = load_config()
+    assert config.log_file == expected.format(home=tmp_path)
+    assert config.audit_log_file == expected.format(home=tmp_path)

@@ -11,12 +11,19 @@ import yaml
 log = structlog.get_logger(__name__)
 
 
+# Log defaults under the running user's XDG state directory (vikunja#1274). A leading
+# `~` is expanded at load, in a set value too, so the .env.example line works as
+# written; an absolute path is unchanged.
+_DEFAULT_LOG_FILE = "~/.local/state/githost-mcp/logs/githost-mcp.log"
+_DEFAULT_AUDIT_LOG_FILE = "~/.local/state/githost-mcp/audit/githost.jsonl"
+
+
 @dataclass
 class Config:
     agent_id: str = "unknown"
     log_level: str = "INFO"
-    log_file: str = "/opt/appdata/githost-mcp/logs/githost-mcp.log"
-    audit_log_file: str = "/opt/appdata/githost-mcp/audit/githost.jsonl"
+    log_file: str = os.path.expanduser(_DEFAULT_LOG_FILE)
+    audit_log_file: str = os.path.expanduser(_DEFAULT_AUDIT_LOG_FILE)
     # These govern the audit JSONL. They used to be consumed by the *application*
     # log's handler instead, so the audit log itself never rotated at all.
     audit_log_max_bytes: int = 10_485_760
@@ -378,8 +385,8 @@ def load_config() -> Config:
     return Config(
         agent_id=_agent_id,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
-        log_file=os.getenv("LOG_FILE", "/opt/appdata/githost-mcp/logs/githost-mcp.log"),
-        audit_log_file=os.getenv("AUDIT_LOG_FILE", "/opt/appdata/githost-mcp/audit/githost.jsonl"),
+        log_file=os.path.expanduser(os.getenv("LOG_FILE", _DEFAULT_LOG_FILE)),
+        audit_log_file=os.path.expanduser(os.getenv("AUDIT_LOG_FILE", _DEFAULT_AUDIT_LOG_FILE)),
         audit_log_max_bytes=_env_int("AUDIT_LOG_MAX_BYTES", _audit_max_bytes_raw),
         audit_log_backup_count=_env_int("AUDIT_LOG_BACKUP_COUNT", _audit_backup_raw),
         log_max_bytes=_env_int("LOG_MAX_BYTES", os.getenv("LOG_MAX_BYTES", _audit_max_bytes_raw)),

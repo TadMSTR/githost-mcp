@@ -316,7 +316,9 @@ id comes back separately as `internal_id`, for reference only; no tool accepts i
 - `woodpecker_list_pipelines` sends `perPage`, and passes `status`, `branch`, `event`,
   `ref`, `before` and `after` to the server as filters (`branch` and `ref` follow the
   same rule as every other ref argument), so a failure older than the latest
-  page is still found. Rows carry `commit` and a bounded `message`.
+  page is still found. Rows carry `commit` and a bounded `message`. Woodpecker matches
+  `ref` as a substring (`refs/pull/1` also finds PR 12), so the rows are then kept only
+  where `ref` is an exact match: pass the full ref, e.g. `refs/pull/12/head`.
 - `woodpecker_restart` re-runs a pipeline's original event at that pipeline's commit, so
   an event-specific failure reproduces. That includes tag, release, deployment and cron
   pipelines (re-running whatever they publish or deploy) and old commits. `woodpecker_trigger` creates a `manual` run
@@ -911,8 +913,8 @@ a token under 16 characters — both are config errors, not a supported deploy s
 | `WOODPECKER_URL`, `WOODPECKER_TOKEN` | for Woodpecker tools | unset | Woodpecker API access (`woodpecker_queue_info` needs an admin token) |
 | `PYPI_TOKEN`, `PYPI_TEST_TOKEN`, `NPM_TOKEN` | for publishing | unset | Registry credentials; each publish call adds the one its child needs to the allowlisted environment |
 | `LOG_LEVEL` | no | `INFO` | File log level (stderr is WARNING+ regardless) |
-| `LOG_FILE` | no | `/opt/appdata/githost-mcp/logs/githost-mcp.log` | Application log |
-| `AUDIT_LOG_FILE` | no | `/opt/appdata/githost-mcp/audit/githost.jsonl` | Audit JSONL |
+| `LOG_FILE` | no | `~/.local/state/githost-mcp/logs/githost-mcp.log` | Application log |
+| `AUDIT_LOG_FILE` | no | `~/.local/state/githost-mcp/audit/githost.jsonl` | Audit JSONL |
 | `AUDIT_LOG_MAX_BYTES`, `AUDIT_LOG_BACKUP_COUNT` | no | `10485760`, `5` | Audit log rotation |
 | `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT` | no | the `AUDIT_LOG_*` values | Application log rotation |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | unset: no export | OTLP traces and metrics |
@@ -1025,8 +1027,8 @@ NPM_TOKEN=<automation token>
 
 ```env
 LOG_LEVEL=INFO
-LOG_FILE=/opt/appdata/githost-mcp/logs/githost-mcp.log      # default
-AUDIT_LOG_FILE=/opt/appdata/githost-mcp/audit/githost.jsonl  # default
+LOG_FILE=~/.local/state/githost-mcp/logs/githost-mcp.log      # default
+AUDIT_LOG_FILE=~/.local/state/githost-mcp/audit/githost.jsonl  # default
 
 # Audit JSONL rotation
 AUDIT_LOG_MAX_BYTES=10485760     # default 10 MB; 0 disables rotation
